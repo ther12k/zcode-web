@@ -1,0 +1,73 @@
+/* ZWUI-005: graphite/sage design tokens — single source of visual truth. */
+:root {
+  /* surfaces */
+  --bg: #101418;
+  --bg-panel: #161b21;
+  --bg-raised: #1c232b;
+  --bg-input: #1a2129;
+  --bg-overlay: rgba(8, 10, 13, 0.72);
+
+  /* text */
+  --text: #e2e8f0;
+  --text-muted: #8b98a5;
+  --text-faint: #5c6873;
+
+  /* sage accent scale */
+  --sage-100: #dce8e0;
+  --sage-300: #a8c5b4;
+  --sage-500: #7aa890;
+  --sage-600: #5f8a74;
+  --sage-700: #496b59;
+
+  /* graphite accent scale */
+  --graphite-300: #94a3b3;
+  --graphite-500: #64748b;
+  --graphite-700: #334155;
+
+  /* semantic */
+  --danger: #e5645f;
+  --warning: #d9a648;
+  --success: #6fbf8f;
+  --focus: #8ecdb6;
+
+  /* borders */
+  --border: #27303a;
+  --border-strong: #36414d;
+
+  /* typography */
+  --font-ui: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  --fs-xs: 11px;
+  --fs-sm: 12.5px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+
+  /* spacing scale (4px base) */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+
+  /* radii */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-full: 999px;
+
+  /* z-layers */
+  --z-dropdown: 100;
+  --z-overlay: 200;
+  --z-palette: 300;
+
+  /* motion */
+  --transition: 140ms ease;
+
+  color-scheme: dark;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --transition: 0ms; }
+}
