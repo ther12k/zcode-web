@@ -274,14 +274,50 @@ async function refreshSessions() {
 async function openSession(sessionId) {
   state.sessionId = sessionId;
   $("messages").innerHTML = "";
+  state.loadedTurns = 0;
+  await loadTurns(sessionId, { reset: true });
+  refreshSessions();
+}
+
+// Fetch one page of turns (newest-first pagination, prepended when older).
+async function loadTurns(sessionId, { reset = false } = {}) {
+  const limit = 5;
+  const offset = reset ? 0 : state.loadedTurns;
   try {
-    const { session, transcript } = await api(`/api/sessions/${sessionId}`);
-    if (!transcript.length) addEmptyHint("Session is empty — send a message to continue it.");
-    for (const turn of transcript) addMsg(turn.role, turn.text);
+    const { transcript, total, hasMore } = await api(
+      `/api/sessions/${sessionId}?limit=${limit}&offset=${offset}`
+    );
+    if (reset && !transcript.length) {
+      addEmptyHint("Session is empty — send a message to continue it.");
+      return;
+    }
+    // remove a previous "load earlier" button, then prepend older turns
+    const oldBtn = $("load-earlier");
+    if (oldBtn) oldBtn.remove();
+    const anchor = $("messages").firstChild;
+    if (hasMore) {
+      const btn = document.createElement("button");
+      btn.id = "load-earlier";
+      btn.className = "load-earlier";
+      btn.textContent = `Load earlier messages (${total - offset - transcript.length} more)`;
+      btn.onclick = () => loadTurns(sessionId);
+      $("messages").insertBefore(btn, anchor);
+    }
+    for (const turn of transcript) {
+      const msgEl = document.createElement("div");
+      msgEl.className = `msg ${turn.role}`;
+      const roleEl = document.createElement("div");
+      roleEl.className = "role";
+      roleEl.textContent = turn.role;
+      msgEl.appendChild(roleEl);
+      msgEl.appendChild(turn.role === "assistant" ? renderMarkdown(turn.text) : document.createTextNode(turn.text));
+      $("messages").insertBefore(msgEl, anchor);
+    }
+    state.loadedTurns = offset + transcript.length;
+    if (reset) $("chat").scrollTop = $("chat").scrollHeight;
   } catch (e) {
     addEmptyHint(`Could not load session: ${e.message}`);
   }
-  refreshSessions();
 }
 
 function addEmptyHint(text) {

@@ -110,7 +110,8 @@ function serveStatic(res, pathname) {
   }
   res.writeHead(200, {
     "content-type": MIME[extname(file)] || "application/octet-stream",
-    "cache-control": "no-cache",
+    // no-store: UI updates must be picked up on a normal refresh
+    "cache-control": "no-store",
   });
   res.end(readFileSync(file));
 }
@@ -230,7 +231,10 @@ async function handleApi(req, res, url) {
   if (sessionMatch && req.method === "GET") {
     const session = store.get(sessionMatch[1]);
     if (!session) return sendJson(res, 404, { error: "session not found" });
-    return sendJson(res, 200, { session, transcript: store.transcript(session.id) });
+    const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 5, 1), 400);
+    const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0);
+    const { turns, total, hasMore } = store.transcript(session.id, { limit, offset });
+    return sendJson(res, 200, { session, transcript: turns, total, hasMore });
   }
 
   if (route === "/api/models" && req.method === "GET") {

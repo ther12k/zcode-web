@@ -67,14 +67,18 @@ export class SessionStore {
 
   // Renderable transcript: user/assistant turns with their text parts.
   // Note: role lives inside message.data JSON, not as a column.
-  transcript(sessionId, limit = 400) {
+  //
+  // Pagination counts from the newest turn: offset=0, limit=5 returns the
+  // LAST 5 turns (the ones shown when opening a session); offset=5 returns
+  // the 5 before those, etc.
+  transcript(sessionId, { limit = 400, offset = 0 } = {}) {
     const rows = this.query(
       `SELECT m.data AS mdata, m.sequence AS mseq, p.sequence AS pseq, p.data AS pdata
          FROM part p JOIN message m ON m.id = p.message_id
         WHERE p.session_id = ?
         ORDER BY m.sequence, p.sequence
-        LIMIT ?`,
-      [sessionId, limit]
+        LIMIT 2000`,
+      [sessionId]
     );
     const turns = [];
     for (const r of rows) {
@@ -92,9 +96,15 @@ export class SessionStore {
         turns.push({ role: msg.role || "?", mseq: r.mseq, texts: text.trim() ? [text] : [], error: errMsg });
       }
     }
-    return turns.map(({ role, texts, error }) => ({
-      role,
-      text: texts.length ? texts.join("\n") : error ? `⚠ turn failed: ${error}` : "",
-    })).filter((t) => t.text);
+    const all = turns
+      .map(({ role, texts, error }) => ({
+        role,
+        text: texts.length ? texts.join("\n") : error ? `⚠ turn failed: ${error}` : "",
+      }))
+      .filter((t) => t.text);
+    const total = all.length;
+    const end = Math.max(0, total - offset);
+    const start = Math.max(0, end - limit);
+    return { turns: all.slice(start, end), total, hasMore: start > 0 };
   }
 }
