@@ -1,7 +1,7 @@
 {
   "name": "zcode-web",
   "version": "0.1.0",
-  "description": "Self-hosted web UI for the ZCode CLI agent — chat, sessions and projects in your browser, CLI local or in Docker.",
+  "description": "Self-hosted web UI for the ZCode CLI agent \u2014 chat, sessions and projects in your browser, CLI local or in Docker.",
   "type": "module",
   "private": false,
   "license": "MIT",
@@ -9,7 +9,8 @@
     "node": ">=24"
   },
   "scripts": {
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "serve:test": "ZCODE_WEB_TOKEN=e2e-token ZCODE_CLI_ENTRY=$PWD/scripts/fake-cli.mjs ZCODE_WORKSPACE_ROOT=$PWD/.e2e-ws ZCODE_HOME=$PWD/.e2e-home PORT=3472 HOST=127.0.0.1 node server/index.js"
   },
   "dependencies": {}
 }

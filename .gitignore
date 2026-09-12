@@ -13,3 +13,5 @@ node_modules/
 # web frontend (ZWUI-002)
 web/node_modules/
 web/dist/
+.e2e-ws/
+.e2e-home/

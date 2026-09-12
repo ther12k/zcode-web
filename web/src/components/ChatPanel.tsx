@@ -158,7 +158,9 @@ export function ChatPanel({
       {run.answer && (
         <div className="msg assistant">
           <div className="role">assistant</div>
-          <Markdown text={run.answer} />
+          <div className="answer">
+            <Markdown text={run.answer} />
+          </div>
         </div>
       )}
       {files.length > 0 && (

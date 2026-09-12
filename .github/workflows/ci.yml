@@ -36,3 +36,22 @@ jobs:
         run: npx vitest run
       - name: Production build
         run: npm run build
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install web deps + browsers
+        working-directory: web
+        run: |
+          npm ci
+          npx playwright install chromium --with-deps
+      - name: Browser integration tests (fake CLI)
+        working-directory: web
+        run: npx playwright test
