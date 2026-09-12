@@ -12,15 +12,24 @@ import { existsSync } from "node:fs";
 // {type:"tool", tool, callID, state:{status, input, output…}}).
 function toolSummary(part) {
   const input = part.state?.input || {};
-  const detail =
-    input.command || input.filePath || input.path || input.query ||
-    input.pattern || input.url || Object.keys(input).length
-      ? JSON.stringify(input)
-      : "";
+  const primary = input.command || input.filePath || input.path || input.query || input.pattern || input.url;
   return {
     name: part.tool || "tool",
     status: part.state?.status || "unknown",
-    detail: detail.slice(0, 160),
+    detail: String(primary || JSON.stringify(input)).slice(0, 160),
+  };
+}
+
+// Desktop artifacts are stored as file parts. Some resolve through the
+// desktop-only zcode-artifact:// protocol, so expose their metadata safely
+// rather than treating that protocol URI as a host file path.
+function fileSummary(part) {
+  return {
+    mime: part.mime || "application/octet-stream",
+    url: typeof part.url === "string" ? part.url : "",
+    size: Number(part.metadata?.sizeBytes) || null,
+    storageKind: part.metadata?.storageKind || "attachment",
+    image: part.metadata?.image || null,
   };
 }
 
@@ -107,6 +116,7 @@ export class SessionStore {
       if (last && last.mseq === r.mseq) {
         if (text.trim()) last.texts.push(text);
         else if (part.type === "tool") last.tools.push(toolSummary(part));
+        else if (part.type === "file") last.files.push(fileSummary(part));
       } else {
         const errMsg =
           msg.error?.data?.message || msg.error?.message || msg.error?.name || null;
@@ -114,6 +124,7 @@ export class SessionStore {
           role: msg.role || "?", mseq: r.mseq,
           texts: text.trim() ? [text] : [],
           tools: part.type === "tool" ? [toolSummary(part)] : [],
+          files: part.type === "file" ? [fileSummary(part)] : [],
           error: errMsg,
         });
       }
@@ -122,7 +133,8 @@ export class SessionStore {
     for (const t of turns) {
       if (t.texts.length) all.push({ role: t.role, text: t.texts.join("\n") });
       else if (t.error) all.push({ role: t.role, text: `⚠ turn failed: ${t.error}` });
-      if (t.tools) for (const tool of t.tools) all.push({ role: t.role, tool });
+      for (const tool of t.tools || []) all.push({ role: t.role, tool });
+      for (const file of t.files || []) all.push({ role: t.role, file });
     }
     const total = all.length;
     const end = Math.max(0, total - offset);

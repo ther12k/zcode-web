@@ -4,12 +4,12 @@
 
 import { createServer } from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { JobManager, cliStatus, config } from "./zcode.js";
+import { JobManager, cliStatus, config, uploadsDir } from "./zcode.js";
 import { SessionStore } from "./sessions.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -241,6 +241,40 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { models: listModels() });
   }
 
+  // Upload a file (base64 JSON body) for use as a prompt attachment. Files
+  // land in <ZCODE_HOME>/uploads and are passed to the CLI via --attach.
+  if (route === "/api/upload" && req.method === "POST") {
+    // base64 expands payloads by ~33%, plus a small JSON envelope
+    const body = JSON.parse(await readBody(req, Math.ceil(config.maxUploadBytes * 1.34) + 64 * 1024));
+    const rawName = String(body.name || "file");
+    const safeName = rawName.replace(/[^A-Za-z0-9._ -]/g, "_").replace(/^\.+/, "_").slice(0, 120);
+    const data = Buffer.from(String(body.data || ""), "base64");
+    if (!data.length) return sendJson(res, 400, { error: "empty file" });
+    if (data.length > config.maxUploadBytes) return sendJson(res, 413, { error: "file too large" });
+    const dir = uploadsDir();
+    mkdirSync(dir, { recursive: true });
+    const fname = `${Date.now()}-${safeName}`;
+    const fpath = join(dir, fname);
+    writeFileSync(fpath, data);
+    return sendJson(res, 201, { path: fpath, name: fname, size: data.length });
+  }
+
+  // Serve an uploaded file (images render inline in the chat).
+  const uploadMatch = route.match(/^\/api\/uploads\/([A-Za-z0-9._-]+)$/);
+  if (uploadMatch && (req.method === "GET" || req.method === "HEAD")) {
+    const dir = uploadsDir();
+    const file = normalize(join(dir, uploadMatch[1]));
+    if (!file.startsWith(dir + sep) || !existsSync(file)) {
+      return sendJson(res, 404, { error: "not found" });
+    }
+    res.writeHead(200, {
+      "content-type": MIME[extname(file)] || "application/octet-stream",
+      "cache-control": "private, max-age=3600",
+    });
+    if (req.method === "HEAD") return res.end();
+    return res.end(readFileSync(file));
+  }
+
   if (route === "/api/chat" && req.method === "POST") {
     const body = JSON.parse(await readBody(req, 1024 * 1024));
     const text = String(body.text || "").trim();
@@ -256,6 +290,15 @@ async function handleApi(req, res, url) {
     const mode = config.allowedModes.includes(body.mode) ? body.mode : "plan";
     // model must be a configured provider/model pair — never a free string
     const modelEntry = listModels({ withKeys: true }).find((m) => m.ref === body.model) || null;
+    // attachments must be files previously uploaded to the uploads dir
+    const upDir = uploadsDir();
+    const requested = (Array.isArray(body.attachments) ? body.attachments : [])
+      .map((p) => resolve(String(p)));
+    const bad = requested.filter((p) => !p.startsWith(upDir + sep) || !existsSync(p));
+    if (bad.length) {
+      return sendJson(res, 400, { error: "attachments must be uploaded via /api/upload first", rejected: bad });
+    }
+    const attachments = requested.slice(0, 5);
     try {
       const job = jobs.start({
         text,
@@ -265,6 +308,7 @@ async function handleApi(req, res, url) {
         model: modelEntry?.ref || null,
         modelApiKey: modelEntry?.apiKey || null,
         modelBaseUrl: modelEntry?.baseURL || null,
+        attachments,
       });
       return sendJson(res, 202, { jobId: job.id, sessionId: job.sessionId, cwd, mode, model: modelEntry?.ref || null });
     } catch (e) {

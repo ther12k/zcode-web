@@ -20,11 +20,16 @@ export const config = {
   zcodeHome: process.env.ZCODE_HOME || join(homedir(), ".zcode"),
   jobTimeoutMs: Number(process.env.ZCODE_JOB_TIMEOUT_MS || 15 * 60_000),
   maxJobs: Number(process.env.ZCODE_MAX_JOBS || 3),
+  maxUploadBytes: Number(process.env.ZCODE_MAX_UPLOAD_BYTES || 15 * 1024 * 1024),
   allowedModes: (process.env.ZCODE_ALLOWED_MODES || "plan,build,edit,yolo")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean),
 };
+
+export function uploadsDir() {
+  return join(config.zcodeHome, "uploads");
+}
 
 export function cliStatus() {
   return {
@@ -79,7 +84,7 @@ export class JobManager {
     return this.jobs.get(jobId) || null;
   }
 
-  start({ text, sessionId, cwd, mode, model, modelApiKey, modelBaseUrl }) {
+  start({ text, sessionId, cwd, mode, model, modelApiKey, modelBaseUrl, attachments }) {
     if (!existsSync(config.cliEntry)) {
       throw Object.assign(new Error("ZCode CLI bundle not found at " + config.cliEntry), { status: 503 });
     }
@@ -99,6 +104,7 @@ export class JobManager {
       "--mode", mode,
     ];
     if (sessionId) args.push("--resume", sessionId);
+    for (const p of attachments || []) args.push("--attach", p);
 
     const proc = spawn(process.execPath, args, {
       cwd,

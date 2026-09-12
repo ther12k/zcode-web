@@ -21,6 +21,13 @@ async function api(path, opts = {}) {
   return body;
 }
 
+async function authenticatedBlobUrl(path) {
+  const headers = state.token ? { authorization: `Bearer ${state.token}` } : {};
+  const res = await fetch(path, { headers });
+  if (!res.ok) throw new Error("could not load attachment");
+  return URL.createObjectURL(await res.blob());
+}
+
 function promptToken() {
   if ($("token-bar")) return;
   const bar = document.createElement("div");
@@ -142,6 +149,7 @@ function describeLine(line) {
 }
 
 function handleStreamLine(line) {
+  const p = line.payload || {};
   if (line.sessionId && !state.sessionId) {
     state.sessionId = line.sessionId;
   }
@@ -196,14 +204,79 @@ function handleStreamLine(line) {
   if (d.kind === "activity" && d.label) setActivity(d.label);
 }
 
+// ---------- attachments ----------
+
+const state2 = { pendingFiles: [] }; // module-scope would be cleaner; kept near state
+
+function renderAttachmentChips() {
+  const host = $("attachments");
+  host.innerHTML = "";
+  for (const [i, f] of state2.pendingFiles.entries()) {
+    const chip = document.createElement("span");
+    chip.className = "attach-chip";
+    chip.textContent = `${f.name} (${Math.ceil(f.size / 1024)} KB) ✕`;
+    chip.onclick = () => { state2.pendingFiles.splice(i, 1); renderAttachmentChips(); };
+    host.appendChild(chip);
+  }
+}
+
+async function fileToBase64(file) {
+  return new Promise((resolveFile, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolveFile(String(r.result).split(",")[1] || "");
+    r.onerror = () => reject(new Error("could not read " + file.name));
+    r.readAsDataURL(file);
+  });
+}
+
+async function uploadPendingFiles() {
+  const paths = [];
+  for (const f of state2.pendingFiles) {
+    setActivity(`uploading ${f.name}…`);
+    const data = await fileToBase64(f);
+    const res = await api("/api/upload", {
+      method: "POST",
+      body: JSON.stringify({ name: f.name, data }),
+    });
+    paths.push({ path: res.path, name: res.name, type: f.type, size: f.size });
+  }
+  state2.pendingFiles = [];
+  renderAttachmentChips();
+  return paths;
+}
+
 // ---------- chat ----------
 
 async function send() {
   const input = $("prompt-input");
   const text = input.value.trim();
-  if (!text || state.job) return;
+  if ((!text && !state2.pendingFiles.length) || state.job) return;
 
-  addMsg("user", text, { markdown: false });
+  let attachments = [];
+  try {
+    attachments = await uploadPendingFiles();
+  } catch (e) {
+    setActivity("upload failed: " + e.message, true);
+    return;
+  }
+
+  const userEl = addMsg("user", text || "📎 attachment", { markdown: false });
+  for (const a of attachments) {
+    if (/\.(png|jpe?g|gif|webp|bmp)$/i.test(a.name)) {
+      const img = document.createElement("img");
+      img.className = "attach-preview";
+      img.alt = a.name;
+      userEl.appendChild(img);
+      authenticatedBlobUrl(`/api/uploads/${encodeURIComponent(a.name)}`)
+        .then((url) => { img.src = url; })
+        .catch(() => { img.alt = `${a.name} (preview unavailable)`; });
+    } else {
+      const chip = document.createElement("span");
+      chip.className = "attach-chip";
+      chip.textContent = "📎 " + a.name;
+      userEl.appendChild(chip);
+    }
+  }
   input.value = "";
 
   const bubble = addMsg("assistant", "");
@@ -228,6 +301,7 @@ async function send() {
         cwd: state.cwd,
         mode: $("mode-select").value,
         model: $("model-select").value || undefined,
+        attachments: attachments.map((a) => a.path),
       }),
     });
     state.job.id = res.jobId;
@@ -251,9 +325,10 @@ function subscribe(jobId) {
     if (msg.kind === "line") handleStreamLine(msg.line);
     else if (msg.kind === "done") {
       if (msg.error) setActivity(`job failed: ${msg.error}`, true);
-      else if (state.job?.sawError) setActivity("ended with errors", true); // keep the real error visible
-      else if (msg.exitCode !== 0 && msg.exitCode !== null) setActivity(`ended with errors (exit ${msg.exitCode})`, true);
-      else setActivity("done");
+      // keep the streamed error text visible — it says more than "ended"
+      else if (!(state.job?.sawError) && msg.exitCode !== 0 && msg.exitCode !== null) {
+        setActivity(`ended with errors (exit ${msg.exitCode})`, true);
+      }
       finishJob();
     } else if (msg.kind === "timeout") {
       setActivity("job timed out and was killed", true);
@@ -354,6 +429,13 @@ async function loadTurns(sessionId, { reset = false } = {}) {
         const card = document.createElement("div");
         card.className = `tool-card ${turn.tool.status === "completed" ? "done" : turn.tool.status}`;
         card.textContent = `🔧 ${turn.tool.name} — ${turn.tool.status}${turn.tool.detail ? ": " + turn.tool.detail.slice(0, 120) : ""}`;
+        msgEl.appendChild(card);
+      } else if (turn.file) {
+        const card = document.createElement("div");
+        card.className = "artifact-card";
+        const kind = turn.file.mime.startsWith("image/") ? "🖼 image" : "📄 file";
+        const size = turn.file.size ? ` · ${Math.ceil(turn.file.size / 1024)} KB` : "";
+        card.textContent = `${kind} artifact · ${turn.file.mime}${size} · ${turn.file.storageKind}`;
         msgEl.appendChild(card);
       } else {
         msgEl.appendChild(turn.role === "assistant" ? renderMarkdown(turn.text) : document.createTextNode(turn.text));
@@ -471,6 +553,12 @@ async function boot() {
   }
 }
 
+$("attach-btn").onclick = () => $("file-input").click();
+$("file-input").onchange = () => {
+  for (const f of $("file-input").files) state2.pendingFiles.push(f);
+  renderAttachmentChips();
+  $("file-input").value = "";
+};
 $("model-select").onchange = () => localStorage.setItem("zcode-web-model", $("model-select").value);
 $("send-btn").onclick = send;
 $("cancel-btn").onclick = cancelJob;

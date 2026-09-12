@@ -38,11 +38,14 @@
       </div>
       <div id="composer">
         <div id="job-status" class="muted hidden"></div>
-        <div class="composer-row">
-          <textarea id="prompt-input" rows="2" placeholder="Ask zcode… (Enter to send, Shift+Enter for newline)"></textarea>
-          <button id="send-btn" class="primary">Send</button>
-          <button id="cancel-btn" class="danger hidden">Stop</button>
-        </div>
+      <div id="attachments"></div>
+      <div class="composer-row">
+        <button id="attach-btn" title="Attach files (images, docs…)">📎</button>
+        <input type="file" id="file-input" multiple class="hidden" />
+        <textarea id="prompt-input" rows="2" placeholder="Ask zcode… (Enter to send, Shift+Enter for newline)"></textarea>
+        <button id="send-btn" class="primary">Send</button>
+        <button id="cancel-btn" class="danger hidden">Stop</button>
+      </div>
       </div>
     </main>
   </div>

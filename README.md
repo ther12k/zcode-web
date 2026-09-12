@@ -26,7 +26,12 @@ Browser ──HTTP/SSE──> zcode-web server (this repo, zero-dep Node 24)
   message (like the desktop's model/plan selector) — served per-run via the
   CLI's `ZCODE_MODEL` env override.
 - **Streaming**: CLI events stream to the browser over SSE — model activity,
-  errors and the final response as you go.
+  reasoning (collapsible thinking block), errors, and live responses.
+- **Artifacts**: displays tool execution cards (Bash, file edits, etc.) and
+  persisted file/image artifacts from the CLI session database.
+- **Image & File Uploads**: attach local files or images directly via the paperclip
+  button; securely saved and forwarded to the agent using `--attach`.
+- **Zero npm dependencies**; Node's built-in `http`, `child_process`, `sqlite`.
 - **Zero npm dependencies**; Node's built-in `http`, `child_process`, `sqlite`.
 
 > ⚠️ **This is an agent with shell access.** Anyone who can reach the server
@@ -139,6 +144,9 @@ or an auth error against the wrong endpoint.
 | GET | `/api/health` | CLI bundle/db presence, provider config, job slots |
 | GET | `/api/config` | UI bootstrap (modes, workspace root, auth required) |
 | GET/POST | `/api/projects` | List / create project dirs under the workspace root |
+| GET | `/api/models` | Available model providers from the CLI configuration |
+| POST | `/api/upload` | Upload image or file attachment (base64 JSON body) |
+| GET | `/api/uploads/:file` | Serve an uploaded attachment file |
 | GET | `/api/sessions?cwd=…` | Sessions the CLI stored for a project |
 | GET | `/api/sessions/:id` | Session metadata + text transcript |
 | POST | `/api/chat` | `{text, sessionId?, cwd?, mode?}` → `{jobId}` |
