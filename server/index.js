@@ -4,7 +4,8 @@
 
 import { createServer } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -430,6 +431,97 @@ async function handleApi(req, res, url) {
       error: job.error,
       timedOut: job.timedOut,
     });
+  }
+
+  // ---- ZWUI-029: bounded authorized session search ----
+  // LIKE-based title search across the sessions table, bounded (LIMIT 20),
+  // scoped to the allowed roots by directory prefix matching.
+  if (route === "/api/search" && req.method === "GET") {
+    const q = (url.searchParams.get("q") || "").trim();
+    if (q.length < 2) return sendJson(res, 200, { results: [] });
+    try {
+      const results = store.searchSessions(q, ALLOWED_ROOTS, 20);
+      return sendJson(res, 200, { results });
+    } catch (e) {
+      const status = e.code === "DB_MISSING" ? 503 : 500;
+      return sendJson(res, status, { error: e.message, code: e.code });
+    }
+  }
+
+  // ---- ZWUI-030: capability-gated read-only project file API ----
+  // Explicitly opt-in: ZCODE_ENABLE_FILES=1. Serves text files under the
+  // allowed roots only; binary/image types are rejected (no byte exposure);
+  // size-capped; traversal-proof.
+  if (route === "/api/files/capability" && req.method === "GET") {
+    return sendJson(res, 200, {
+      enabled: process.env.ZCODE_ENABLE_FILES === "1",
+      maxBytes: Math.min(config.maxUploadBytes, 512 * 1024),
+    });
+  }
+
+  const filesMatch = route.match(/^\/api\/files\/(.+)$/);
+  if (filesMatch && req.method === "GET") {
+    if (process.env.ZCODE_ENABLE_FILES !== "1") {
+      return sendJson(res, 403, { error: "file API disabled (set ZCODE_ENABLE_FILES=1)" });
+    }
+    const rel = decodeURIComponent(filesMatch[1]);
+    const abs = resolve(String(rel));
+    const inside = ALLOWED_ROOTS.some((root) => abs === root || abs.startsWith(root + sep));
+    if (!inside) return sendJson(res, 403, { error: "path outside allowed roots" });
+    if (!existsSync(abs) || !statSync(abs).isFile()) return sendJson(res, 404, { error: "not found" });
+    const stat = statSync(abs);
+    const maxBytes = Math.min(config.maxUploadBytes, 512 * 1024);
+    if (stat.size > maxBytes) {
+      return sendJson(res, 413, { error: `file exceeds ${maxBytes} bytes` });
+    }
+    const buf = readFileSync(abs);
+    // text sniff: reject NUL bytes in the first 8KB
+    if (buf.subarray(0, 8192).includes(0)) {
+      return sendJson(res, 415, { error: "binary files are not served" });
+    }
+    return sendJson(res, 200, {
+      path: abs,
+      size: stat.size,
+      encoding: "utf-8",
+      content: buf.toString("utf8"),
+    });
+  }
+
+  // ---- ZWUI-032: real read-only Git status/diff contracts ----
+  // Opt-in via ZCODE_ENABLE_GIT=1; executes `git status --porcelain` /
+  // `git diff` in an allowed-root cwd. No staging, no checkout, no writes.
+  if (route === "/api/git/status" && req.method === "GET") {
+    if (process.env.ZCODE_ENABLE_GIT !== "1") {
+      return sendJson(res, 403, { error: "git API disabled (set ZCODE_ENABLE_GIT=1)" });
+    }
+    let cwd;
+    try { cwd = safeCwd(url.searchParams.get("cwd")); }
+    catch (e) { return sendJson(res, 400, { error: e.message }); }
+    execFile("git", ["status", "--porcelain"], { cwd, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) return sendJson(res, 422, { error: stderr || err.message });
+      const entries = stdout.split("\n").filter(Boolean).map((line) => ({
+        status: line.slice(0, 2).trim(),
+        path: line.slice(3),
+      }));
+      return sendJson(res, 200, { cwd, entries });
+    });
+    return;
+  }
+  if (route === "/api/git/diff" && req.method === "GET") {
+    if (process.env.ZCODE_ENABLE_GIT !== "1") {
+      return sendJson(res, 403, { error: "git API disabled (set ZCODE_ENABLE_GIT=1)" });
+    }
+    let cwd;
+    try { cwd = safeCwd(url.searchParams.get("cwd")); }
+    catch (e) { return sendJson(res, 400, { error: e.message }); }
+    const file = url.searchParams.get("path");
+    const args = ["diff", "--no-color"];
+    if (file) args.push("--", resolve(cwd, "." + sep + file.replace(/^\/+/, "")));
+    execFile("git", args, { cwd, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err && !stdout) return sendJson(res, 422, { error: stderr || err.message });
+      return sendJson(res, 200, { cwd, path: file || null, diff: stdout });
+    });
+    return;
   }
 
   const cancelMatch = route.match(/^\/api\/jobs\/([0-9a-f-]+)\/cancel$/);

@@ -19,9 +19,17 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     let alive = true;
-    // bounded recent-session source for the palette (scoped search per ZWUI-011)
+    // recent sessions when no query; server-scoped search (ZWUI-029) when typing
     void (async () => {
       try {
+        if (query.trim().length >= 2) {
+          const r = await fetch(`/api/search?q=${encodeURIComponent(query.trim())}`, {
+            headers: { authorization: `Bearer ${localStorage.getItem("zcode-web-token") || ""}` },
+          });
+          const j = await r.json();
+          if (alive) setSessions((j.results || []).slice(0, 20));
+          return;
+        }
         const all = await Promise.all(
           (caps?.allowedRoots || []).map(async (root) => {
             try {
@@ -40,7 +48,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
     return () => {
       alive = false;
     };
-  }, [client, caps]);
+  }, [client, caps, query]);
 
   const commands = useMemo<Command[]>(() => {
     const cmds: Command[] = [

@@ -91,6 +91,23 @@ export class SessionStore {
     }));
   }
 
+  // ZWUI-029: bounded title search scoped to directories under the roots.
+  searchSessions(q, roots, limit = 20) {
+    const like = `%${q.replace(/[%_]/g, "!$&").replace(/'/g, "''")}%`;
+    const placeholders = roots.map(() => "?").join(", ");
+    const rows = this.query(
+      `SELECT id, title, directory, time_updated FROM session
+        WHERE title LIKE ? ESCAPE '!' AND (${roots.map(() => "directory LIKE ? || '%'").join(" OR ")})
+          AND id NOT LIKE 'sess_subagent_%'
+        ORDER BY time_updated DESC LIMIT ?`,
+      [like, ...roots, limit]
+    );
+    return rows.map((r) => ({
+      id: r.id, title: r.title, directory: r.directory,
+      updatedAt: Number(r.time_updated),
+    }));
+  }
+
   get(sessionId) {
     const rows = this.query(
       `SELECT id, title, directory, time_created, time_updated FROM session WHERE id = ?`,

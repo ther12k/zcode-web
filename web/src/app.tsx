@@ -8,9 +8,11 @@ import { SessionList } from "./components/SessionList";
 import { CommandPalette } from "./components/CommandPalette";
 import { ProjectPicker } from "./components/ProjectPicker";
 import { ActivityInspector } from "./components/ActivityInspector";
+import { WorkspaceInspector } from "./components/WorkspaceInspector";
 
 export function App() {
   const { caps, token, setToken, prefs } = useWorkspace();
+  const cwd = prefs.rootPath || caps?.allowedRoots[0] || "";
   const params = useParams({ strict: false }) as { workspace?: string };
   const navigate = useNavigate();
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -95,6 +97,7 @@ export function App() {
             : "connecting…"}
         </div>
         <ActivityInspector />
+        {cwd && <WorkspaceInspector cwd={cwd} />}
         <button className="ghost" onClick={() => navigate({ to: "/settings" })}>
           Settings & diagnostics
         </button>
