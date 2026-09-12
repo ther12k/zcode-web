@@ -1,0 +1,63 @@
+{
+  "_note": "Synthetic/redacted fixtures captured from the live contract (ZWUI-001). No credentials, no personal transcripts.",
+  "GET /api/health": {
+    "ok": true,
+    "cli": { "entry": "/opt/zcode/zcode.cjs", "present": true },
+    "cliRuntime": { "executable": "/usr/bin/node", "present": true, "isExplicit": false, "warning": null },
+    "db": { "path": "/home/u/.zcode/cli/db/db.sqlite", "present": true, "driver": "n/a (node server)" },
+    "providerConfigured": true,
+    "workspaceRoot": "/home/u/Workspace",
+    "activeJobs": 0, "maxJobs": 3, "authRequired": true
+  },
+  "GET /api/config": {
+    "authRequired": true,
+    "workspaceRoot": "/home/u/Workspace",
+    "allowedRoots": ["/home/u/Workspace", "/home/u/.zcode/workspace"],
+    "modes": ["plan", "build", "edit", "yolo"],
+    "defaultMode": "plan",
+    "cliPresent": true,
+    "providerConfigured": true
+  },
+  "GET /api/models": {
+    "models": [
+      { "ref": "prov-a/Model-X", "provider": "prov-a", "providerName": "Provider A", "model": "Model-X", "isDefault": true },
+      { "ref": "prov-b/Model-Y", "provider": "prov-b", "providerName": "Provider B", "model": "Model-Y", "isDefault": false }
+    ]
+  },
+  "POST /api/chat 202": { "jobId": "0f0e1d2c-1111-2222-3333-444455556666", "sessionId": null, "cwd": "/home/u/Workspace/demo", "mode": "plan", "model": null },
+  "POST /api/chat 400 (no text)": { "error": "text is required" },
+  "POST /api/chat 400 (bad attachment)": { "error": "attachments must be uploaded via /api/upload first", "rejected": ["/etc/passwd"] },
+  "POST /api/upload 201": { "path": "/home/u/.zcode/uploads/1789205052166-shot.png", "name": "1789205052166-shot.png", "size": 2048 },
+  "POST /api/upload 400 (corrupt)": { "error": "corrupt base64 payload" },
+  "GET /api/sessions": { "cwd": "/home/u/Workspace/demo", "sessions": [ { "id": "sess_00000000-0000-0000-0000-000000000000", "title": "Example title", "directory": "/home/u/Workspace/demo", "taskType": "interactive", "createdAt": 1789191546735, "updatedAt": 1789191548658 } ] },
+  "GET /api/sessions/:id page": {
+    "session": { "id": "sess_00000000-0000-0000-0000-000000000000", "title": "Example", "directory": "/home/u/Workspace/demo", "createdAt": 1789191546735, "updatedAt": 1789191548658 },
+    "transcript": [
+      { "role": "user", "text": "example prompt", "tools": [], "files": [] },
+      { "role": "assistant", "text": "example answer", "tools": [ { "name": "Bash", "status": "completed", "detail": "{\"command\":\"ls\"}" } ], "files": [ { "mime": "image/png", "url": "zcode-artifact://sess_x/tool-result-y", "size": 376426, "storageKind": "artifact" } ] }
+    ],
+    "total": 2, "hasMore": false
+  },
+  "GET /api/jobs/:id (ZWUI-007)": {
+    "jobId": "0f0e1d2c-1111-2222-3333-444455556666",
+    "status": "running",
+    "sessionId": "sess_00000000-0000-0000-0000-000000000001",
+    "createdAt": 1789191546735,
+    "startedAt": 1789191546736,
+    "finishedAt": null,
+    "exitCode": null,
+    "error": null,
+    "timedOut": false
+  },
+  "POST /api/sse-ticket 200": { "ticket": "0a1b2c…48hex" },
+  "POST /api/sse-ticket 404": { "error": "job not found" },
+  "errors": {
+    "401": { "error": "unauthorized" },
+    "404 session": { "error": "session not found" },
+    "404 job": { "error": "job not found" },
+    "409 project": { "error": "project already exists" },
+    "413 upload": { "error": "file too large" },
+    "429 jobs": { "error": "Too many running jobs, try again shortly" },
+    "503 cli missing": { "error": "ZCode CLI bundle not found at /opt/zcode/zcode.cjs" }
+  }
+}

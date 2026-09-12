@@ -30,6 +30,7 @@ const ALLOWED_ROOTS = [
 
 const jobs = new JobManager();
 const store = new SessionStore(cliStatus().dbPath);
+const TERMINAL_STATUS = new Set(["succeeded", "failed", "cancelled", "timeout"]);
 
 // Short-lived tickets let EventSource connect without putting the long-lived
 // bearer token in the URL (which leaks into proxy logs / history). A ticket
@@ -253,17 +254,30 @@ async function handleApi(req, res, url) {
     } catch {
       return sendJson(res, 400, { error: "cwd outside workspace root" });
     }
-    return sendJson(res, 200, { cwd: dir, sessions: store.list(dir) });
+    try {
+      return sendJson(res, 200, { cwd: dir, sessions: store.list(dir) });
+    } catch (e) {
+      // ZWUI-018: real DB failures are 5xx with the reason — never an empty list
+      const status = e.code === "DB_MISSING" ? 503 : 500;
+      return sendJson(res, status, { error: e.message, code: e.code });
+    }
   }
 
   const sessionMatch = route.match(/^\/api\/sessions\/(sess_[A-Za-z0-9-]+)$/);
   if (sessionMatch && req.method === "GET") {
-    const session = store.get(sessionMatch[1]);
-    if (!session) return sendJson(res, 404, { error: "session not found" });
-    const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 5, 1), 400);
-    const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0);
-    const { turns, total, hasMore } = store.transcript(session.id, { limit, offset });
-    return sendJson(res, 200, { session, transcript: turns, total, hasMore });
+    let session;
+    let page;
+    try {
+      session = store.get(sessionMatch[1]);
+      if (!session) return sendJson(res, 404, { error: "session not found" });
+      const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 5, 1), 400);
+      const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0);
+      page = store.transcript(session.id, { limit, offset });
+    } catch (e) {
+      const status = e.code === "DB_MISSING" ? 503 : 500;
+      return sendJson(res, status, { error: e.message, code: e.code });
+    }
+    return sendJson(res, 200, { session, transcript: page.turns, total: page.total, hasMore: page.hasMore });
   }
 
   if (route === "/api/models" && req.method === "GET") {
@@ -328,6 +342,18 @@ async function handleApi(req, res, url) {
     }
     const sessionId = body.sessionId && /^sess_[A-Za-z0-9-]+$/.test(body.sessionId) ? body.sessionId : null;
     const mode = config.allowedModes.includes(body.mode) ? body.mode : "plan";
+    // ZWUI-007: idempotent submission — same X-Request-Id returns the same job
+    const requestId =
+      (typeof req.headers["x-request-id"] === "string" && req.headers["x-request-id"].slice(0, 100)) ||
+      (typeof body.requestId === "string" && body.requestId.slice(0, 100)) ||
+      null;
+    const existing = jobs.findByIdempotencyKey(requestId);
+    if (existing) {
+      return sendJson(res, 200, {
+        jobId: existing.id, sessionId: existing.sessionId, cwd: existing.cwd,
+        mode: existing.mode, model: existing.modelRef || null, replayed: true,
+      });
+    }
     // model must be a configured provider/model pair — never a free string
     const modelEntry = listModels({ withKeys: true }).find((m) => m.ref === body.model) || null;
     // attachments must be files previously uploaded to the uploads dir
@@ -340,7 +366,7 @@ async function handleApi(req, res, url) {
     }
     const attachments = requested.slice(0, 5);
     try {
-      const job = jobs.start({
+      const { job, replayed } = jobs.start({
         text,
         sessionId,
         cwd,
@@ -349,11 +375,35 @@ async function handleApi(req, res, url) {
         modelApiKey: modelEntry?.apiKey || null,
         modelBaseUrl: modelEntry?.baseURL || null,
         attachments,
+        requestId,
       });
-      return sendJson(res, 202, { jobId: job.id, sessionId: job.sessionId, cwd, mode, model: modelEntry?.ref || null });
+      job.modelRef = modelEntry?.ref || null;
+      return sendJson(res, replayed ? 200 : 202, {
+        jobId: job.id, sessionId: job.sessionId, cwd, mode, model: modelEntry?.ref || null, replayed,
+      });
     } catch (e) {
       return sendJson(res, e.status || 500, { error: e.message });
     }
+  }
+
+  // ZWUI-007: immutable job status snapshot
+  const statusMatch = route.match(/^\/api\/jobs\/([0-9a-f-]+)$/);
+  if (statusMatch && req.method === "GET") {
+    const job = jobs.get(statusMatch[1]);
+    if (!job) return sendJson(res, 404, { error: "job not found" });
+    return sendJson(res, 200, {
+      jobId: job.id,
+      status: job.status,
+      sessionId: job.sessionId,
+      cwd: job.cwd,
+      mode: job.mode,
+      createdAt: job.createdAt,
+      startedAt: job.startedAt,
+      finishedAt: job.finishedAt,
+      exitCode: job.exitCode,
+      error: job.error,
+      timedOut: job.timedOut,
+    });
   }
 
   const cancelMatch = route.match(/^\/api\/jobs\/([0-9a-f-]+)\/cancel$/);
@@ -375,23 +425,57 @@ async function handleApi(req, res, url) {
 
   // SSE: stream job events. Auth: bearer header or ?ticket= from /api/sse-ticket
   // (EventSource cannot set headers; the ticket avoids URL token leakage).
+  // ZWUI-008 v2: numbered events, Last-Event-ID replay, explicit ticket-expiry
+  // and terminal `done` re-delivery.
   const eventsMatch = route.match(/^\/api\/events\/([0-9a-f-]+)$/);
   if (eventsMatch && req.method === "GET") {
     const jobId = eventsMatch[1];
-    const authed = isAuthorized(req, url) || validSseTicket(url.searchParams.get("ticket"), jobId);
-    if (!authed) return sendJson(res, 401, { error: "unauthorized" });
+    const ticket = url.searchParams.get("ticket");
+    const authed = isAuthorized(req) || validSseTicket(ticket, jobId);
+    if (!authed) {
+      // distinguishable from missing job so clients can re-auth cleanly
+      res.writeHead(401, { "content-type": "application/json; charset=utf-8" });
+      return res.end(JSON.stringify({ error: "unauthorized" }));
+    }
     const job = jobs.get(jobId);
     if (!job) return sendJson(res, 404, { error: "job not found" });
+    // ticket single-purpose check: an expired/invalid ticket with a valid
+    // shape gets an explicit marker so the client can fetch a new one
+    const ticketExpired =
+      !isAuthorized(req) && ticket && !validSseTicket(ticket, jobId);
+
     res.writeHead(200, {
       "content-type": "text/event-stream",
       "cache-control": "no-store",
       connection: "keep-alive",
       "x-accel-buffering": "no",
     });
-    const write = (event) => res.write(`data: ${JSON.stringify(event)}\n\n`);
-    for (const line of job.lines) write({ kind: "line", line });
-    if (job.done) {
-      write({ kind: "done", exitCode: job.exitCode, error: job.error, sessionId: job.sessionId });
+    let cursor = Number(url.searchParams.get("lastEventId")) || 0;
+    const lastIdHeader = req.headers["last-event-id"];
+    if (lastIdHeader && Number(lastIdHeader) > cursor) cursor = Number(lastIdHeader);
+
+    const write = (event) => {
+      if (event.id) res.write(`id: ${event.id}\n`);
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+
+    if (ticketExpired) {
+      write({ kind: "ticket-expired", jobId });
+    }
+
+    // replay from the client's cursor (bounded by the job's buffer)
+    if (cursor > 0) {
+      for (const event of jobs.replay(jobId, cursor) || []) write(event);
+    } else {
+      for (const event of job.lines) write(event);
+    }
+
+    const terminal = job.status && TERMINAL_STATUS.has(job.status);
+    if (terminal) {
+      // ensure `done` is always the last event on a completed stream
+      if (!job.lines.some((e) => e.kind === "done")) {
+        write({ kind: "done", exitCode: job.exitCode, error: job.error, sessionId: job.sessionId });
+      }
       return res.end();
     }
     job.subscribers.add(write);

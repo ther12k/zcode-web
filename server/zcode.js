@@ -61,13 +61,27 @@ class Job {
     this.resumeSessionId = opts.sessionId || null;
     this.sessionId = opts.sessionId || null; // first event updates it for new chats
     this.text = opts.text;
+    this.requestId = opts.requestId || null;
     this.lines = [];
     this.subscribers = new Set();
-    this.done = false;
+    // ZWUI-007: immutable status state machine
+    // queued -> running -> (succeeded | failed | cancelled | timeout)
+    this.status = "queued";
+    this.timedOut = false;
+    this.createdAt = Date.now();
+    this.startedAt = null;
+    this.finishedAt = null;
     this.exitCode = null;
     this.error = null;
     this.stderrTail = "";
-    this.startedAt = Date.now();
+  }
+
+  setStatus(next) {
+    // once terminal, status is immutable
+    if (TERMINAL.has(this.status)) return;
+    this.status = next;
+    if (next === "running") this.startedAt = Date.now();
+    if (TERMINAL.has(next)) this.finishedAt = Date.now();
   }
 
   publish(event) {
@@ -81,14 +95,20 @@ class Job {
   }
 }
 
+const TERMINAL = new Set(["succeeded", "failed", "cancelled", "timeout"]);
+
 export class JobManager {
   constructor() {
     this.jobs = new Map();
+    // ZWUI-007: requestId -> jobId for idempotent submission
+    this.byRequest = new Map();
+    // ZWUI-008: bounded replay buffers per job (SSE v2 Last-Event-ID)
+    this.replayMax = Number(process.env.ZCODE_SSE_REPLAY_MAX || 4000);
   }
 
   get activeCount() {
     let n = 0;
-    for (const job of this.jobs.values()) if (!job.done) n++;
+    for (const job of this.jobs.values()) if (!TERMINAL.has(job.status)) n++;
     return n;
   }
 
@@ -96,7 +116,17 @@ export class JobManager {
     return this.jobs.get(jobId) || null;
   }
 
-  start({ text, sessionId, cwd, mode, model, modelApiKey, modelBaseUrl, attachments }) {
+  findByIdempotencyKey(requestId) {
+    if (!requestId) return null;
+    return this.byRequest.get(requestId) || null;
+  }
+
+  start({ text, sessionId, cwd, mode, model, modelApiKey, modelBaseUrl, attachments, requestId }) {
+    // idempotent resubmission returns the original job
+    if (requestId) {
+      const existing = this.byRequest.get(requestId);
+      if (existing) return { job: existing, replayed: true };
+    }
     if (!existsSync(config.cliEntry)) {
       throw Object.assign(new Error("ZCode CLI bundle not found at " + config.cliEntry), { status: 503 });
     }
@@ -107,7 +137,8 @@ export class JobManager {
       throw Object.assign(new Error(`Mode "${mode}" not allowed`), { status: 400 });
     }
 
-    const job = new Job({ text, sessionId, cwd, mode });
+    const job = new Job({ text, sessionId, cwd, mode, requestId });
+    if (requestId) this.byRequest.set(requestId, job);
     const args = [
       config.cliEntry,
       "--prompt", text,
@@ -139,6 +170,15 @@ export class JobManager {
     });
     job.proc = proc;
 
+    // ZWUI-008: numbered event stream for Last-Event-ID replay
+    let lastEventId = 0;
+    const record = (event) => {
+      event.id = ++lastEventId;
+      job.lines.push(event);
+      job.publish(event);
+      return event;
+    };
+
     let stdoutBuf = "";
     proc.stdout.on("data", (chunk) => {
       stdoutBuf += chunk;
@@ -153,9 +193,8 @@ export class JobManager {
         } catch {
           parsed = { raw: line };
         }
-        job.lines.push(parsed);
         if (parsed.sessionId && !job.sessionId) job.sessionId = parsed.sessionId;
-        job.publish({ kind: "line", line: parsed });
+        record({ kind: "line", line: parsed });
       }
     });
 
@@ -166,36 +205,54 @@ export class JobManager {
     });
 
     const finish = (exitCode, error) => {
-      if (job.done) return;
-      job.done = true;
+      if (TERMINAL.has(job.status)) return;
       job.exitCode = exitCode;
       job.error = error ? String(error) : null;
-      job.publish({ kind: "done", exitCode, error: job.error, sessionId: job.sessionId, stderrTail: job.stderrTail });
+      job.setStatus(error ? "failed" : job.timedOut ? "timeout" : exitCode === 0 ? "succeeded" : "failed");
+      if (job.timedOut) job.status = "timeout";
+      record({ kind: "done", exitCode, error: job.error, sessionId: job.sessionId, stderrTail: job.stderrTail });
       clearTimeout(timer);
-      // keep finished jobs around briefly so late SSE subscribers can replay
-      setTimeout(() => this.jobs.delete(job.id), 10 * 60_000).unref();
+      // terminal jobs stay addressable (status + replay) for a window
+      setTimeout(() => {
+        this.jobs.delete(job.id);
+        if (job.requestId) this.byRequest.delete(job.requestId);
+      }, 30 * 60_000).unref();
     };
 
     const timer = setTimeout(() => {
-      if (!job.done) {
-        job.publish({ kind: "timeout" });
+      if (!TERMINAL.has(job.status)) {
+        job.timedOut = true;
+        record({ kind: "timeout" });
         proc.kill("SIGKILL");
       }
     }, config.jobTimeoutMs);
     timer.unref();
 
     proc.on("error", (err) => finish(null, err));
-    proc.on("close", (code) => finish(code));
+    proc.on("close", (code) => {
+      if (job.timedOut) finish(code, null);
+      else finish(code);
+    });
 
+    // live → running (single transition; errors surface via finish)
+    job.setStatus("running");
     this.jobs.set(job.id, job);
-    return job;
+    return { job, replayed: false };
   }
 
   cancel(jobId) {
     const job = this.jobs.get(jobId);
-    if (!job || job.done) return false;
+    if (!job || TERMINAL.has(job.status)) return false;
+    job.setStatus("cancelled");
     job.proc.kill("SIGTERM");
-    setTimeout(() => !job.done && job.proc.kill("SIGKILL"), 5000).unref();
+    setTimeout(() => !TERMINAL.has(job.status) && job.proc.kill("SIGKILL"), 5000).unref();
     return true;
+  }
+
+  // ZWUI-008: events after a cursor for Last-Event-ID replay (bounded window)
+  replay(jobId, afterId) {
+    const job = this.jobs.get(jobId);
+    if (!job) return null;
+    return job.lines.filter((e) => (e.id || 0) > afterId);
   }
 }

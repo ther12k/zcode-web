@@ -38,18 +38,35 @@ export class SessionStore {
     this.dbPath = dbPath;
   }
 
+  // ZWUI-018: query errors are surfaced, not swallowed. Missing DB is a
+  // distinct 503-grade condition; SQL failures throw for the caller to map
+  // to 500 with a real message.
   query(sql, params = []) {
-    if (!existsSync(this.dbPath)) return [];
+    if (!existsSync(this.dbPath)) {
+      const e = new Error("session database not found at " + this.dbPath);
+      e.code = "DB_MISSING";
+      throw e;
+    }
     let db;
     try {
       db = new DatabaseSync(this.dbPath, { readOnly: true });
-    } catch {
-      db = new DatabaseSync(this.dbPath);
+    } catch (openErr) {
+      // readonly open can fail while the CLI holds a write lock in WAL edge
+      // cases — retry through a normal connection before giving up
+      try {
+        db = new DatabaseSync(this.dbPath);
+      } catch {
+        const e = new Error("session database could not be opened: " + openErr.message);
+        e.code = "DB_OPEN_FAILED";
+        throw e;
+      }
     }
     try {
       return db.prepare(sql).all(...params);
-    } catch {
-      return [];
+    } catch (sqlErr) {
+      const e = new Error("session database query failed: " + sqlErr.message);
+      e.code = "DB_QUERY_FAILED";
+      throw e;
     } finally {
       db.close();
     }
