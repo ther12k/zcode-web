@@ -66,10 +66,14 @@ test("Ctrl+K opens the search dialog and Escape closes it", async ({ page }) => 
 });
 
 test("sidebar Projects view lists roots and expands to sessions", async ({ page }) => {
+  // fresh CI workspaces are empty — create a project like a user would
+  await page.request.post("/api/projects", {
+    headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+    data: { name: "demo-project" },
+  });
   await expect(page.locator(".sidebar-group").first()).toBeVisible();
   const toggle = page.locator(".group-toggle").first();
   await toggle.click();
-  await page.waitForTimeout(600);
   // project headings (dirs) appear inside the expanded group
-  expect(await page.locator(".project-heading").count()).toBeGreaterThan(0);
+  await expect(page.locator(".project-heading").first()).toBeVisible({ timeout: 5000 });
 });
