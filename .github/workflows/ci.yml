@@ -1,5 +1,5 @@
 # ZWUI-023/024/026: backend security regressions (fake CLI), web unit tests,
-# typecheck + production build gates.
+# typecheck + production build gates, browser integration tests.
 name: ci
 on:
   push:
@@ -14,6 +14,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      # the SPA contract (deep links serve the built shell) requires web/dist
+      - name: Build frontend fixture
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
       - name: Backend + security regression tests (fake CLI)
         run: node --test tests/server.test.mjs
 
@@ -44,14 +50,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - name: Install web deps + browsers
+      - name: Install web deps, build UI, install browsers
         working-directory: web
         run: |
           npm ci
+          npm run build
           npx playwright install chromium --with-deps
-      - name: Browser integration tests (fake CLI)
+      - name: Browser integration tests (fake CLI + built UI)
         working-directory: web
         run: npx playwright test
