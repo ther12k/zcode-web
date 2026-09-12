@@ -98,6 +98,8 @@ const TYPE_LABELS = {
   "turn.failed": "turn failed",
   "session.updated": null, // real info is in payload.type
   "session.titleUpdated": null, // handled separately
+  "model.streaming": null, // text deltas, handled in describeLine
+  result: null, // final result marker
 };
 
 function describeLine(line) {
@@ -110,10 +112,15 @@ function describeLine(line) {
   if (p.type && PAYLOAD_TYPE_LABELS[p.type] !== undefined) {
     return { kind: "activity", label: PAYLOAD_TYPE_LABELS[p.type] };
   }
-  // assistant text deltas — shapes vary by CLI version; collect obvious text
+  // assistant stream deltas: kind distinguishes reasoning from answer text
+  // (CLI 0.16.5: start/reasoning_delta/text_delta/finish/…)
+  if (line.type === "model.streaming" && typeof p.delta === "string") {
+    if (p.kind === "reasoning_delta") return { kind: "reasoning", text: p.delta };
+    if (p.kind === "text_delta" || p.kind === undefined) return { kind: "text", text: p.delta };
+    return { kind: "activity", label: null }; // lifecycle markers (start/end/finish)
+  }
   const text =
     typeof p.text === "string" ? p.text :
-    typeof p.delta === "string" ? p.delta :
     (p.part && typeof p.part.text === "string") ? p.part.text : null;
   if (text) return { kind: "text", text };
   if (TYPE_LABELS[line.type]) return { kind: "activity", label: TYPE_LABELS[line.type] };
@@ -132,7 +139,18 @@ function handleStreamLine(line) {
     refreshSessions();
     return;
   }
-  if (d.kind === "text" && state.job) {
+  if (!state.job) return;
+  if (d.kind === "reasoning") {
+    state.job.reasoningText = (state.job.reasoningText || "") + d.text;
+    if (state.job.reasoningEl) {
+      state.job.reasoningEl.querySelector(".reasoning-body").textContent = state.job.reasoningText;
+      if (!state.job.firstTextSeen) state.job.reasoningEl.style.display = "";
+    }
+    return;
+  }
+  if (d.kind === "text") {
+    state.job.firstTextSeen = true;
+    if (state.job.reasoningEl) state.job.reasoningEl.style.display = ""; // keep collapsed
     state.job.bubbleText += d.text;
     const el = state.job.bubble;
     el.innerHTML = "";
@@ -141,7 +159,7 @@ function handleStreamLine(line) {
     return;
   }
   if (d.kind === "error") { setActivity("error: " + d.text, true); return; }
-  if (d.kind === "activity") setActivity(d.label);
+  if (d.kind === "activity" && d.label) setActivity(d.label);
 }
 
 // ---------- chat ----------
@@ -157,7 +175,11 @@ async function send() {
   const bubble = addMsg("assistant", "");
   const activityEl = document.createElement("div");
   bubble.appendChild(activityEl);
-  state.job = { id: null, es: null, bubble, activityEl, bubbleText: "" };
+  const reasoningEl = document.createElement("details");
+  reasoningEl.className = "reasoning";
+  reasoningEl.innerHTML = `<summary>thinking</summary><div class="reasoning-body"></div>`;
+  bubble.appendChild(reasoningEl);
+  state.job = { id: null, es: null, bubble, activityEl, reasoningEl, bubbleText: "", reasoningText: "" };
 
   try {
     const res = await api("/api/chat", {

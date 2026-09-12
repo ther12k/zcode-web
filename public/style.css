@@ -95,6 +95,18 @@ main { grid-area: main; display: flex; flex-direction: column; min-width: 0; }
 .msg p { margin: 0 0 8px; } .msg p:last-child { margin-bottom: 0; }
 .msg h1, .msg h2, .msg h3 { margin: 10px 0 6px; font-size: 1.05em; }
 
+/* collapsed chain-of-thought, like the desktop app */
+details.reasoning { margin: 4px 0 8px; }
+details.reasoning summary {
+  cursor: pointer; font-size: 11px; text-transform: uppercase;
+  letter-spacing: 1px; color: var(--text-muted); user-select: none;
+}
+details.reasoning .reasoning-body {
+  font-size: 12.5px; color: var(--text-muted); white-space: pre-wrap;
+  border-left: 2px solid var(--border); padding: 4px 10px; margin-top: 4px;
+  max-height: 300px; overflow-y: auto;
+}
+
 .activity {
   font-family: var(--mono);
   font-size: 12px;
