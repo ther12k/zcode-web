@@ -9,7 +9,7 @@ import { homedir } from "node:os";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { JobManager, cliStatus, config, uploadsDir } from "./zcode.js";
+import { JobManager, cliStatus, cliRuntimeStatus, config, uploadsDir } from "./zcode.js";
 import { SessionStore } from "./sessions.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -190,9 +190,11 @@ async function handleApi(req, res, url) {
 
   if (route === "/api/health") {
     const cli = cliStatus();
+    const runtime = cliRuntimeStatus();
     return sendJson(res, 200, {
       ok: true,
       cli: { entry: cli.entry, present: cli.present },
+      cliRuntime: { ...runtime, warning: runtime.present ? null : "ZCODE_CLI_NODE not found — job spawns will fail" },
       db: { path: cli.dbPath, present: cli.dbPresent },
       providerConfigured: providerConfigured(),
       workspaceRoot: WORKSPACE_ROOT,
@@ -425,8 +427,10 @@ const server = createServer(async (req, res) => {
 
 server.listen(PORT, HOST, () => {
   const cli = cliStatus();
+  const runtime = cliRuntimeStatus();
   console.log(`zcode-web listening on http://${HOST}:${PORT}`);
   console.log(`  cli entry : ${cli.entry} (${cli.present ? "found" : "MISSING"})`);
+  console.log(`  cli runtime: ${runtime.executable} (${runtime.present ? "found" : "MISSING"}${runtime.isExplicit ? ", explicit ZCODE_CLI_NODE" : ", inherited"})`);
   console.log(`  zcode home: ${config.zcodeHome}`);
   console.log(`  sessions db: ${cli.dbPath} (${cli.dbPresent ? "found" : "not yet created"})`);
   console.log(`  workspace : ${WORKSPACE_ROOT}`);

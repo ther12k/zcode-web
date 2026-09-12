@@ -17,6 +17,10 @@ import { join } from "node:path";
 
 export const config = {
   cliEntry: process.env.ZCODE_CLI_ENTRY || "/opt/zcode/zcode.cjs",
+  // Executable used to launch the CLI child process. Defaults to the current
+  // runtime (Node today). A Bun-hosted server MUST set ZCODE_CLI_NODE to an
+  // approved Node >= 24 path — launching zcode.cjs under Bun is unsupported.
+  cliNode: (process.env.ZCODE_CLI_NODE || "").trim() || process.execPath,
   zcodeHome: process.env.ZCODE_HOME || join(homedir(), ".zcode"),
   jobTimeoutMs: Number(process.env.ZCODE_JOB_TIMEOUT_MS || 15 * 60_000),
   maxJobs: Number(process.env.ZCODE_MAX_JOBS || 3),
@@ -29,6 +33,14 @@ export const config = {
 
 export function uploadsDir() {
   return join(config.zcodeHome, "uploads");
+}
+
+export function cliRuntimeStatus() {
+  return {
+    executable: config.cliNode,
+    present: existsSync(config.cliNode),
+    isExplicit: Boolean((process.env.ZCODE_CLI_NODE || "").trim()),
+  };
 }
 
 export function cliStatus() {
@@ -106,7 +118,7 @@ export class JobManager {
     if (sessionId) args.push("--resume", sessionId);
     for (const p of attachments || []) args.push("--attach", p);
 
-    const proc = spawn(process.execPath, args, {
+    const proc = spawn(config.cliNode, args, {
       cwd,
       env: {
         ...process.env,
