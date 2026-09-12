@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>zcode-web</title>
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>" />
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <div class="brand">zcode<span class="accent">-web</span></div>
+      <div class="toolbar">
+        <select id="project-select" title="Project directory (cwd)"></select>
+        <button id="new-project-btn" title="Create a new project directory on the server">+ project</button>
+        <select id="mode-select" title="Permission mode">
+          <option value="plan">plan</option>
+          <option value="build">build</option>
+          <option value="edit">edit</option>
+          <option value="yolo">yolo</option>
+        </select>
+      </div>
+      <div id="conn-dot" class="dot off" title="server status"></div>
+    </header>
+
+    <aside>
+      <button id="new-chat-btn" class="primary">New chat</button>
+      <div class="side-label">Sessions <span id="session-cwd-label" class="muted"></span></div>
+      <div id="session-list"></div>
+    </aside>
+
+    <main>
+      <div id="chat">
+        <div id="messages"></div>
+      </div>
+      <div id="composer">
+        <div id="job-status" class="muted hidden"></div>
+        <div class="composer-row">
+          <textarea id="prompt-input" rows="2" placeholder="Ask zcode… (Enter to send, Shift+Enter for newline)"></textarea>
+          <button id="send-btn" class="primary">Send</button>
+          <button id="cancel-btn" class="danger hidden">Stop</button>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

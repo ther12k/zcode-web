@@ -1,0 +1,21 @@
+services:
+  zcode-web:
+    build: .
+    container_name: zcode-web
+    ports:
+      - "3000:3000"
+    environment:
+      # REQUIRED: protects an agent that can run commands inside this container
+      ZCODE_WEB_TOKEN: ${ZCODE_WEB_TOKEN:-change-me-please}
+      # Permission modes exposed in the UI (plan is safest default)
+      ZCODE_ALLOWED_MODES: ${ZCODE_ALLOWED_MODES:-plan,build,edit,yolo}
+      ZCODE_MAX_JOBS: ${ZCODE_MAX_JOBS:-3}
+      ZCODE_JOB_TIMEOUT_MS: ${ZCODE_JOB_TIMEOUT_MS:-900000}
+    volumes:
+      # bring-your-own CLI bundle (also baked in at build time if present in ./cli)
+      - ./cli/zcode.cjs:/opt/zcode/zcode.cjs:ro
+      # CLI state: config.json, sessions db, credentials — set up once (see README)
+      - ./data/zcode:/data/zcode
+      # your projects live here
+      - ./data/workspace:/data/workspace
+    restart: unless-stopped

@@ -1,0 +1,8 @@
+# NOTE: cli/ is intentionally NOT ignored — the Dockerfile bakes in
+# cli/zcode.cjs when present.
+.git
+data
+.env
+node_modules
+*.log
+.DS_Store

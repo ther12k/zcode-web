@@ -1,0 +1,11 @@
+# proprietary CLI bundle — never commit (see cli/README.md)
+cli/zcode.cjs
+
+# local state: CLI config with API keys, session db, credentials, projects
+data/
+.env
+
+# misc
+node_modules/
+*.log
+.DS_Store
