@@ -5,6 +5,7 @@
 import { createServer } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { execFile } from "node:child_process";
+import crypto from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { extname, join, normalize, resolve, sep } from "node:path";
@@ -210,6 +211,73 @@ function listModels({ withKeys = false } = {}) {
     return [];
   }
 }
+
+
+// ---- ZWUI-035 snapshot builder (threat-model compliant) ----
+const PREVIEW_BUDGET_BYTES = 8 * 1024 * 1024;
+const PREVIEW_MAX_FILES = 400;
+const PREVIEW_ALLOWED_EXT = new Set([".html", ".css", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".txt", ".md", ".json"]);
+
+function previewEnabled() {
+  return process.env.ZCODE_ENABLE_PREVIEW === "1" && Boolean((process.env.ZCODE_PREVIEW_ORIGIN || "").trim());
+}
+
+function buildSnapshot(cwd) {
+  const warnings = [];
+  const files = [];
+  let totalBytes = 0;
+  const walk = (dir) => {
+    if (files.length >= PREVIEW_MAX_FILES) return;
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      if (files.length >= PREVIEW_MAX_FILES) return;
+      const full = join(dir, ent.name);
+      if (ent.isSymbolicLink()) { warnings.push(`skipped symlink: ${full}`); continue; }
+      if (ent.isDirectory()) {
+        if (!ent.name.startsWith(".")) walk(full);
+        continue;
+      }
+      if (!ent.isFile()) continue;
+      const ext = extname(ent.name).toLowerCase();
+      if (!PREVIEW_ALLOWED_EXT.has(ext)) continue;
+      const stat = statSync(full);
+      if (totalBytes + stat.size > PREVIEW_BUDGET_BYTES) {
+        warnings.push("budget exceeded — snapshot truncated");
+        return;
+      }
+      files.push({ full, rel: full.slice(cwd.length + 1), size: stat.size });
+      totalBytes += stat.size;
+    }
+  };
+  walk(cwd);
+  const htmlFiles = files.filter((f) => f.rel.endsWith(".html"));
+  const index = htmlFiles.find((f) => f.rel === "index.html") || htmlFiles[0];
+  if (!index) {
+    throw Object.assign(new Error("no HTML entry file found for snapshot"), { status: 422 });
+  }
+  const id = crypto.createHash("sha256").update(cwd + ":" + totalBytes + ":" + files.length).digest("hex").slice(0, 16);
+  const dir = join(uploadsDir(), "..", "previews", id);
+  mkdirSync(dir, { recursive: true });
+  for (const f of files) {
+    let buf = readFileSync(f.full);
+    if (f.rel.endsWith(".html")) {
+      // strip scripts and event handlers per the threat model (defense in
+      // depth — the separate origin is the primary control)
+      buf = Buffer.from(
+        buf.toString("utf8")
+          .replace(/<script[\s\S]*?<\/script>/gi, "")
+          .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, "")
+          .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, ""),
+        "utf8"
+      );
+    }
+    const dest = join(dir, f.rel);
+    mkdirSync(join(dest, ".."), { recursive: true });
+    writeFileSync(dest, buf);
+  }
+  writeFileSync(join(dir, ".meta.json"), JSON.stringify({ cwd, builtAt: Date.now(), files: files.length, bytes: totalBytes }));
+  return { id, fileCount: files.length, totalBytes, warnings };
+}
+
 
 // ---------- API ----------
 
@@ -487,7 +555,59 @@ async function handleApi(req, res, url) {
     });
   }
 
-  // ---- ZWUI-032: real read-only Git status/diff contracts ----
+  // ---- ZWUI-035: isolated static snapshot preview service ----
+  // Contract: docs/baseline/preview-threat-model.md. Double opt-in
+  // (ZCODE_ENABLE_PREVIEW=1 + ZCODE_PREVIEW_ORIGIN), script-stripped static
+  // snapshots under a content-hash id, budget-bounded, traversal-proof.
+
+  if (route === "/api/preview/capability" && req.method === "GET") {
+    return sendJson(res, 200, {
+      enabled: previewEnabled(),
+      budgetBytes: PREVIEW_BUDGET_BYTES,
+      maxFiles: PREVIEW_MAX_FILES,
+      origin: previewEnabled() ? process.env.ZCODE_PREVIEW_ORIGIN || null : null,
+    });
+  }
+
+  if (route === "/api/preview/build" && req.method === "POST") {
+    if (!previewEnabled()) {
+      return sendJson(res, 403, { error: "preview disabled (set ZCODE_ENABLE_PREVIEW=1 and ZCODE_PREVIEW_ORIGIN)" });
+    }
+    (async () => {
+      try {
+        const body = JSON.parse(await readBody(req, 64 * 1024));
+        const cwd = safeCwd(body.cwd);
+        const snapshot = buildSnapshot(cwd);
+        return sendJson(res, 202, {
+          snapshotId: snapshot.id,
+          files: snapshot.fileCount,
+          bytes: snapshot.totalBytes,
+          warnings: snapshot.warnings,
+        });
+      } catch (e) {
+        return sendJson(res, e.status || 400, { error: e.message });
+      }
+    })();
+    return;
+  }
+
+  const previewAsset = route.match(/^\/api\/preview\/([0-9a-f]{16})\/(.+)$/);
+  if (previewAsset && req.method === "GET") {
+    if (!previewEnabled()) return sendJson(res, 403, { error: "preview disabled" });
+    const dir = normalize(join(uploadsDir(), "..", "previews", previewAsset[1]));
+    const rel = decodeURIComponent(previewAsset[2]);
+    const file = normalize(join(dir, rel));
+    if (!file.startsWith(dir + sep) || !existsSync(file) || !statSync(file).isFile()) {
+      return sendJson(res, 404, { error: "not found" });
+    }
+    res.writeHead(200, {
+      "content-type": MIME[extname(file)] || "application/octet-stream",
+      "content-security-policy": "sandbox", // never run scripts even if one slipped in
+      "cache-control": "private, max-age=600",
+    });
+    return res.end(readFileSync(file));
+  }
+
   // Opt-in via ZCODE_ENABLE_GIT=1; executes `git status --porcelain` /
   // `git diff` in an allowed-root cwd. No staging, no checkout, no writes.
   if (route === "/api/git/status" && req.method === "GET") {

@@ -9,6 +9,7 @@ import { CommandPalette } from "./components/CommandPalette";
 import { ProjectPicker } from "./components/ProjectPicker";
 import { ActivityInspector } from "./components/ActivityInspector";
 import { WorkspaceInspector } from "./components/WorkspaceInspector";
+import { PreviewPane } from "./components/PreviewPane";
 
 export function App() {
   const { caps, token, setToken, prefs } = useWorkspace();
@@ -98,6 +99,7 @@ export function App() {
         </div>
         <ActivityInspector />
         {cwd && <WorkspaceInspector cwd={cwd} />}
+        {cwd && <PreviewPane cwd={cwd} />}
         <button className="ghost" onClick={() => navigate({ to: "/settings" })}>
           Settings & diagnostics
         </button>
