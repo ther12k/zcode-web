@@ -214,13 +214,15 @@ async function cancelJob() {
 
 // ---------- sessions / projects ----------
 
+let refreshSeq = 0;
 async function refreshSessions() {
   if (!state.cwd) return;
-  $("session-cwd-label").textContent = "";
+  const seq = ++refreshSeq;
   const list = $("session-list");
-  list.innerHTML = "";
   try {
     const { sessions } = await api(`/api/sessions?cwd=${encodeURIComponent(state.cwd)}`);
+    if (seq !== refreshSeq) return; // a newer refresh superseded this one
+    list.innerHTML = "";
     if (!sessions.length) {
       list.innerHTML = `<div class="muted" style="padding:6px 10px">No sessions yet</div>`;
       return;
@@ -228,14 +230,16 @@ async function refreshSessions() {
     for (const s of sessions) {
       const el = document.createElement("div");
       el.className = "session-item" + (s.id === state.sessionId ? " active" : "");
+      el.title = s.id; // full session id on hover
       el.innerHTML = `<div class="session-title"></div><div class="session-meta"></div>`;
       el.querySelector(".session-title").textContent = s.title || s.id;
-      el.querySelector(".session-meta").textContent = new Date(s.updatedAt).toLocaleString();
+      const shortId = s.id.length > 18 ? s.id.slice(0, 15) + "…" : s.id;
+      el.querySelector(".session-meta").textContent = `${shortId} · ${new Date(s.updatedAt).toLocaleString()}`;
       el.onclick = () => openSession(s.id);
       list.appendChild(el);
     }
   } catch (e) {
-    list.innerHTML = `<div class="activity error">${e.message}</div>`;
+    if (seq === refreshSeq) list.innerHTML = `<div class="activity error">${e.message}</div>`;
   }
 }
 
