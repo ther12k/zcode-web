@@ -22,6 +22,9 @@ Browser ──HTTP/SSE──> zcode-web server (this repo, zero-dep Node 24)
   server (Dockerfile + compose included; projects live in a volume).
 - **Sessions resume**: the UI lists past sessions per project and continues
   them via the CLI's `--resume <sessionId>`.
+- **Model switcher**: pick any `provider/model` pair from your CLI config per
+  message (like the desktop's model/plan selector) — served per-run via the
+  CLI's `ZCODE_MODEL` env override.
 - **Streaming**: CLI events stream to the browser over SSE — model activity,
   errors and the final response as you go.
 - **Zero npm dependencies**; Node's built-in `http`, `child_process`, `sqlite`.
@@ -110,6 +113,24 @@ spawn time; a bare install does not). Working shape, verified on CLI 0.16.5:
 `scripts/setup-host.sh` writes exactly this from the desktop's
 `~/.zcode/v2/config.json`. OAuth-only providers (empty `apiKey`) and some
 start-plan keys (captcha-gated) do **not** work headless.
+
+### Per-run model override (how the selector works)
+
+The CLI supports `ZCODE_MODEL=provider/model` as an env override — but the
+env-sourced provider entry **shadows** the same provider in `config.json`,
+dropping its `apiKey` and `baseURL`. So a working override needs all three
+(together in the spawned process env):
+
+```bash
+ZCODE_MODEL=zai-coding-plan/GLM-5.3-Flash \
+ZCODE_API_KEY=<provider key> \
+ZCODE_BASE_URL=https://api.z.ai/api/anthropic \
+node zcode.cjs --prompt …
+```
+
+The zcode-web server does this automatically, taking the key and base URL
+from its config. Without them the turn fails with `provider_not_configured`
+or an auth error against the wrong endpoint.
 
 ## API
 

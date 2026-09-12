@@ -162,7 +162,13 @@ async function send() {
   try {
     const res = await api("/api/chat", {
       method: "POST",
-      body: JSON.stringify({ text, sessionId: state.sessionId, cwd: state.cwd, mode: $("mode-select").value }),
+      body: JSON.stringify({
+        text,
+        sessionId: state.sessionId,
+        cwd: state.cwd,
+        mode: $("mode-select").value,
+        model: $("model-select").value || undefined,
+      }),
     });
     state.job.id = res.jobId;
     if (res.sessionId) state.sessionId = res.sessionId;
@@ -263,6 +269,27 @@ function addEmptyHint(text) {
   $("messages").appendChild(div);
 }
 
+async function loadModels() {
+  const sel = $("model-select");
+  try {
+    const { models } = await api("/api/models");
+    if (!models.length) { sel.classList.add("hidden"); return; }
+    sel.classList.remove("hidden");
+    const saved = localStorage.getItem("zcode-web-model") || "";
+    sel.innerHTML = "";
+    for (const m of models) {
+      const opt = document.createElement("option");
+      opt.value = m.ref;
+      opt.textContent = `${m.model} · ${m.providerName}`;
+      if (m.isDefault) opt.textContent += " (default)";
+      sel.appendChild(opt);
+    }
+    sel.value = models.some((m) => m.ref === saved) ? saved : (models.find((m) => m.isDefault) || models[0]).ref;
+  } catch {
+    sel.classList.add("hidden");
+  }
+}
+
 async function refreshProjects() {
   const select = $("project-select");
   try {
@@ -310,6 +337,7 @@ async function boot() {
       const sel = $("mode-select");
       for (const opt of [...sel.options]) if (!cfg.modes.includes(opt.value)) opt.remove();
     }
+    await loadModels();
     await refreshProjects();
     await refreshSessions();
   } catch (e) {
@@ -320,6 +348,7 @@ async function boot() {
   }
 }
 
+$("model-select").onchange = () => localStorage.setItem("zcode-web-model", $("model-select").value);
 $("send-btn").onclick = send;
 $("cancel-btn").onclick = cancelJob;
 $("new-chat-btn").onclick = () => {

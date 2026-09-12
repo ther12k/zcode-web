@@ -79,7 +79,7 @@ export class JobManager {
     return this.jobs.get(jobId) || null;
   }
 
-  start({ text, sessionId, cwd, mode }) {
+  start({ text, sessionId, cwd, mode, model, modelApiKey, modelBaseUrl }) {
     if (!existsSync(config.cliEntry)) {
       throw Object.assign(new Error("ZCode CLI bundle not found at " + config.cliEntry), { status: 503 });
     }
@@ -102,7 +102,21 @@ export class JobManager {
 
     const proc = spawn(process.execPath, args, {
       cwd,
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "" },
+      env: {
+        ...process.env,
+        ELECTRON_RUN_AS_NODE: "",
+        // ZCODE_MODEL overrides the run's model, but the env-sourced provider
+        // entry shadows the one in config.json — its API key AND baseURL must
+        // ride along via env or the turn fails (provider_not_configured /
+        // wrong endpoint auth).
+        ...(model
+          ? {
+              ZCODE_MODEL: model,
+              ...(modelApiKey ? { ZCODE_API_KEY: modelApiKey } : {}),
+              ...(modelBaseUrl ? { ZCODE_BASE_URL: modelBaseUrl } : {}),
+            }
+          : {}),
+      },
       stdio: ["ignore", "pipe", "pipe"],
     });
     job.proc = proc;

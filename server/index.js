@@ -112,6 +112,37 @@ function providerConfigured() {
   }
 }
 
+// Enumerate provider/model pairs from the CLI's user config, for the UI
+// selector. Internal entries carry the provider apiKey (server-side only —
+// never send to the client). Returns [] when unconfigured.
+function listModels({ withKeys = false } = {}) {
+  try {
+    const cfg = JSON.parse(readFileSync(cliStatus().configPath, "utf8"));
+    const providers = cfg.provider || {};
+    const main = cfg.model?.main || (typeof cfg.model === "string" ? cfg.model : null);
+    const out = [];
+    for (const [id, p] of Object.entries(providers)) {
+      const models = p?.models || {};
+      for (const modelId of Object.keys(models)) {
+        const ref = `${id}/${modelId}`;
+        out.push({
+          ref,
+          provider: id,
+          providerName: p.name || id,
+          model: modelId,
+          isDefault: ref === main,
+          ...(withKeys
+            ? { apiKey: p.options?.apiKey || null, baseURL: p.options?.baseURL || null }
+            : {}),
+        });
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 // ---------- API ----------
 
 async function handleApi(req, res, url) {
@@ -179,6 +210,10 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { session, transcript: store.transcript(session.id) });
   }
 
+  if (route === "/api/models" && req.method === "GET") {
+    return sendJson(res, 200, { models: listModels() });
+  }
+
   if (route === "/api/chat" && req.method === "POST") {
     const body = JSON.parse(await readBody(req, 1024 * 1024));
     const text = String(body.text || "").trim();
@@ -192,9 +227,19 @@ async function handleApi(req, res, url) {
     }
     const sessionId = body.sessionId && /^sess_[A-Za-z0-9-]+$/.test(body.sessionId) ? body.sessionId : null;
     const mode = config.allowedModes.includes(body.mode) ? body.mode : "plan";
+    // model must be a configured provider/model pair — never a free string
+    const modelEntry = listModels({ withKeys: true }).find((m) => m.ref === body.model) || null;
     try {
-      const job = jobs.start({ text, sessionId, cwd, mode });
-      return sendJson(res, 202, { jobId: job.id, sessionId: job.sessionId, cwd, mode });
+      const job = jobs.start({
+        text,
+        sessionId,
+        cwd,
+        mode,
+        model: modelEntry?.ref || null,
+        modelApiKey: modelEntry?.apiKey || null,
+        modelBaseUrl: modelEntry?.baseURL || null,
+      });
+      return sendJson(res, 202, { jobId: job.id, sessionId: job.sessionId, cwd, mode, model: modelEntry?.ref || null });
     } catch (e) {
       return sendJson(res, e.status || 500, { error: e.message });
     }
