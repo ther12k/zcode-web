@@ -6,6 +6,15 @@
 #   b) mount it at runtime:  ./cli/zcode.cjs:/opt/zcode/zcode.cjs:ro
 # Get it from a local ZCode Desktop install, e.g. /opt/ZCode/resources/glm/zcode.cjs
 
+# ZWUI-003: build the modern UI into the image; the legacy vanilla UI ships
+# alongside as the rollback surface (ZCODE_UI=legacy at runtime).
+FROM node:24-slim AS webbuild
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
 FROM node:24-slim
 
 RUN apt-get update \
@@ -16,6 +25,7 @@ WORKDIR /app
 COPY package.json ./
 COPY server ./server
 COPY public ./public
+COPY --from=webbuild /web/dist ./web/dist
 
 # CLI bundle staging (cli/ contains at least a README; zcode.cjs is optional)
 RUN mkdir -p /opt/zcode /data/zcode /data/workspace
@@ -28,6 +38,7 @@ RUN ln -s /data/zcode /root/.zcode
 
 ENV NODE_ENV=production \
     PORT=3000 \
+    ZCODE_UI=modern \
     ZCODE_CLI_ENTRY=/opt/zcode/zcode.cjs \
     ZCODE_HOME=/data/zcode \
     ZCODE_WORKSPACE_ROOT=/data/workspace

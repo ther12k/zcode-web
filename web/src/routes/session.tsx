@@ -19,6 +19,8 @@ export function SessionView() {
 
   async function load(limit = PAGE, offset = 0, replace = true) {
     if (!sessionId) return;
+    const container = document.querySelector(".transcript") as HTMLElement | null;
+    const prevHeight = container?.scrollHeight ?? 0;
     setLoading(true);
     try {
       const d = await client.session(sessionId, limit, offset);
@@ -33,6 +35,16 @@ export function SessionView() {
             }
       );
       setError(null);
+      // ZWUI-019: keep the reading position when prepending history
+      if (!replace && container) {
+        requestAnimationFrame(() => {
+          const c = document.querySelector(".transcript") as HTMLElement | null;
+          if (c) {
+            const delta = c.scrollHeight - prevHeight;
+            if (delta > 0) c.scrollTop += delta;
+          }
+        });
+      }
     } catch (e) {
       // ZWUI-018: DB failures are real errors, shown as such
       setError(e instanceof ApiError ? `${e.status}: ${e.message}` : String(e));

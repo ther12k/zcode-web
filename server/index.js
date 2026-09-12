@@ -14,6 +14,10 @@ import { SessionStore } from "./sessions.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const PUBLIC_DIR = join(ROOT, "public");
+// ZWUI-003: modern UI (built Vite app) is the default surface; the legacy
+// vanilla UI remains as an explicit rollback (ZCODE_UI=legacy).
+const UI_MODE = (process.env.ZCODE_UI || "modern").trim(); // modern | legacy
+const WEB_DIST = join(ROOT, "web", "dist");
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "0.0.0.0";
 const TOKEN = (process.env.ZCODE_WEB_TOKEN || "").trim();
@@ -125,23 +129,45 @@ const MIME = {
 };
 
 function serveStatic(res, pathname) {
+  const serveFile = (file, cache = "no-store") => {
+    res.writeHead(200, {
+      "content-type": MIME[extname(file)] || "application/octet-stream",
+      // no-store: UI updates must be picked up on a normal refresh
+      "cache-control": cache,
+    });
+    res.end(readFileSync(file));
+  };
+
+  if (UI_MODE === "modern" && existsSync(join(WEB_DIST, "index.html"))) {
+    // hashed Vite assets are content-addressed → immutable caching
+    const assetsDir = join(WEB_DIST, "assets");
+    if (pathname.startsWith("/assets/")) {
+      const asset = normalize(join(assetsDir, pathname.slice("/assets/".length)));
+      if (asset.startsWith(assetsDir + sep) && existsSync(asset)) {
+        return serveFile(asset, "public, max-age=31536000, immutable");
+      }
+      return sendJson(res, 404, { error: "not found" });
+    }
+    for (const rel of ["/vite.svg", "/favicon.ico"]) {
+      if (pathname === rel && existsSync(join(WEB_DIST, rel.slice(1)))) {
+        return serveFile(join(WEB_DIST, rel.slice(1)), "public, max-age=3600");
+      }
+    }
+    // SPA fallback: every app route serves index.html (route identity is
+    // client-side; deep links like /w/x/s/sess_y must survive refresh)
+    return serveFile(join(WEB_DIST, "index.html"));
+  }
+
+  // legacy vanilla UI (rollback surface)
   const rel = pathname === "/" ? "index.html" : pathname.slice(1);
   const file = normalize(join(PUBLIC_DIR, rel));
   if (!file.startsWith(PUBLIC_DIR + sep) && file !== join(PUBLIC_DIR, "index.html")) {
-    sendJson(res, 404, { error: "not found" });
-    return;
+    return sendJson(res, 404, { error: "not found" });
   }
   if (!existsSync(file) || extname(file) === "") {
-    // SPA-ish fallback for unknown routes
-    sendJson(res, 404, { error: "not found" });
-    return;
+    return sendJson(res, 404, { error: "not found" });
   }
-  res.writeHead(200, {
-    "content-type": MIME[extname(file)] || "application/octet-stream",
-    // no-store: UI updates must be picked up on a normal refresh
-    "cache-control": "no-store",
-  });
-  res.end(readFileSync(file));
+  serveFile(file);
 }
 
 function providerConfigured() {

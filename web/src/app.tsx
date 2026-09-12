@@ -6,6 +6,8 @@ import { useEffect, useRef, useState } from "react";
 import { useWorkspace } from "./workspace";
 import { SessionList } from "./components/SessionList";
 import { CommandPalette } from "./components/CommandPalette";
+import { ProjectPicker } from "./components/ProjectPicker";
+import { ActivityInspector } from "./components/ActivityInspector";
 
 export function App() {
   const { caps, token, setToken, prefs } = useWorkspace();
@@ -34,22 +36,7 @@ export function App() {
         <span className="brand">
           zcode<span className="accent">-web</span>
         </span>
-        <select
-          aria-label="Project directory (cwd)"
-          value={params.workspace ? `w/${params.workspace}` : ""}
-          onChange={(e) => {
-            const v = e.target.value; // e.g. "w/default" | "w2/home%2F..."
-            navigate({ to: `/${v}` });
-          }}
-        >
-          {(caps?.allowedRoots || []).flatMap((root) =>
-            safeList(root).map((p) => (
-              <option key={p.path} value={p.routeValue}>
-                {p.label}
-              </option>
-            ))
-          )}
-        </select>
+        <ProjectPicker />
         <button onClick={() => setPaletteOpen(true)} title="Command palette (Ctrl+K)">
           ⌘K
         </button>
@@ -107,6 +94,7 @@ export function App() {
             ? `${caps.runtime} · jobs ${caps.maxJobs} · cli ${caps.cliPresent ? "ok" : "missing"}`
             : "connecting…"}
         </div>
+        <ActivityInspector />
         <button className="ghost" onClick={() => navigate({ to: "/settings" })}>
           Settings & diagnostics
         </button>
@@ -118,10 +106,3 @@ export function App() {
   );
 }
 
-// project options: enumerate root dirs client-side from caps; deep listing is
-// /api/projects' job — kept in sync by the picker issue (ZWUI-010).
-function safeList(root: string): { path: string; label: string; routeValue: string }[] {
-  // routeValue encodes a workspace alias; real enumeration lands with ZWUI-010.
-  const label = root.split("/").filter(Boolean).pop() || root;
-  return [{ path: root, label, routeValue: root === "/" ? "default" : label.toLowerCase() }];
-}
