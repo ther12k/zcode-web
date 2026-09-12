@@ -310,8 +310,17 @@ function ProjectGroups({ roots, activeSessionId, onSelectSession, onSelectProjec
     return () => { alive = false; };
   }, [token]);
 
-  function toggle(dir: string) {
+  async function toggle(dir: string) {
     setOpen((o) => ({ ...o, [dir]: !o[dir] }));
+    // expanding a root group refreshes its directory listing so newly
+    // created projects appear without a reload
+    if (roots.includes(dir)) {
+      try {
+        const r = await fetch("/api/projects", { headers: { authorization: `Bearer ${token}` } });
+        const j = await r.json();
+        setDirsByRoot((m) => ({ ...m, ...(Object.fromEntries((j.roots || []).map((x: { path: string; projects: string[] }) => [x.path, x.projects]))) }));
+      } catch { /* keep previous listing */ }
+    }
     if (!sessionsByDir[dir]) {
       void fetch(`/api/sessions?cwd=${encodeURIComponent(dir)}`, { headers: { authorization: `Bearer ${token}` } })
         .then((r) => r.json())
