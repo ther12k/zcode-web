@@ -53,7 +53,9 @@ function renderMarkdown(text) {
     try {
       const html = marked.parse(text, { breaks: true });
       const div = document.createElement("div");
-      div.innerHTML = html;
+      // marked allows raw HTML by default — model replies and shared-session
+      // transcripts are untrusted, so sanitize before touching innerHTML
+      div.innerHTML = window.DOMPurify ? DOMPurify.sanitize(html) : html;
       return div;
     } catch { /* fall through */ }
   }
@@ -317,29 +319,43 @@ async function send() {
 }
 
 function subscribe(jobId) {
-  const url = `/api/events/${jobId}${state.token ? `?token=${encodeURIComponent(state.token)}` : ""}`;
-  const es = new EventSource(url);
-  state.job.es = es;
-  es.onmessage = (ev) => {
-    const msg = JSON.parse(ev.data);
-    if (msg.kind === "line") handleStreamLine(msg.line);
-    else if (msg.kind === "done") {
-      if (msg.error) setActivity(`job failed: ${msg.error}`, true);
-      // keep the streamed error text visible — it says more than "ended"
-      else if (!(state.job?.sawError) && msg.exitCode !== 0 && msg.exitCode !== null) {
-        setActivity(`ended with errors (exit ${msg.exitCode})`, true);
+  // Exchange the bearer token for a short-lived job-scoped ticket so the
+  // long-lived token never appears in the EventSource URL (proxy logs, history).
+  let ticket = null;
+  const url = () =>
+    `/api/events/${jobId}${ticket ? `?ticket=${encodeURIComponent(ticket)}` : ""}`;
+  api("/api/sse-ticket", { method: "POST", body: JSON.stringify({ jobId }) })
+    .then((r) => {
+      ticket = r.ticket;
+      if (state.job && state.job.id === jobId && !state.job.es) openEs();
+    })
+    .catch(() => openEs()); // ticket is best-effort; server may allow tokenless local use
+
+  function openEs() {
+    if (!state.job || state.job.id !== jobId || state.job.es) return;
+    const es = new EventSource(url());
+    state.job.es = es;
+    es.onmessage = (ev) => {
+      const msg = JSON.parse(ev.data);
+      if (msg.kind === "line") handleStreamLine(msg.line);
+      else if (msg.kind === "done") {
+        if (msg.error) setActivity(`job failed: ${msg.error}`, true);
+        // keep the streamed error text visible — it says more than "ended"
+        else if (!(state.job?.sawError) && msg.exitCode !== 0 && msg.exitCode !== null) {
+          setActivity(`ended with errors (exit ${msg.exitCode})`, true);
+        }
+        finishJob();
+      } else if (msg.kind === "timeout") {
+        setActivity("job timed out and was killed", true);
       }
-      finishJob();
-    } else if (msg.kind === "timeout") {
-      setActivity("job timed out and was killed", true);
-    }
-  };
-  es.onerror = () => {
-    if (state.job && state.job.id === jobId) {
-      setActivity("connection lost", true);
-      finishJob();
-    }
-  };
+    };
+    es.onerror = () => {
+      if (state.job && state.job.id === jobId) {
+        setActivity("connection lost", true);
+        finishJob();
+      }
+    };
+  }
 }
 
 function finishJob() {
@@ -425,20 +441,25 @@ async function loadTurns(sessionId, { reset = false } = {}) {
       roleEl.className = "role";
       roleEl.textContent = turn.role;
       msgEl.appendChild(roleEl);
-      if (turn.tool) {
+      if (turn.text) {
+        msgEl.appendChild(turn.role === "assistant" ? renderMarkdown(turn.text) : document.createTextNode(turn.text));
+      }
+      for (const tool of turn.tools || []) {
         const card = document.createElement("div");
-        card.className = `tool-card ${turn.tool.status === "completed" ? "done" : turn.tool.status}`;
-        card.textContent = `🔧 ${turn.tool.name} — ${turn.tool.status}${turn.tool.detail ? ": " + turn.tool.detail.slice(0, 120) : ""}`;
+        card.className = `tool-card ${tool.status === "completed" ? "done" : tool.status}`;
+        card.textContent = `🔧 ${tool.name} — ${tool.status}${tool.detail ? ": " + tool.detail.slice(0, 120) : ""}`;
         msgEl.appendChild(card);
-      } else if (turn.file) {
+      }
+      for (const file of turn.files || []) {
         const card = document.createElement("div");
         card.className = "artifact-card";
-        const kind = turn.file.mime.startsWith("image/") ? "🖼 image" : "📄 file";
-        const size = turn.file.size ? ` · ${Math.ceil(turn.file.size / 1024)} KB` : "";
-        card.textContent = `${kind} artifact · ${turn.file.mime}${size} · ${turn.file.storageKind}`;
+        const kind = (file.mime || "").startsWith("image/") ? "🖼 image" : "📄 file";
+        const size = file.size ? ` · ${Math.ceil(file.size / 1024)} KB` : "";
+        card.textContent = `${kind} artifact · ${file.mime}${size} · ${file.storageKind}`;
         msgEl.appendChild(card);
-      } else {
-        msgEl.appendChild(turn.role === "assistant" ? renderMarkdown(turn.text) : document.createTextNode(turn.text));
+      }
+      if (!turn.text && !(turn.tools || []).length && !(turn.files || []).length) {
+        msgEl.appendChild(document.createTextNode("—"));
       }
       $("messages").insertBefore(msgEl, anchor);
     }
@@ -586,3 +607,6 @@ $("prompt-input").addEventListener("keydown", (ev) => {
 });
 
 boot();
+
+// debug/test hook
+window.renderMarkdown = renderMarkdown;

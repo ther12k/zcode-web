@@ -128,14 +128,16 @@ export class SessionStore {
           error: errMsg,
         });
       }
-    }
-    const all = [];
-    for (const t of turns) {
-      if (t.texts.length) all.push({ role: t.role, text: t.texts.join("\n") });
-      else if (t.error) all.push({ role: t.role, text: `⚠ turn failed: ${t.error}` });
-      for (const tool of t.tools || []) all.push({ role: t.role, tool });
-      for (const file of t.files || []) all.push({ role: t.role, file });
-    }
+    }    // one entry per logical message (mseq), each carrying its text plus tool
+    // and file parts — pagination must not split a message from its artifacts
+    const all = turns
+      .filter((t) => t.texts.length || t.error || (t.tools && t.tools.length) || (t.files && t.files.length))
+      .map((t) => ({
+        role: t.role,
+        text: t.texts.length ? t.texts.join("\n") : t.error ? `⚠ turn failed: ${t.error}` : "",
+        tools: t.tools || [],
+        files: t.files || [],
+      }));
     const total = all.length;
     const end = Math.max(0, total - offset);
     const start = Math.max(0, end - limit);

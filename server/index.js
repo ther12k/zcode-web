@@ -3,7 +3,7 @@
 // the ZCode CLI headless (see server/zcode.js).
 
 import { createServer } from "node:http";
-import { timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { extname, join, normalize, resolve, sep } from "node:path";
@@ -31,6 +31,21 @@ const ALLOWED_ROOTS = [
 const jobs = new JobManager();
 const store = new SessionStore(cliStatus().dbPath);
 
+// Short-lived tickets let EventSource connect without putting the long-lived
+// bearer token in the URL (which leaks into proxy logs / history). A ticket
+// is bound to one job and expires with it.
+const sseTickets = new Map(); // ticket -> { jobId, exp }
+function issueSseTicket(jobId) {
+  for (const [t, v] of sseTickets) if (v.exp < Date.now()) sseTickets.delete(t);
+  const ticket = randomBytes(24).toString("hex");
+  sseTickets.set(ticket, { jobId, exp: Date.now() + config.jobTimeoutMs + 60_000 });
+  return ticket;
+}
+function validSseTicket(ticket, jobId) {
+  const v = sseTickets.get(String(ticket || ""));
+  return Boolean(v && v.jobId === jobId && v.exp > Date.now());
+}
+
 mkdirSync(WORKSPACE_ROOT, { recursive: true });
 
 // ---------- helpers ----------
@@ -52,8 +67,10 @@ function readBody(req, limit = 512 * 1024) {
     req.on("data", (c) => {
       size += c.length;
       if (size > limit) {
+        // drain so the 413 response can still be written; Node closes the
+        // connection after the response ends
+        req.resume();
         reject(Object.assign(new Error("body too large"), { status: 413 }));
-        req.destroy();
         return;
       }
       chunks.push(c);
@@ -63,10 +80,10 @@ function readBody(req, limit = 512 * 1024) {
   });
 }
 
-function isAuthorized(req, url) {
+function isAuthorized(req) {
   if (!TOKEN) return true;
   const header = req.headers.authorization || "";
-  const bearer = header.startsWith("Bearer ") ? header.slice(7) : url.searchParams.get("token") || "";
+  const bearer = header.startsWith("Bearer ") ? header.slice(7) : "";
   const a = Buffer.from(bearer);
   const b = Buffer.from(TOKEN);
   return a.length === b.length && timingSafeEqual(a, b);
@@ -92,7 +109,17 @@ const MIME = {
   ".css": "text/css; charset=utf-8",
   ".svg": "image/svg+xml",
   ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".bmp": "image/bmp",
   ".ico": "image/x-icon",
+  ".pdf": "application/pdf",
+  ".txt": "text/plain; charset=utf-8",
+  ".md": "text/markdown; charset=utf-8",
+  ".csv": "text/csv",
+  ".log": "text/plain; charset=utf-8",
   ".json": "application/json; charset=utf-8",
 };
 
@@ -248,8 +275,17 @@ async function handleApi(req, res, url) {
     const body = JSON.parse(await readBody(req, Math.ceil(config.maxUploadBytes * 1.34) + 64 * 1024));
     const rawName = String(body.name || "file");
     const safeName = rawName.replace(/[^A-Za-z0-9._ -]/g, "_").replace(/^\.+/, "_").slice(0, 120);
-    const data = Buffer.from(String(body.data || ""), "base64");
+    const b64 = String(body.data || "").replace(/^data:[^;]*;base64,/, "");
+    // strict validation: Buffer.from("base64") silently ignores invalid
+    // characters and would persist corrupted files
+    if (!b64 || b64.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) {
+      return sendJson(res, 400, { error: "invalid base64 payload" });
+    }
+    const data = Buffer.from(b64, "base64");
     if (!data.length) return sendJson(res, 400, { error: "empty file" });
+    if (data.length < Math.floor((b64.length * 3) / 4) - 2) {
+      return sendJson(res, 400, { error: "corrupt base64 payload" });
+    }
     if (data.length > config.maxUploadBytes) return sendJson(res, 413, { error: "file too large" });
     const dir = uploadsDir();
     mkdirSync(dir, { recursive: true });
@@ -277,7 +313,9 @@ async function handleApi(req, res, url) {
 
   if (route === "/api/chat" && req.method === "POST") {
     const body = JSON.parse(await readBody(req, 1024 * 1024));
-    const text = String(body.text || "").trim();
+    let text = String(body.text || "").trim();
+    const hasAttachments = Array.isArray(body.attachments) && body.attachments.length > 0;
+    if (!text && hasAttachments) text = "Analyze the attached file(s).";
     if (!text) return sendJson(res, 400, { error: "text is required" });
     let cwd;
     try {
@@ -322,11 +360,25 @@ async function handleApi(req, res, url) {
     return sendJson(res, canceled ? 200 : 404, canceled ? { canceled: true } : { error: "job not found or already finished" });
   }
 
-  // SSE: stream job events. Token may be passed via ?token= since EventSource
-  // cannot set headers.
+  // SSE ticket: the browser exchanges its bearer token for a short-lived,
+  // job-scoped ticket so EventSource never carries the token in a URL.
+  if (route === "/api/sse-ticket" && req.method === "POST") {
+    const body = JSON.parse(await readBody(req));
+    const jobId = String(body.jobId || "");
+    if (!/^[0-9a-f-]{16,64}$/.test(jobId) || !jobs.get(jobId)) {
+      return sendJson(res, 404, { error: "job not found" });
+    }
+    return sendJson(res, 200, { ticket: issueSseTicket(jobId) });
+  }
+
+  // SSE: stream job events. Auth: bearer header or ?ticket= from /api/sse-ticket
+  // (EventSource cannot set headers; the ticket avoids URL token leakage).
   const eventsMatch = route.match(/^\/api\/events\/([0-9a-f-]+)$/);
   if (eventsMatch && req.method === "GET") {
-    const job = jobs.get(eventsMatch[1]);
+    const jobId = eventsMatch[1];
+    const authed = isAuthorized(req, url) || validSseTicket(url.searchParams.get("ticket"), jobId);
+    if (!authed) return sendJson(res, 401, { error: "unauthorized" });
+    const job = jobs.get(jobId);
     if (!job) return sendJson(res, 404, { error: "job not found" });
     res.writeHead(200, {
       "content-type": "text/event-stream",
@@ -359,7 +411,9 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   try {
     if (url.pathname.startsWith("/api/")) {
-      if (!isAuthorized(req, url)) return sendJson(res, 401, { error: "unauthorized" });
+      // SSE authenticates inside handleApi (bearer OR short-lived ticket)
+      const isSse = /^\/api\/events\/[0-9a-f-]+$/.test(url.pathname) && req.method === "GET";
+      if (!isSse && !isAuthorized(req)) return sendJson(res, 401, { error: "unauthorized" });
       return await handleApi(req, res, url);
     }
     if (req.method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
