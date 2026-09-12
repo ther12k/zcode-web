@@ -107,6 +107,24 @@ details.reasoning .reasoning-body {
   max-height: 300px; overflow-y: auto;
 }
 
+/* tool-call artifact cards */
+.tool-card {
+  font-family: var(--mono);
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent-dim);
+  border-radius: 6px;
+  background: #0a0e14;
+  padding: 6px 10px;
+  margin: 6px 0;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.tool-card.running { border-left-color: #d29922; color: var(--text); }
+.tool-card.done, .tool-card.completed { border-left-color: #3fb950; }
+.tool-card.failed { border-left-color: var(--danger); color: #ffb3ad; }
+.tool-card.cancelled { border-left-color: var(--text-muted); }
+
 .activity {
   font-family: var(--mono);
   font-size: 12px;

@@ -8,6 +8,22 @@
 import { DatabaseSync } from "node:sqlite";
 import { existsSync } from "node:fs";
 
+// Compact artifact summary for a tool part (shape: CLI 0.16.5
+// {type:"tool", tool, callID, state:{status, input, output…}}).
+function toolSummary(part) {
+  const input = part.state?.input || {};
+  const detail =
+    input.command || input.filePath || input.path || input.query ||
+    input.pattern || input.url || Object.keys(input).length
+      ? JSON.stringify(input)
+      : "";
+  return {
+    name: part.tool || "tool",
+    status: part.state?.status || "unknown",
+    detail: detail.slice(0, 160),
+  };
+}
+
 export class SessionStore {
   constructor(dbPath) {
     this.dbPath = dbPath;
@@ -90,18 +106,24 @@ export class SessionStore {
       const last = turns[turns.length - 1];
       if (last && last.mseq === r.mseq) {
         if (text.trim()) last.texts.push(text);
+        else if (part.type === "tool") last.tools.push(toolSummary(part));
       } else {
         const errMsg =
           msg.error?.data?.message || msg.error?.message || msg.error?.name || null;
-        turns.push({ role: msg.role || "?", mseq: r.mseq, texts: text.trim() ? [text] : [], error: errMsg });
+        turns.push({
+          role: msg.role || "?", mseq: r.mseq,
+          texts: text.trim() ? [text] : [],
+          tools: part.type === "tool" ? [toolSummary(part)] : [],
+          error: errMsg,
+        });
       }
     }
-    const all = turns
-      .map(({ role, texts, error }) => ({
-        role,
-        text: texts.length ? texts.join("\n") : error ? `⚠ turn failed: ${error}` : "",
-      }))
-      .filter((t) => t.text);
+    const all = [];
+    for (const t of turns) {
+      if (t.texts.length) all.push({ role: t.role, text: t.texts.join("\n") });
+      else if (t.error) all.push({ role: t.role, text: `⚠ turn failed: ${t.error}` });
+      if (t.tools) for (const tool of t.tools) all.push({ role: t.role, tool });
+    }
     const total = all.length;
     const end = Math.max(0, total - offset);
     const start = Math.max(0, end - limit);

@@ -123,7 +123,19 @@ function describeLine(line) {
     typeof p.text === "string" ? p.text :
     (p.part && typeof p.part.text === "string") ? p.part.text : null;
   if (text) return { kind: "text", text };
-  if (TYPE_LABELS[line.type]) return { kind: "activity", label: TYPE_LABELS[line.type] };
+  if (line.type && line.type.startsWith("tool.call.")) {
+    const status = line.type.endsWith("started") ? "running"
+      : line.type.endsWith("failed") ? "failed"
+      : line.type.endsWith("cancelled") ? "cancelled" : "done";
+    return {
+      kind: "tool",
+      callId: p.callID || p.toolCallId || p.id || "",
+      tool: p.toolName || p.tool || p.name || "tool",
+      status,
+      detail: typeof p.input === "string" ? p.input : p.input ? JSON.stringify(p.input) : "",
+    };
+  }
+  if (TYPE_LABELS[line.type] !== undefined) return { kind: "activity", label: TYPE_LABELS[line.type] };
   if (p.type) return { kind: "activity", label: p.type };
   if (line.type) return { kind: "activity", label: line.type };
   return { kind: "activity", label: "event" };
@@ -163,7 +175,24 @@ function handleStreamLine(line) {
     state.job.answerEl.innerHTML = "";
     state.job.answerEl.appendChild(renderMarkdown(p.response));
   }
-  if (d.kind === "error") { setActivity("error: " + d.text, true); return; }
+  if (d.kind === "tool") {
+    if (!state.job) return;
+    const map = state.job.toolCards || (state.job.toolCards = new Map());
+    let card = map.get(d.callId);
+    if (!card) {
+      card = document.createElement("div");
+      state.job.bubble.insertBefore(card, state.job.activityEl);
+      map.set(d.callId, card);
+    }
+    card.className = `tool-card ${d.status}`;
+    card.textContent = `🔧 ${d.tool} — ${d.status}${d.detail ? ": " + d.detail.slice(0, 100) : ""}`;
+    return;
+  }
+  if (d.kind === "error") {
+    state.job.sawError = true;
+    setActivity("error: " + d.text, true);
+    return;
+  }
   if (d.kind === "activity" && d.label) setActivity(d.label);
 }
 
@@ -222,6 +251,8 @@ function subscribe(jobId) {
     if (msg.kind === "line") handleStreamLine(msg.line);
     else if (msg.kind === "done") {
       if (msg.error) setActivity(`job failed: ${msg.error}`, true);
+      else if (state.job?.sawError) setActivity("ended with errors", true); // keep the real error visible
+      else if (msg.exitCode !== 0 && msg.exitCode !== null) setActivity(`ended with errors (exit ${msg.exitCode})`, true);
       else setActivity("done");
       finishJob();
     } else if (msg.kind === "timeout") {
@@ -319,7 +350,14 @@ async function loadTurns(sessionId, { reset = false } = {}) {
       roleEl.className = "role";
       roleEl.textContent = turn.role;
       msgEl.appendChild(roleEl);
-      msgEl.appendChild(turn.role === "assistant" ? renderMarkdown(turn.text) : document.createTextNode(turn.text));
+      if (turn.tool) {
+        const card = document.createElement("div");
+        card.className = `tool-card ${turn.tool.status === "completed" ? "done" : turn.tool.status}`;
+        card.textContent = `🔧 ${turn.tool.name} — ${turn.tool.status}${turn.tool.detail ? ": " + turn.tool.detail.slice(0, 120) : ""}`;
+        msgEl.appendChild(card);
+      } else {
+        msgEl.appendChild(turn.role === "assistant" ? renderMarkdown(turn.text) : document.createTextNode(turn.text));
+      }
       $("messages").insertBefore(msgEl, anchor);
     }
     state.loadedTurns = offset + transcript.length;
@@ -343,11 +381,17 @@ async function loadModels() {
     if (!models.length) { sel.classList.add("hidden"); return; }
     sel.classList.remove("hidden");
     const saved = localStorage.getItem("zcode-web-model") || "";
+    // disambiguate identical display names (e.g. two providers both called
+    // "Z.ai - Coding Plan") by appending the provider id
+    const baseLabel = (m) => `${m.model} · ${m.providerName}`;
+    const counts = {};
+    for (const m of models) counts[baseLabel(m)] = (counts[baseLabel(m)] || 0) + 1;
     sel.innerHTML = "";
     for (const m of models) {
       const opt = document.createElement("option");
+      const base = baseLabel(m);
       opt.value = m.ref;
-      opt.textContent = `${m.model} · ${m.providerName}`;
+      opt.textContent = counts[base] > 1 ? `${base} [${m.provider}]` : base;
       if (m.isDefault) opt.textContent += " (default)";
       sel.appendChild(opt);
     }
