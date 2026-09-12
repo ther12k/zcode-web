@@ -501,6 +501,22 @@ async function handleApi(req, res, url) {
     });
   }
 
+  // Recent sessions under a root (directory LIKE root%), bounded — powers the
+  // sidebar "Sessions" view. Same scoping rules as search (ZWUI-029).
+  if (route === "/api/sessions/recent" && req.method === "GET") {
+    const root = url.searchParams.get("root") || "";
+    const abs = resolve(root);
+    if (!ALLOWED_ROOTS.some((r) => abs === r || abs.startsWith(r + sep))) {
+      return sendJson(res, 403, { error: "root outside allowed roots" });
+    }
+    try {
+      return sendJson(res, 200, { sessions: store.recentUnder(abs, 30) });
+    } catch (e) {
+      const status = e.code === "DB_MISSING" ? 503 : 500;
+      return sendJson(res, status, { error: e.message, code: e.code });
+    }
+  }
+
   // ---- ZWUI-029: bounded authorized session search ----
   // LIKE-based title search across the sessions table, bounded (LIMIT 20),
   // scoped to the allowed roots by directory prefix matching.
@@ -610,6 +626,23 @@ async function handleApi(req, res, url) {
 
   // Opt-in via ZCODE_ENABLE_GIT=1; executes `git status --porcelain` /
   // `git diff` in an allowed-root cwd. No staging, no checkout, no writes.
+  // ZWUI-030 companion: read-only directory listing for the Code inspector.
+  const filesListMatch = route.match(/^\/api\/files\/list$/);
+  if (filesListMatch && req.method === "GET") {
+    if (process.env.ZCODE_ENABLE_FILES !== "1") {
+      return sendJson(res, 403, { error: "file API disabled (set ZCODE_ENABLE_FILES=1)" });
+    }
+    let dir;
+    try { dir = safeCwd(url.searchParams.get("dir")); }
+    catch (e) { return sendJson(res, 400, { error: e.message }); }
+    if (!existsSync(dir) || !statSync(dir).isDirectory()) return sendJson(res, 404, { error: "not found" });
+    const entries = readdirSync(dir, { withFileTypes: true })
+      .filter((d) => !d.name.startsWith(".") && d.name !== "node_modules")
+      .map((d) => ({ name: d.name, dir: d.isDirectory() }))
+      .sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name));
+    return sendJson(res, 200, { dir, entries });
+  }
+
   if (route === "/api/git/status" && req.method === "GET") {
     if (process.env.ZCODE_ENABLE_GIT !== "1") {
       return sendJson(res, 403, { error: "git API disabled (set ZCODE_ENABLE_GIT=1)" });
@@ -623,7 +656,9 @@ async function handleApi(req, res, url) {
         status: line.slice(0, 2).trim(),
         path: line.slice(3),
       }));
-      return sendJson(res, 200, { cwd, entries });
+      execFile("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd }, (e2, branch) => {
+        return sendJson(res, 200, { cwd, entries, branch: e2 ? null : String(branch).trim() });
+      });
     });
     return;
   }

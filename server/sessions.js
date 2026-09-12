@@ -108,6 +108,15 @@ export class SessionStore {
     }));
   }
 
+  recentUnder(root, limit = 30) {
+    return this.query(
+      `SELECT id, title, directory, time_updated FROM session
+        WHERE directory LIKE ? || '%' AND id NOT LIKE 'sess_subagent_%'
+        ORDER BY time_updated DESC LIMIT ?`,
+      [root, limit]
+    ).map((r) => ({ id: r.id, title: r.title, directory: r.directory, updatedAt: Number(r.time_updated) }));
+  }
+
   get(sessionId) {
     const rows = this.query(
       `SELECT id, title, directory, time_created, time_updated FROM session WHERE id = ?`,

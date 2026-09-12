@@ -5,8 +5,7 @@ import { RouterProvider } from "@tanstack/react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { router } from "./router";
 import { WorkspaceProvider } from "./workspace";
-import "./styles/tokens.css";
-import "./styles/app.css";
+import "./styles/reference.css";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 15_000 } },
