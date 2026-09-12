@@ -10,7 +10,24 @@ Env: `ZCODE_CLI_NODE` = nvm node v24.11.0, `ZCODE_CLI_ENTRY` = host zcode.cjs 0.
 | G2 history compatibility | **PASS** | `node:sqlite` opened read-only under Bun; 9 sessions listed; 460-message session transcript paginates (limit/offset, hasMore) with grouped tools/files; concurrent CLI writes (this desktop session) visible |
 | G3 HTTP contract parity | **PASS** | 401 without bearer on /api/config; /api/models 3 entries; /api/projects roots grouped; /api/sessions?cwd; /api/sessions/:id pagination; legacy `?token=` on SSE 401s; JSON error envelope `{error}` |
 | G4 streaming & lifecycle | **PASS** | lugas `sse()` streamed 231 live envelope events incl. `model.streaming` deltas via `?ticket=`; early client disconnect (2s) left the CLI job running (child alive minutes later — cancel stays explicit); post-run replay re-served the full buffer (5,630 events) to a second ticket holder |
-| G5 deployment & rollback | **PENDING** | requires the dual-runtime Dockerfile (pinned Bun + Node 24) and a rollback rehearsal — not yet implemented |
+| G5 deployment & rollback | **PASS** | `Dockerfile.lugas`: Bun 1.4.0 (pinned) + Node 24.21.0 in one image, `ZCODE_CLI_NODE=/usr/local/bin/node` baked; container rehearsal — bun server → CLI job (fake CLI) → session row written to the volume DB via the node child (host-uid-readable: `{c:1}`); rollback: the SAME volume on the node-only image (`zcode-web:node`) listed the lugas-written session (`sessions: 1`) and served the UI; forward again on lugas — zero data loss either way. Runbook: run containers as `--user $(id -u):$(id -g)` or the CLI's root-owned db is unreadable to the host user |
+
+## Container-specific findings (G5)
+
+1. `VOLUME [/data/zcode, /data/workspace]` in an image shadows a single
+   `/data` bind (Docker plants anonymous volumes at those paths). Mount the
+   two paths explicitly: `-v $PWD/data/zcode:/data/zcode -v
+   $PWD/data/workspace:/data/workspace`.
+2. The lugas server default `HOST` is now `0.0.0.0` — a loopback bind is
+   unreachable through `docker -p`.
+3. Headless CLI runs need a provider config (`~/.zcode/cli/config.json`)
+   even for smoke tests; the fake CLI bypasses this for runtime proofs.
+
+## What is NOT yet claimed
+
+- Load/soak behavior under concurrent jobs (only single-job runs exercised).
+- Static asset serving of the Vite build inside the lugas image (works on the
+  Node image; lugas `assets` config currently lists the legacy files only).
 
 ## Notes for the Lugas framework (feedback from real use)
 

@@ -1,0 +1,1 @@
+{"model": {"main": "fake/model"}, "provider": {"fake": {"name": "fake", "kind": "openai-compatible", "options": {"apiKey": "x", "baseURL": "http://127.0.0.1:9"}}}}

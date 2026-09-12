@@ -3,7 +3,8 @@ import { config } from "./shared.js";
 import { existsSync } from "node:fs";
 
 const PORT = Number(process.env.PORT || 3100);
-const HOST = process.env.HOST || "127.0.0.1";
+// containers need a non-loopback bind; 127.0.0.1 remains valid for local runs
+const HOST = process.env.HOST || "0.0.0.0";
 
 const server = app.serve({ port: PORT, hostname: HOST, maxRequestBodySize: config.maxUploadBytes * 2 });
 

@@ -1,0 +1,59 @@
+# Dual-runtime image for the Lugas migration gate (#43 G5):
+#   - pinned Bun runs the Lugas HTTP layer (server-lugas/)
+#   - Node 24 runs the ZCode CLI child (explicit ZCODE_CLI_NODE)
+# Rollback: the Node-only image (Dockerfile) remains the fallback — same
+# volumes, same env contract, no data migration in either direction.
+
+FROM oven/bun:1.4-slim AS webbuild
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN bun x npm ci
+COPY web/ ./
+RUN bun x vite build
+
+FROM node:24-slim AS base
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ripgrep ca-certificates procps curl unzip \
+ && rm -rf /var/lib/apt/lists/*
+
+# Pin Bun into the Node image (official static binary)
+ARG BUN_VERSION=1.4.0
+RUN curl -fsSL "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip" -o /tmp/bun.zip \
+ && unzip -q /tmp/bun.zip -d /tmp \
+ && mv /tmp/bun-linux-x64/bun /usr/local/bin/bun \
+ && chmod +x /usr/local/bin/bun \
+ && rm -rf /tmp/bun* \
+ && bun --version
+
+FROM base
+WORKDIR /app
+COPY package.json ./
+COPY server-lugas ./server-lugas
+COPY server-lugas/node_modules ./server-lugas/node_modules
+COPY public ./public
+COPY --from=webbuild /web/dist ./web/dist
+
+RUN mkdir -p /opt/zcode /data/zcode /data/workspace
+COPY cli/ /opt/zcode-staging/
+RUN if [ -f /opt/zcode-staging/zcode.cjs ]; then mv /opt/zcode-staging/zcode.cjs /opt/zcode/zcode.cjs; fi \
+ && rm -rf /opt/zcode-staging
+
+RUN ln -s /data/zcode /root/.zcode
+
+# CLI runtime is the Node binary of THIS image (explicit, never Bun)
+ENV NODE_ENV=production \
+    PORT=3000 \
+    ZCODE_UI=modern \
+    ZCODE_CLI_ENTRY=/opt/zcode/zcode.cjs \
+    ZCODE_CLI_NODE=/usr/local/bin/node \
+    ZCODE_HOME=/data/zcode \
+    ZCODE_WORKSPACE_ROOT=/data/workspace
+
+VOLUME ["/data/zcode", "/data/workspace"]
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+  CMD curl -s -o /dev/null http://127.0.0.1:${PORT:-3000}/api/health || exit 1
+
+# Lugas app on Bun; the CLI child still launches via ZCODE_CLI_NODE (node).
+CMD ["bun", "run", "server-lugas/run.ts"]
