@@ -144,19 +144,24 @@ function handleStreamLine(line) {
     state.job.reasoningText = (state.job.reasoningText || "") + d.text;
     if (state.job.reasoningEl) {
       state.job.reasoningEl.querySelector(".reasoning-body").textContent = state.job.reasoningText;
-      if (!state.job.firstTextSeen) state.job.reasoningEl.style.display = "";
+      state.job.reasoningEl.style.display = "";
     }
     return;
   }
   if (d.kind === "text") {
-    state.job.firstTextSeen = true;
-    if (state.job.reasoningEl) state.job.reasoningEl.style.display = ""; // keep collapsed
     state.job.bubbleText += d.text;
-    const el = state.job.bubble;
+    const el = state.job.answerEl;
     el.innerHTML = "";
     el.appendChild(renderMarkdown(state.job.bubbleText));
     $("chat").scrollTop = $("chat").scrollHeight;
     return;
+  }
+  // final safety net: completed turns carry the full response — render it if
+  // streaming produced no visible text (tool-call endings, missed deltas)
+  if (line.type === "turn.completed" && typeof p.response === "string" && state.job && !state.job.bubbleText) {
+    state.job.bubbleText = p.response;
+    state.job.answerEl.innerHTML = "";
+    state.job.answerEl.appendChild(renderMarkdown(p.response));
   }
   if (d.kind === "error") { setActivity("error: " + d.text, true); return; }
   if (d.kind === "activity" && d.label) setActivity(d.label);
@@ -173,13 +178,17 @@ async function send() {
   input.value = "";
 
   const bubble = addMsg("assistant", "");
-  const activityEl = document.createElement("div");
-  bubble.appendChild(activityEl);
   const reasoningEl = document.createElement("details");
   reasoningEl.className = "reasoning";
   reasoningEl.innerHTML = `<summary>thinking</summary><div class="reasoning-body"></div>`;
+  reasoningEl.style.display = "none";
+  const answerEl = document.createElement("div");
+  answerEl.className = "answer";
   bubble.appendChild(reasoningEl);
-  state.job = { id: null, es: null, bubble, activityEl, reasoningEl, bubbleText: "", reasoningText: "" };
+  bubble.appendChild(answerEl);
+  const activityEl = document.createElement("div");
+  bubble.appendChild(activityEl);
+  state.job = { id: null, es: null, bubble, activityEl, reasoningEl, answerEl, bubbleText: "", reasoningText: "" };
 
   try {
     const res = await api("/api/chat", {
