@@ -1,0 +1,38 @@
+# Host-share mode: the container shares the SAME session database and project
+# files as your local ZCode Desktop app (same machine), instead of an isolated
+# volume. Run with:
+#
+#   docker compose -f docker-compose.host.yml up -d --build
+#
+# Requires (set in .env):
+#   HOST_HOME=/home/you        your home directory, mounted at the same path
+#   HOST_UID=1000              your uid (id -u) so created files stay yours
+#   HOST_GID=1000              your gid (id -g)
+#
+# Caveats: the CLI writes sessions directly into ~/.zcode/cli/db/db.sqlite —
+# avoid driving the SAME session from the desktop app and the web UI at the
+# same time (different sessions in parallel are fine).
+
+services:
+  zcode-web:
+    build: .
+    container_name: zcode-web
+    user: "${HOST_UID:?set HOST_UID in .env}:${HOST_GID:?set HOST_GID in .env}"
+    ports:
+      - "3000:3000"
+    environment:
+      HOME: ${HOST_HOME:?set HOST_HOME in .env}
+      ZCODE_WEB_TOKEN: ${ZCODE_WEB_TOKEN:-change-me-please}
+      ZCODE_ALLOWED_MODES: ${ZCODE_ALLOWED_MODES:-plan,build,edit,yolo}
+      ZCODE_MAX_JOBS: ${ZCODE_MAX_JOBS:-3}
+      ZCODE_JOB_TIMEOUT_MS: ${ZCODE_JOB_TIMEOUT_MS:-900000}
+      ZCODE_HOME: ${HOST_HOME}/.zcode
+      ZCODE_WORKSPACE_ROOT: ${HOST_WORKSPACE_ROOT:-${HOST_HOME}/Workspace}
+      # also let the UI browse the desktop app's own workspace (where its
+      # default sessions live) alongside ~/Workspace
+      ZCODE_ALLOWED_ROOTS: ${HOST_HOME}/.zcode/workspace
+    volumes:
+      - ./cli/zcode.cjs:/opt/zcode/zcode.cjs:ro
+      - ${HOST_HOME}/.zcode:${HOST_HOME}/.zcode
+      - ${HOST_WORKSPACE_ROOT:-${HOST_HOME}/Workspace}:${HOST_WORKSPACE_ROOT:-${HOST_HOME}/Workspace}
+    restart: unless-stopped

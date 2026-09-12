@@ -293,20 +293,25 @@ async function loadModels() {
 async function refreshProjects() {
   const select = $("project-select");
   try {
-    const { projects } = await api("/api/projects");
+    const { roots } = await api("/api/projects");
     const prev = state.cwd;
     select.innerHTML = "";
-    for (const p of projects) {
-      const opt = document.createElement("option");
-      opt.value = p; opt.textContent = p;
-      select.appendChild(opt);
+    for (const root of roots) {
+      const group = document.createElement("optgroup");
+      group.label = root.path;
+      for (const name of root.projects) {
+        const opt = document.createElement("option");
+        const slash = root.path.endsWith("/") ? "" : "/";
+        opt.value = root.path + slash + name;
+        opt.textContent = name;
+        group.appendChild(opt);
+      }
+      select.appendChild(group);
     }
-    if (prev) {
-      const name = projects.includes(prev.split("/").pop()) ? prev.split("/").pop() : null;
-      if (name) select.value = name;
-    }
-    state.cwd = select.value ? `${state.workspaceRoot}/${select.value}` : state.workspaceRoot;
-    select.dispatchEvent(new Event("change"));
+    // keep previous selection if still present, else first option
+    const values = [...select.options].map((o) => o.value);
+    state.cwd = values.includes(prev) ? prev : values[0] || state.workspaceRoot;
+    if (state.cwd) select.value = state.cwd;
   } catch (e) {
     console.error(e);
   }
@@ -316,10 +321,17 @@ async function newProject() {
   const name = prompt("New project name (directory on the server):");
   if (!name) return;
   try {
-    const res = await api("/api/projects", { method: "POST", body: JSON.stringify({ name }) });
+    await api("/api/projects", { method: "POST", body: JSON.stringify({ name }) });
+    // create under the root that contains the current selection, else the first root
     await refreshProjects();
-    $("project-select").value = name;
-    $("project-select").dispatchEvent(new Event("change"));
+    const base = state.cwd?.startsWith(state.workspaceRoot) === false ? state.cwd : state.workspaceRoot;
+    const dir = base.replace(/\/$/, "") + "/" + name;
+    const select = $("project-select");
+    if ([...select.options].some((o) => o.value === dir)) {
+      state.cwd = dir;
+      select.value = dir;
+    }
+    onProjectChange();
   } catch (e) {
     alert(e.message);
   }
@@ -358,14 +370,15 @@ $("new-chat-btn").onclick = () => {
   refreshSessions();
 };
 $("new-project-btn").onclick = newProject;
-$("project-select").onchange = () => {
-  const name = $("project-select").value;
-  state.cwd = name ? `${state.workspaceRoot}/${name}` : state.workspaceRoot;
+function onProjectChange() {
+  state.cwd = $("project-select").value || state.workspaceRoot;
   state.sessionId = null;
   $("messages").innerHTML = "";
   addEmptyHint("Project switched — sessions listed on the left.");
   refreshSessions();
-};
+}
+
+$("project-select").onchange = onProjectChange;
 $("prompt-input").addEventListener("keydown", (ev) => {
   if (ev.key === "Enter" && !ev.shiftKey) {
     ev.preventDefault();

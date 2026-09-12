@@ -18,6 +18,15 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "0.0.0.0";
 const TOKEN = (process.env.ZCODE_WEB_TOKEN || "").trim();
 const WORKSPACE_ROOT = resolve(process.env.ZCODE_WORKSPACE_ROOT || join(homedir(), "Workspace"));
+// Additional browsable roots (colon-separated), e.g. the desktop app's own
+// workspace dir in host-share mode. The workspace root is always allowed.
+const ALLOWED_ROOTS = [
+  ...new Set(
+    [WORKSPACE_ROOT, ...(process.env.ZCODE_ALLOWED_ROOTS || "").split(":")]
+      .map((r) => r && r.trim() && resolve(r))
+      .filter(Boolean)
+  ),
+];
 
 const jobs = new JobManager();
 const store = new SessionStore(cliStatus().dbPath);
@@ -63,15 +72,18 @@ function isAuthorized(req, url) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-// Resolve and validate a project directory: must stay under WORKSPACE_ROOT.
-// Accepts absolute paths already under the root, or relative names.
+// Resolve and validate a project directory: must be an absolute path inside
+// one of the allowed roots, or a relative name resolved under the primary
+// workspace root.
 function safeCwd(input) {
-  const base = input && input.trim() ? input : WORKSPACE_ROOT;
-  const dir = resolve(base);
-  if (dir === WORKSPACE_ROOT || dir.startsWith(WORKSPACE_ROOT + sep)) return dir;
-  const rel = resolve(WORKSPACE_ROOT, "." + sep + base.replace(/^\/+/, ""));
-  if (rel.startsWith(WORKSPACE_ROOT + sep) || rel === WORKSPACE_ROOT) return rel;
-  throw Object.assign(new Error("cwd must be inside the workspace root"), { status: 400 });
+  if (!input || !String(input).trim()) return WORKSPACE_ROOT;
+  const dir = resolve(String(input));
+  for (const root of ALLOWED_ROOTS) {
+    if (dir === root || dir.startsWith(root + sep)) return dir;
+  }
+  const rel = resolve(WORKSPACE_ROOT, "." + sep + dir.replace(/^\/+/, ""));
+  if (ALLOWED_ROOTS.some((root) => rel === root || rel.startsWith(root + sep))) return rel;
+  throw Object.assign(new Error("cwd must be inside an allowed root: " + ALLOWED_ROOTS.join(", ")), { status: 400 });
 }
 
 const MIME = {
@@ -166,6 +178,7 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, {
       authRequired: Boolean(TOKEN),
       workspaceRoot: WORKSPACE_ROOT,
+      allowedRoots: ALLOWED_ROOTS,
       modes: config.allowedModes,
       defaultMode: "plan",
       cliPresent: cliStatus().present,
@@ -174,11 +187,19 @@ async function handleApi(req, res, url) {
   }
 
   if (route === "/api/projects" && req.method === "GET") {
-    const dirs = readdirSync(WORKSPACE_ROOT, { withFileTypes: true })
-      .filter((d) => d.isDirectory() && !d.name.startsWith("."))
-      .map((d) => d.name)
-      .sort();
-    return sendJson(res, 200, { root: WORKSPACE_ROOT, projects: dirs });
+    const roots = ALLOWED_ROOTS.map((root) => {
+      let projects = [];
+      try {
+        projects = readdirSync(root, { withFileTypes: true })
+          .filter((d) => d.isDirectory() && !d.name.startsWith("."))
+          .map((d) => d.name)
+          .sort();
+      } catch {
+        // root may not exist yet
+      }
+      return { path: root, projects };
+    });
+    return sendJson(res, 200, { roots });
   }
 
   if (route === "/api/projects" && req.method === "POST") {
@@ -187,7 +208,9 @@ async function handleApi(req, res, url) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name)) {
       return sendJson(res, 400, { error: "invalid project name" });
     }
-    const dir = join(WORKSPACE_ROOT, name);
+    const rootIdx = Number.isInteger(body.rootIndex) ? body.rootIndex : 0;
+    const root = ALLOWED_ROOTS[rootIdx] || WORKSPACE_ROOT;
+    const dir = join(root, name);
     if (existsSync(dir)) return sendJson(res, 409, { error: "project already exists" });
     mkdirSync(dir, { recursive: true });
     return sendJson(res, 201, { name, directory: dir });
