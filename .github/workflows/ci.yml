@@ -1,0 +1,38 @@
+# ZWUI-023/024/026: backend security regressions (fake CLI), web unit tests,
+# typecheck + production build gates.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Backend + security regression tests (fake CLI)
+        run: node --test tests/server.test.mjs
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: Typecheck
+        run: npx tsc -b --force
+      - name: Unit tests (markdown T04, run reducer)
+        run: npx vitest run
+      - name: Production build
+        run: npm run build
