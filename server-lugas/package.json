@@ -1,0 +1,12 @@
+{
+  "name": "zcode-web-lugas",
+  "private": true,
+  "type": "module",
+  "description": "Lugas-on-Bun HTTP layer for zcode-web (compatibility gate #43)",
+  "scripts": {
+    "start": "bun run app.ts"
+  },
+  "dependencies": {
+    "lugas": "^0.1.0-beta.4"
+  }
+}
