@@ -66,9 +66,10 @@ export class SessionStore {
   }
 
   // Renderable transcript: user/assistant turns with their text parts.
+  // Note: role lives inside message.data JSON, not as a column.
   transcript(sessionId, limit = 400) {
     const rows = this.query(
-      `SELECT m.role AS role, m.sequence AS mseq, p.sequence AS pseq, p.data AS pdata
+      `SELECT m.data AS mdata, m.sequence AS mseq, p.sequence AS pseq, p.data AS pdata
          FROM part p JOIN message m ON m.id = p.message_id
         WHERE p.session_id = ?
         ORDER BY m.sequence, p.sequence
@@ -77,21 +78,23 @@ export class SessionStore {
     );
     const turns = [];
     for (const r of rows) {
-      let part;
-      try {
-        part = JSON.parse(r.pdata);
-      } catch {
-        continue;
-      }
+      let msg = {};
+      let part = {};
+      try { msg = JSON.parse(r.mdata); } catch { /* keep {} */ }
+      try { part = JSON.parse(r.pdata); } catch { /* keep {} */ }
       const text = typeof part.text === "string" ? part.text : "";
-      if (!text.trim()) continue;
       const last = turns[turns.length - 1];
-      if (last && last.role === r.role && r.mseq === last.mseq) {
-        last.texts.push(text);
+      if (last && last.mseq === r.mseq) {
+        if (text.trim()) last.texts.push(text);
       } else {
-        turns.push({ role: r.role, mseq: r.mseq, texts: [text] });
+        const errMsg =
+          msg.error?.data?.message || msg.error?.message || msg.error?.name || null;
+        turns.push({ role: msg.role || "?", mseq: r.mseq, texts: text.trim() ? [text] : [], error: errMsg });
       }
     }
-    return turns.map(({ role, texts }) => ({ role, text: texts.join("\n") }));
+    return turns.map(({ role, texts, error }) => ({
+      role,
+      text: texts.length ? texts.join("\n") : error ? `⚠ turn failed: ${error}` : "",
+    })).filter((t) => t.text);
   }
 }
