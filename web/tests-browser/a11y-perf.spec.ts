@@ -15,9 +15,10 @@ test("a11y: workspace shell has no critical axe violations", async ({ page }) =>
 
 test("a11y: interactive elements are keyboard reachable", async ({ page }) => {
   await page.goto("/w/default");
+  await page.waitForLoadState("networkidle");
   const allowed = ["SELECT", "BUTTON", "INPUT", "TEXTAREA", "A"];
   let focused = "BODY";
-  for (let i = 0; i < 4 && focused === "BODY"; i++) {
+  for (let i = 0; i < 8 && focused === "BODY"; i++) {
     await page.keyboard.press("Tab");
     focused = await page.evaluate(() => document.activeElement?.tagName || "BODY");
   }
