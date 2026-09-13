@@ -95,6 +95,10 @@ UI (`+ project`) or `git clone` into the volume.
 | `ZCODE_ALLOWED_MODES` | `plan,build,edit,yolo` | Permission modes offered in the UI |
 | `ZCODE_MAX_JOBS` | `3` | Concurrent CLI runs |
 | `ZCODE_JOB_TIMEOUT_MS` | `900000` | Hard kill for a single agent run (15 min) |
+| `ZCODE_CLI_NODE` | *(inherited runtime)* | Explicit Node ≥ 24 executable that runs the CLI child (required under a Bun-hosted server) |
+| `ZCODE_ENABLE_FILES` | `0` | Read-only file list/read API for the Code inspector |
+| `ZCODE_ENABLE_GIT` | `0` | Read-only git status/diff API for the Changes inspector and branch chip |
+| `ZCODE_ENABLE_PREVIEW` | `0` (+ `ZCODE_PREVIEW_ORIGIN`) | Static script-stripped snapshot preview |
 
 ### Headless model config (`~/.zcode/cli/config.json`)
 
@@ -139,19 +143,34 @@ or an auth error against the wrong endpoint.
 
 ## API
 
+All routes sit behind the bearer token when `ZCODE_WEB_TOKEN` is set. The
+inspector groups are additionally flag-gated and restricted to allowed roots.
+
 | Method | Path | Description |
 | --- | --- | --- |
-| GET | `/api/health` | CLI bundle/db presence, provider config, job slots |
-| GET | `/api/config` | UI bootstrap (modes, workspace root, auth required) |
+| GET | `/api/health` | CLI bundle/db/runtime presence, provider config, job slots |
+| GET | `/api/config` | UI bootstrap (modes, allowed roots, auth required) |
 | GET/POST | `/api/projects` | List / create project dirs under the workspace root |
 | GET | `/api/models` | Available model providers from the CLI configuration |
+| GET | `/api/skills` | Real ZCode skills via the CLI (`skills list --json`, 60s cache) |
+| GET | `/api/sessions?cwd=…` | Sessions the CLI stored for a project |
+| GET | `/api/sessions/recent?root=…` | Recent sessions across a root |
+| GET | `/api/sessions/:id` | Session metadata + text transcript |
+| POST | `/api/chat` | `{text, sessionId?, cwd?, mode?, model?}` → `{jobId}` |
+| GET | `/api/events/:jobId` | Ticketed SSE stream of CLI events for a job |
+| GET | `/api/jobs/:id` | Job status (reconciliation for dropped streams) |
+| POST | `/api/jobs/:id/cancel` | Kill a running job |
 | POST | `/api/upload` | Upload image or file attachment (base64 JSON body) |
 | GET | `/api/uploads/:file` | Serve an uploaded attachment file |
-| GET | `/api/sessions?cwd=…` | Sessions the CLI stored for a project |
-| GET | `/api/sessions/:id` | Session metadata + text transcript |
-| POST | `/api/chat` | `{text, sessionId?, cwd?, mode?}` → `{jobId}` |
-| GET | `/api/events/:jobId` | SSE stream of CLI events for a job |
-| POST | `/api/jobs/:id/cancel` | Kill a running job |
+| GET | `/api/search?q=…` | Bounded server-wide session search |
+| GET | `/api/files/capability` | Whether read-only file access is on (`ZCODE_ENABLE_FILES=1`) |
+| GET | `/api/files/list?dir=…` | Directory listing inside an allowed root |
+| GET | `/api/files/:path` | Read a text file inside an allowed root |
+| GET | `/api/git/status?cwd=…` | Branch + porcelain status (`ZCODE_ENABLE_GIT=1`) |
+| GET | `/api/git/diff?cwd=&path=` | Unified diff for one file |
+| GET | `/api/preview/capability` | Whether static preview is on (`ZCODE_ENABLE_PREVIEW=1`) |
+| POST | `/api/preview/build` | Build a script-stripped static snapshot of a project |
+| GET | `/api/preview/:id/:asset` | Serve snapshot assets (isolated, no scripts) |
 
 ## Notes & limitations
 
