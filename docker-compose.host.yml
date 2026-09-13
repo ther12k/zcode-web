@@ -26,6 +26,10 @@ services:
       ZCODE_ALLOWED_MODES: ${ZCODE_ALLOWED_MODES:-plan,build,edit,yolo}
       ZCODE_MAX_JOBS: ${ZCODE_MAX_JOBS:-3}
       ZCODE_JOB_TIMEOUT_MS: ${ZCODE_JOB_TIMEOUT_MS:-900000}
+      # read-only inspector capabilities (auth-guarded, root-restricted)
+      ZCODE_ENABLE_GIT: ${ZCODE_ENABLE_GIT:-1}
+      ZCODE_ENABLE_FILES: ${ZCODE_ENABLE_FILES:-1}
+      ZCODE_ENABLE_PREVIEW: ${ZCODE_ENABLE_PREVIEW:-0}
       ZCODE_HOME: ${HOST_HOME}/.zcode
       ZCODE_WORKSPACE_ROOT: ${HOST_WORKSPACE_ROOT:-${HOST_HOME}/Workspace}
       # also let the UI browse the desktop app's own workspace (where its
