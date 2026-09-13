@@ -14,6 +14,7 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 import { useWorkspace } from "./workspace";
 import { ZLogo, IconButton, relativeTime } from "./ui";
 import { loadPrefs, savePrefs } from "./state/prefs";
+import type * as prefsMod from "./state/prefs";
 import { ChatPanel } from "./components/ChatPanel";
 import { RightPanel } from "./components/RightPanel";
 import { SearchDialog } from "./components/SearchDialog";
@@ -35,6 +36,15 @@ export function App() {
     (() => { try { return localStorage.getItem("zcode-sidebar-collapsed") === "1"; } catch { return false; } })()
   );
   const [rightCollapsed, setRightCollapsed] = useState(false);
+  // chat text scale (device-local; changed from Settings → Text size)
+  const [fontSize, setFontSizeState] = useState<prefsMod.FontSize>(() => loadPrefs().fontSize);
+  useEffect(() => {
+    const onCustom = (e: Event) => { const fs = (e as CustomEvent<string>).detail as prefsMod.FontSize; if (fs) setFontSizeState(fs); };
+    const onStorage = () => setFontSizeState(loadPrefs().fontSize);
+    window.addEventListener("zcode-fontsize", onCustom);
+    window.addEventListener("storage", onStorage);
+    return () => { window.removeEventListener("zcode-fontsize", onCustom); window.removeEventListener("storage", onStorage); };
+  }, []);
   // Sessions is the default active view (persisted; an explicit Projects
   // choice is remembered too)
   const [sidebarView, setSidebarView] = useState<"projects" | "sessions">(
@@ -212,7 +222,7 @@ export function App() {
   const projectLabel = cwd ? baseName(cwd) : "workspace";
 
   return (
-    <main className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
+    <main className={`app-shell fs-${fontSize} ${sidebarCollapsed ? "sidebar-collapsed" : ""}`} data-fs={fontSize}>
       <header className="brand-header">
         <button className="brand-button" onClick={() => setSidebarCollapsed(!sidebarCollapsed)} aria-label="Toggle workspace navigation">
           <ZLogo size={25} /><span className="brand-name">zcode</span>

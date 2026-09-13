@@ -73,6 +73,12 @@ export type TranscriptTurn = {
   timeline?: TimelineEvent[];
   tools?: ToolCard[];
   files?: FileCard[];
+  /** raw provider/CLI error when the turn failed — shown collapsed, not inline */
+  error?: string | null;
+  /** wall-clock duration of the whole agentic turn (turn_usage), when it ended */
+  durationMs?: number | null;
+  /** assistant message still streaming from another writer */
+  incomplete?: boolean;
 };
 
 export type SessionDetail = {
@@ -80,6 +86,8 @@ export type SessionDetail = {
   transcript: TranscriptTurn[];
   total: number;
   hasMore: boolean;
+  /** a turn is running in this session from any writer (desktop/CLI/web) */
+  runActive?: boolean;
 };
 
 export type JobStatus = {

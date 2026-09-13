@@ -417,7 +417,15 @@ async function handleApi(req, res, url) {
       const status = e.code === "DB_MISSING" ? 503 : 500;
       return sendJson(res, status, { error: e.message, code: e.code });
     }
-    return sendJson(res, 200, { session, transcript: page.turns, total: page.total, hasMore: page.hasMore });
+    return sendJson(res, 200, {
+      session,
+      transcript: page.turns,
+      total: page.total,
+      hasMore: page.hasMore,
+      // a turn is running from ANY writer (desktop/CLI/web) — the UI shows
+      // progress and blocks sending while this is true
+      runActive: store.runActive(session.id),
+    });
   }
 
   if (route === "/api/models" && req.method === "GET") {

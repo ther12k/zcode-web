@@ -451,6 +451,98 @@ describe("SessionStore.transcript timeline separators", async () => {
   });
 });
 
+// Turn footers read the same rows the desktop's "Worked for Xs" footers do:
+// turn_usage durations, error kept as data (not inline text), and runActive
+// from the newest assistant message lacking time.completed.
+describe("SessionStore turn durations + runActive", async () => {
+  const { SessionStore } = await import("../server/sessions.js");
+  const { DatabaseSync } = await import("node:sqlite");
+
+  function makeDb(dbPath) {
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT);
+      CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, sequence INTEGER);
+      CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT, sequence INTEGER);
+      CREATE TABLE turn_usage (session_id TEXT, turn_id TEXT, user_message_id TEXT, status TEXT, started_at INTEGER, completed_at INTEGER, duration_ms INTEGER);
+    `);
+    return db;
+  }
+
+  it("attaches turn_usage duration to the last assistant turn and keeps errors as data", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zc-store-"));
+    const dbPath = join(dir, "db.sqlite");
+    const db = makeDb(dbPath);
+    db.prepare("INSERT INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)")
+      .run("sess_du", "du", "/tmp", 1, 2);
+    const insMsg = db.prepare("INSERT INTO message (id, session_id, data, sequence) VALUES (?,?,?,?)");
+    const insPart = db.prepare("INSERT INTO part (id, message_id, session_id, data, sequence) VALUES (?,?,?,?,?)");
+    insMsg.run("mu", "sess_du", JSON.stringify({ role: "user", time: { created: 1000 } }), 0);
+    insPart.run("mu_p", "mu", "sess_du", JSON.stringify({ type: "text", text: "do it" }), 0);
+    // two assistant messages in the exchange (multi-step): duration lands on the LAST
+    insMsg.run("ma1", "sess_du", JSON.stringify({ role: "assistant", time: { created: 2000, completed: 3000 } }), 1);
+    insPart.run("ma1_p", "ma1", "sess_du", JSON.stringify({ type: "step-start" }), 0);
+    insPart.run("ma1_t", "ma1", "sess_du", JSON.stringify({ type: "tool", tool: "Bash", state: { status: "completed", input: { command: "ls" } } }), 1);
+    insPart.run("ma1_f", "ma1", "sess_du", JSON.stringify({ type: "step-finish", tokens: { total: 1200 } }), 2);
+    insMsg.run("ma2", "sess_du", JSON.stringify({ role: "assistant", time: { created: 4000, completed: 5500 } }), 2);
+    insPart.run("ma2_t", "ma2", "sess_du", JSON.stringify({ type: "text", text: "done, here you go" }), 0);
+    insPart.run("ma2_f", "ma2", "sess_du", JSON.stringify({ type: "step-finish", tokens: { total: 300 } }), 1);
+    // a failed exchange: message carries msg.error, NO "⚠" text
+    insMsg.run("mu2", "sess_du", JSON.stringify({ role: "user", time: { created: 6000 } }), 3);
+    insPart.run("mu2_p", "mu2", "sess_du", JSON.stringify({ type: "text", text: "again" }), 0);
+    insMsg.run("ma3", "sess_du", JSON.stringify({ role: "assistant", time: { created: 7000, completed: 12391 }, error: { data: { message: "[1308][Usage limit reached]" } } }), 4);
+    insPart.run("ma3_f", "ma3", "sess_du", JSON.stringify({ type: "step-finish", tokens: { total: 0 } }), 0);
+    db.prepare("INSERT INTO turn_usage (session_id, turn_id, user_message_id, status, started_at, completed_at, duration_ms) VALUES (?,?,?,?,?,?,?)")
+      .run("sess_du", "t1", "mu", "completed", 1000, 5500, 4500);
+    db.prepare("INSERT INTO turn_usage (session_id, turn_id, user_message_id, status, started_at, completed_at, duration_ms) VALUES (?,?,?,?,?,?,?)")
+      .run("sess_du", "t2", "mu2", "error", 6000, 11391, 5391);
+    db.close();
+
+    const store = new SessionStore(dbPath);
+    const page = store.transcript("sess_du", { limit: 50 });
+    const lastAssistant = [...page.turns].reverse().find((t) => t.role === "assistant" && t.text.includes("here you go"));
+    assert.equal(lastAssistant.durationMs, 4500, "turn_usage duration attaches to the exchange's last assistant turn");
+    const firstAssistant = page.turns.find((t) => t.role === "assistant" && (t.tools || []).length);
+    assert.ok(!firstAssistant.durationMs, "mid-exchange assistant turns carry no footer duration");
+    const failed = page.turns.find((t) => t.error);
+    assert.ok(failed, "failed turn present");
+    assert.equal(failed.text, "", "failed turn renders no inline text");
+    assert.ok(failed.error.includes("Usage limit reached"), "raw error kept as data");
+    assert.equal(failed.durationMs, 5391);
+  });
+
+  it("runActive is true only for a fresh uncompleted assistant tail message", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zc-store-"));
+    const dbPath = join(dir, "db.sqlite");
+    const db = makeDb(dbPath);
+    db.prepare("INSERT INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)")
+      .run("sess_ra", "ra", "/tmp", 1, 2);
+    const insMsg = db.prepare("INSERT INTO message (id, session_id, data, sequence) VALUES (?,?,?,?)");
+    const now = Date.now();
+    // completed exchange → idle
+    insMsg.run("m1", "sess_ra", JSON.stringify({ role: "user" }), 0);
+    insMsg.run("m2", "sess_ra", JSON.stringify({ role: "assistant", time: { created: now - 5000, completed: now - 1000 } }), 1);
+    const store = new SessionStore(dbPath);
+    assert.equal(store.runActive("sess_ra"), false);
+    // mid-turn: newest message is an assistant reply without time.completed
+    insMsg.run("m3", "sess_ra", JSON.stringify({ role: "user" }), 2);
+    insMsg.run("m4", "sess_ra", JSON.stringify({ role: "assistant", time: { created: now - 3000 } }), 3);
+    assert.equal(store.runActive("sess_ra"), true);
+    // stale uncompleted message (crashed run) → not busy
+    const db2 = new DatabaseSync(dbPath);
+    db2.prepare("UPDATE message SET data = ? WHERE id = 'm4'")
+      .run(JSON.stringify({ role: "assistant", time: { created: now - 12 * 3600_000 } }));
+    db2.close();
+    assert.equal(store.runActive("sess_ra"), false);
+    // newest message is the user prompt (answer not started) → not busy
+    const db3 = new DatabaseSync(dbPath);
+    db3.prepare("DELETE FROM message WHERE id = 'm4'").run();
+    db3.close();
+    assert.equal(store.runActive("sess_ra"), false);
+    db.close();
+  });
+});
+
 // Search-dialog empty state: recent() merges across all allowed roots.
 describe("SessionStore.recent across roots", async () => {
   const { SessionStore } = await import("../server/sessions.js");

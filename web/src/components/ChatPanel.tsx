@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import { ArrowLeftRight, ArrowUp, ArrowUpRight, AtSign, BadgeCheck, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Copy, Eye, EyeOff, FileText, FoldVertical, GitBranch, LoaderCircle, MessageSquare, Plus, ShieldCheck, Sparkles, Square, SquarePen, Terminal, Wrench, X } from "lucide-react";
 import { ZLogo, IconButton, Markdown, CheckMark } from "../ui";
 import { randomUUID } from "../lib/uuid";
-import { ApiError, type ApiClient, type FileCard, type ModelInfo, type TimelineEvent, type TranscriptTurn } from "../api/client";
+import { ApiError, type ApiClient, type FileCard, type ModelInfo, type SessionDetail, type TimelineEvent, type TranscriptTurn } from "../api/client";
 import { runReducer, initialRun, isTerminal, type StoredEvent } from "../state/run";
 import { StreamController } from "../state/stream";
 import { loadDraft, saveDraft, loadPrefs, savePrefs } from "../state/prefs";
@@ -84,19 +84,28 @@ export function ChatPanel({
   // load transcript for an existing session
   const [historyLoading, setHistoryLoading] = useState(false);
   const [syncTick, setSyncTick] = useState(0);
+  // a turn running from another writer (desktop/CLI): the composer locks and
+  // the view shows progress until the store says the turn ended
+  const [externalActive, setExternalActive] = useState(false);
+  const externalActiveRef = useRef(false);
+  useEffect(() => { externalActiveRef.current = externalActive; }, [externalActive]);
+  const applySessionPage = useCallback((d: SessionDetail) => {
+    setHistory({ turns: d.transcript, total: d.total, hasMore: d.hasMore });
+    setExternalActive(!!d.runActive);
+  }, []);
   useEffect(() => {
     let alive = true;
-    if (!sessionId) { setHistory({ turns: [], total: 0, hasMore: false }); setHistoryLoading(false); return; }
+    if (!sessionId) { setHistory({ turns: [], total: 0, hasMore: false }); setHistoryLoading(false); setExternalActive(false); return; }
     // selecting a session: clear the previous view and show a loader until
     // the transcript arrives
     setHistory({ turns: [], total: 0, hasMore: false });
     setHistoryLoading(true);
     void client.session(sessionId, 10, 0)
-      .then((d) => { if (alive) setHistory({ turns: d.transcript, total: d.total, hasMore: d.hasMore }); })
+      .then((d) => { if (alive) applySessionPage(d); })
       .catch((e) => { if (alive) onNotify(e instanceof ApiError ? e.message : String(e), "error"); })
       .finally(() => { if (alive) setHistoryLoading(false); });
     return () => { alive = false; };
-  }, [sessionId, client, onNotify, syncTick, reloadKey]);
+  }, [sessionId, client, onNotify, syncTick, reloadKey, applySessionPage]);
   // desktop↔web sync: both apps write the same session store, so pull the
   // transcript fresh when the tab becomes visible again (e.g. the ZCode app
   // continued the session meanwhile). Skipped while a run is attached here —
@@ -111,14 +120,17 @@ export function ChatPanel({
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [sessionId, run.phase]);
   // and poll while you watch: the desktop's in-progress turns land in the
-  // shared store as they commit, so an open web view follows along (10s,
-  // silent — the view only updates when the transcript actually changed)
+  // shared store as they commit, so an open web view follows along — faster
+  // while a turn is running elsewhere (progress + lock), 10s when idle. The
+  // view only updates when the transcript actually changed.
   useEffect(() => {
     if (!sessionId) return;
     if (run.phase !== "idle" && !isTerminal(run.phase)) return;
     let alive = true;
     let fetching = false;
-    const tick = setInterval(async () => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = async () => {
+      timer = null;
       if (fetching || document.visibilityState !== "visible") return;
       fetching = true;
       try {
@@ -128,11 +140,14 @@ export function ChatPanel({
           const next = { turns: d.transcript, total: d.total, hasMore: d.hasMore };
           return JSON.stringify(cur) === JSON.stringify(next) ? cur : next;
         });
+        setExternalActive(!!d.runActive);
       } catch { /* transient */ }
       finally { fetching = false; }
-    }, 10_000);
-    return () => { alive = false; clearInterval(tick); };
-  }, [sessionId, run.phase, client]);
+      if (alive && !timer) timer = setTimeout(tick, externalActiveRef.current ? 4_000 : 10_000);
+    };
+    timer = setTimeout(tick, externalActiveRef.current ? 500 : 10_000);
+    return () => { alive = false; if (timer) clearTimeout(timer); };
+  }, [sessionId, run.phase, client, applySessionPage]);
 
   useEffect(() => {
     if (lastKey.current !== draftKey) { setInput(loadDraft(draftKey)); setAttachments([]); setMenu(null); lastKey.current = draftKey; }
@@ -218,7 +233,10 @@ export function ChatPanel({
     return () => { document.removeEventListener("mousedown", close); window.removeEventListener("keydown", onKey); };
   }, [menu]);
 
-  const busy = run.phase !== "idle" && !isTerminal(run.phase);
+  const localBusy = run.phase !== "idle" && !isTerminal(run.phase);
+  // busy either because a run is attached here or because the desktop/CLI is
+  // mid-turn on this session — both mean "can't send yet"
+  const busy = localBusy || externalActive;
   useEffect(() => { onBusyChange?.(busy); }, [busy]);
 
   async function copyText(id: string, text: string) {
@@ -502,18 +520,44 @@ export function ChatPanel({
               {!detailsHidden && (t.files || []).length > 0 && (
                 <FileCards files={t.files || []} onPreview={(f) => void previewArtifact(f)} />
               )}
-              {t.text.startsWith("⚠") ? <div className="danger-text">{t.text}</div> : <Markdown text={t.text} />}
-              <div className="message-footer">
-                <span className="task-completed"><CheckMark />{t.text.startsWith("⚠") ? "Turn failed" : "Task completed"}{t.tokens ? <span className="turn-tokens">· {(t.tokens / 1000).toFixed(1)}k tokens</span> : null}</span>
-                <span className="message-footer-actions">
-                  <IconButton label="Copy response" onClick={() => void copyText(`h${i}`, t.text)}>
-                    {copied === `h${i}` ? <CheckCheck size={13} /> : <Copy size={13} />}
-                  </IconButton>
-                </span>
-              </div>
+              <Markdown text={t.text} />
+              {t.durationMs || t.tokens || t.error ? (
+                <div className="message-footer">
+                  <span className="task-completed" title={t.error || undefined}>
+                    <CheckMark />
+                    {t.durationMs ? `Worked for ${formatDuration(t.durationMs)}` : t.error ? "Turn failed" : "Completed"}
+                    {t.error ? <span className="failed-chip">failed</span> : null}
+                    {t.tokens ? <span className="turn-tokens">· {(t.tokens / 1000).toFixed(1)}k tokens</span> : null}
+                  </span>
+                  <span className="message-footer-actions">
+                    <IconButton label="Copy response" onClick={() => void copyText(`h${i}`, t.text)}>
+                      {copied === `h${i}` ? <CheckCheck size={13} /> : <Copy size={13} />}
+                    </IconButton>
+                  </span>
+                </div>
+              ) : null}
+              {t.error && (
+                <details className="turn-error">
+                  <summary>Why it failed</summary>
+                  <pre>{t.error}</pre>
+                </details>
+              )}
             </article>
           );
         })}
+
+        {/* a turn running in the desktop/CLI: progress row, no send */}
+        {externalActive && !localBusy && (
+          <article className="agent-message">
+            <div className="agent-byline">
+              <span className="agent-avatar"><ZLogo size={18} /></span><strong>Zcode</strong>
+            </div>
+            <div className="working-message external-working">
+              <LoaderCircle size={13} className="spin" />
+              <span>Working<span className="thinking-dots"><i /><i /><i /></span></span>
+            </div>
+          </article>
+        )}
 
         {(run.answer || run.reasoning || busy || run.error) && (
           <article className="agent-message">
@@ -706,6 +750,14 @@ function ToolActivity({ name, status, detail, live = false }: { name: string; st
       {openItem && detail && <div className="activity-content"><pre className="diff-content"><code>{detail}</code></pre></div>}
     </div>
   );
+}
+
+// The desktop's per-turn footer reads "Worked for 6s" (turn_usage duration).
+function formatDuration(ms: number): string {
+  if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))}s`;
+  const m = Math.floor(ms / 60_000);
+  const s = Math.round((ms % 60_000) / 1000);
+  return s ? `${m}m ${s}s` : `${m}m`;
 }
 
 // Desktop timeline separators: hairline rows marking model switches,

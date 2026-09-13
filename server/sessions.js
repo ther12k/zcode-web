@@ -219,13 +219,25 @@ export class SessionStore {
   // rows are fetched newest-first and re-reversed for the turn builder.
   transcript(sessionId, { limit = 400, offset = 0 } = {}) {
     const rows = this.query(
-      `SELECT m.data AS mdata, m.sequence AS mseq, p.sequence AS pseq, p.data AS pdata
+      `SELECT m.id AS mid, m.data AS mdata, m.sequence AS mseq, p.sequence AS pseq, p.data AS pdata
          FROM part p JOIN message m ON m.id = p.message_id
         WHERE p.session_id = ?
         ORDER BY m.sequence DESC, p.sequence DESC
         LIMIT 6000`,
       [sessionId]
     ).reverse();
+    // Per-turn duration/status live in turn_usage, keyed by the turn's user
+    // message — the same rows the desktop's "Worked for Xs" footers come from.
+    // Older CLI stores may not have the table; treat as "no durations".
+    let usage = new Map();
+    try {
+      usage = new Map(
+        this.query(
+          `SELECT user_message_id, status, duration_ms FROM turn_usage WHERE session_id = ?`,
+          [sessionId]
+        ).map((u) => [u.user_message_id, { status: u.status, durationMs: Number(u.duration_ms) || 0 }])
+      );
+    } catch { /* table missing */ }
     const turns = [];
     for (const r of rows) {
       let msg = {};
@@ -251,8 +263,9 @@ export class SessionStore {
       } else {
         const errMsg =
           msg.error?.data?.message || msg.error?.message || msg.error?.name || null;
+        const completed = Number(msg.time?.completed) || 0;
         turns.push({
-          role: msg.role || "?", mseq: r.mseq,
+          role: msg.role || "?", mseq: r.mseq, mid: r.mid,
           texts: text.trim() ? [text] : [],
           reasonings: reasoning ? [reasoning] : [],
           tokens: stepTokens,
@@ -260,26 +273,76 @@ export class SessionStore {
           tools: part.type === "tool" ? [toolSummary(part)] : [],
           files: part.type === "file" ? [fileSummary(part)] : [],
           error: errMsg,
+          msgCompleted: completed,
+          msgCreated: Number(msg.time?.created) || 0,
         });
       }
       if (timelineEntry) timelineEntry.op = part.operationId || undefined;
-    }    // one entry per logical message (mseq), each carrying its text plus tool
-    // and file parts — pagination must not split a message from its artifacts
+    }
+    // Attach each agentic turn's usage to the LAST assistant message of its
+    // exchange (the desktop shows one footer per answer, after the final text)
+    let lastUserMsgId = null;
+    for (const t of turns) {
+      if (t.role === "user") lastUserMsgId = t.mid;
+      t.prevUserMsgId = lastUserMsgId;
+    }
+    for (let i = 0; i < turns.length; i++) {
+      const t = turns[i];
+      if (t.role === "user") continue;
+      const next = turns[i + 1];
+      if (next && next.role !== "user") continue; // a later assistant message closes the exchange
+      const u = usage.get(t.prevUserMsgId || "");
+      if (u) {
+        t.turnStatus = u.status;
+        t.durationMs = u.durationMs;
+      }
+    }
     const all = turns
       .filter((t) => t.texts.length || t.error || t.reasonings.length || (t.tools && t.tools.length) || (t.files && t.files.length) || (t.timeline && t.timeline.length))
-      .map((t) => ({
-        role: t.role,
-        text: t.texts.length ? t.texts.join("\n") : t.error ? `⚠ turn failed: ${t.error}` : "",
-        reasoning: t.reasonings.length ? t.reasonings.join("\n") : "",
-        tokens: t.tokens,
-        timeline: (t.timeline || []).map(({ op, ...e }) => e),
-        tools: t.tools || [],
-        files: t.files || [],
-      }));
+      .map((t) => {
+        // turn_usage is written when the turn ends; mid-run or mid-step, the
+        // message carries no completed timestamp either. Message-time diffs
+        // are only a fallback for stores without turn_usage (older CLIs).
+        const durationMs = t.durationMs
+          || (!usage.size && t.msgCompleted && t.msgCreated ? t.msgCompleted - t.msgCreated : 0);
+        return {
+          role: t.role,
+          text: t.texts.length ? t.texts.join("\n") : "",
+          reasoning: t.reasonings.length ? t.reasonings.join("\n") : "",
+          tokens: t.tokens,
+          timeline: (t.timeline || []).map(({ op, ...e }) => e),
+          tools: t.tools || [],
+          files: t.files || [],
+          error: t.error || null,
+          durationMs: durationMs || null,
+          incomplete: !t.msgCompleted && !t.durationMs && t.role === "assistant",
+        };
+      });
     const total = all.length;
     const end = Math.max(0, total - offset);
     const start = Math.max(0, end - limit);
     return { turns: all.slice(start, end), total, hasMore: start > 0 };
+  }
+
+  // Is a turn currently running in this session from ANY writer (desktop,
+  // CLI, or this server)? Mid-run the newest message is an assistant message
+  // whose time.completed the CLI only writes when the turn ends. A recency
+  // guard keeps crashed runs from looking busy forever.
+  runActive(sessionId) {
+    const row = this.query(
+      `SELECT json_extract(m.data, '$.role') AS role,
+              json_extract(m.data, '$.time.completed') AS completed,
+              json_extract(m.data, '$.time.created') AS created
+         FROM message m
+        WHERE m.session_id = ?
+        ORDER BY m.sequence DESC LIMIT 1`,
+      [sessionId]
+    )[0];
+    // mid-run the newest message is the assistant reply the CLI is still
+    // streaming — time.completed is only written when the turn ends
+    if (!row || row.role !== "assistant" || row.completed != null) return false;
+    const age = Date.now() - (Number(row.created) || 0);
+    return age >= 0 && age < 6 * 3600_000;
   }
 }
 

@@ -182,6 +182,13 @@ test("timeline separators render like the desktop transcript", async ({ page }) 
             timeline: [{ kind: "compaction", label: "Context compacted", detail: "196k → 5k tokens" }],
           },
           { role: "assistant", text: "", timeline: [{ kind: "session_fork", label: "Session forked", detail: "" }] },
+          {
+            role: "assistant",
+            text: "",
+            error: "[1308][Usage limit reached for 5 hour]",
+            durationMs: 5391,
+            tokens: 0,
+          },
         ],
         total: 4,
         hasMore: false,
@@ -200,4 +207,37 @@ test("timeline separators render like the desktop transcript", async ({ page }) 
   await expect(page.getByText("answer body")).toBeVisible();
   // user-message attachments render as chips/thumbnails under the message
   await expect(page.locator(".user-message-block .file-cards")).toHaveCount(1);
+  // failed turns: desktop-style footer, no raw error inline; detail is collapsed
+  await expect(page.locator(".task-completed").last()).toHaveText(/Worked for 5s/);
+  await expect(page.locator(".agent-message", { hasText: "answer body" }).locator(".danger-text")).toHaveCount(0);
+  // raw error stays collapsed inside the details toggle
+  await expect(page.getByText("Usage limit reached")).toBeHidden();
+  await expect(page.locator(".turn-error summary")).toHaveCount(1);
+});
+
+test("an externally running session locks the composer and shows progress", async ({ page }) => {
+  await page.route(/\/api\/sessions\/sess_.+\?limit=/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        session: {},
+        runActive: true,
+        transcript: [
+          { role: "user", text: "keep going" },
+          { role: "assistant", text: "", incomplete: true },
+        ],
+        total: 2,
+        hasMore: false,
+      }),
+    });
+  });
+  await page.goto("/w/default/s/sess_runactive00000000000000000000000");
+  await page.waitForLoadState("domcontentloaded");
+  await expect(page.locator(".chat-loader")).toBeHidden({ timeout: 5000 });
+  // progress row instead of a completed footer, and the send button spins
+  await expect(page.locator(".external-working")).toContainText("Working");
+  const send = page.locator(".send-button");
+  await expect(send).toBeDisabled();
+  await expect(send.locator("svg.spin")).toBeVisible();
 });

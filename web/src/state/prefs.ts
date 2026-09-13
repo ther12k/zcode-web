@@ -7,11 +7,14 @@ const PREFS_KEY = "zcode-web-prefs";
 const PREFS_VERSION = 1;
 const DRAFT_PREFIX = "zcode-web-draft:";
 
+export type FontSize = "xs" | "s" | "m" | "l";
+
 export type Preferences = {
   version: number;
   model: string;
   mode: string;
   rootPath: string;
+  fontSize: FontSize;         // chat text scale, device-local
   hiddenSessions: string[];   // device-local hide, ZWUI-028
   pinnedSessions: string[];   // device-local pin, ZWUI-028
   displayAliases: Record<string, string>; // sessionId → local alias, ZWUI-028
@@ -22,6 +25,7 @@ const DEFAULT_PREFS: Preferences = {
   model: "",
   mode: "plan",
   rootPath: "",
+  fontSize: "m",
   hiddenSessions: [],
   pinnedSessions: [],
   displayAliases: {},

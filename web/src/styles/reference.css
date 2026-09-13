@@ -198,3 +198,27 @@
 .changes-scroll > .empty-history svg,
 .code-panel > .empty-history svg { color: var(--accent); opacity: .85; }
 .preview-missing{display:flex;align-items:center;justify-content:center;min-height:200px;padding:40px;color:#879084;font-size:11px}
+
+/* chat text scale — Settings → Text size (device-local). s = the original
+   metrics; m is the default and reads closer to the desktop app. */
+.app-shell[data-fs="xs"] .messages-scroll,.app-shell[data-fs="xs"] .composer-shell{zoom:.9}
+.app-shell[data-fs="s"] .messages-scroll,.app-shell[data-fs="s"] .composer-shell{zoom:1}
+.app-shell[data-fs="m"] .messages-scroll,.app-shell[data-fs="m"] .composer-shell{zoom:1.15}
+.app-shell[data-fs="l"] .messages-scroll,.app-shell[data-fs="l"] .composer-shell{zoom:1.32}
+/* failed-turn footer: desktop shows plain "Worked for Xs"; we keep a subtle
+   failed marker + collapsed detail instead of inline raw error text */
+.failed-chip{margin-left:7px;color:#c98a7d;font-weight:500}
+.turn-error{margin:6px 0 2px;font-size:9px;color:#8a9288}
+.turn-error summary{cursor:pointer;color:#98a196;user-select:none}
+.turn-error summary:hover{color:#c3c9c2}
+.turn-error pre{margin-top:5px;max-height:180px;overflow:auto;background:#252724;border:1px solid #3c3f3b;border-radius:6px;padding:9px;font-size:9px;line-height:1.6;color:#b08d84;white-space:pre-wrap;overflow-wrap:anywhere}
+.external-working{padding:5px 0 20px}
+/* settings: text size picker */
+.font-size-row{display:flex;gap:7px;margin:4px 0 20px}
+.font-size-option{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:11px 6px 9px;background:#2b2e2a;border:1px solid #3f433e;border-radius:8px;color:#b6bbb4;cursor:pointer}
+.font-size-option:hover{border-color:#636b60;background:#33362f}
+.font-size-option.active{border-color:#8ba074;background:#2f3a27;color:#d6ddcf}
+.font-size-option strong{font-size:10px}
+.font-size-option small{font-size:8px;color:#879084}
+.font-size-sample{font-weight:500;line-height:1}
+.fs-xs{font-size:12px}.fs-s{font-size:14px}.fs-m{font-size:16px}.fs-l{font-size:19px}

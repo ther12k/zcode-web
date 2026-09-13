@@ -3,11 +3,19 @@
 import { useState } from "react";
 import { Check, LoaderCircle, LockKeyhole, ArrowUpRight, Database, FolderClosed } from "lucide-react";
 import { Dialog, ZLogo } from "../ui";
+import { loadPrefs, savePrefs, type FontSize } from "../state/prefs";
 
 type Caps = {
   runtime: string; cliPresent: boolean; providerConfigured: boolean; dbPresent: boolean;
   allowedRoots: string[]; modes: string[]; maxJobs: number;
 };
+
+const FONT_SIZES: Array<{ id: FontSize; label: string; hint: string }> = [
+  { id: "xs", label: "XS", hint: "Extra small" },
+  { id: "s", label: "S", hint: "Small" },
+  { id: "m", label: "M", hint: "Default" },
+  { id: "l", label: "L", hint: "Large" },
+];
 
 export function SettingsDialog({ caps, onClose, onLogout }: {
   caps: Caps | null;
@@ -16,6 +24,14 @@ export function SettingsDialog({ caps, onClose, onLogout }: {
 }) {
   const [tab, setTab] = useState<"workspace" | "provider">("workspace");
   const [busy, setBusy] = useState(false);
+  const [fontSize, setFontSize] = useState<FontSize>(() => loadPrefs().fontSize);
+
+  const applyFontSize = (fs: FontSize) => {
+    setFontSize(fs);
+    savePrefs({ fontSize: fs });
+    // the app shell reads this on the storage + custom event it listens for
+    window.dispatchEvent(new CustomEvent("zcode-fontsize", { detail: fs }));
+  };
 
   return (
     <Dialog title="Make yourself at home." subtitle="Your workspace, your way." onClose={onClose} wide>
@@ -27,6 +43,25 @@ export function SettingsDialog({ caps, onClose, onLogout }: {
       <div className="dialog-body settings-body">
         {tab === "workspace" && caps && (
           <>
+            <div className="settings-section-heading">
+              <h3>Text size.</h3>
+              <p>How large the conversation reads on this device.</p>
+            </div>
+            <div className="font-size-row" role="radiogroup" aria-label="Text size">
+              {FONT_SIZES.map((f) => (
+                <button
+                  key={f.id}
+                  role="radio"
+                  aria-checked={fontSize === f.id}
+                  className={`font-size-option ${fontSize === f.id ? "active" : ""}`}
+                  onClick={() => applyFontSize(f.id)}
+                >
+                  <span className={`font-size-sample fs-${f.id}`}>Aa</span>
+                  <strong>{f.label}</strong>
+                  <small>{f.hint}</small>
+                </button>
+              ))}
+            </div>
             <div className="settings-section-heading">
               <h3>Where things stand.</h3>
               <p>Live readiness of this deployment.</p>
