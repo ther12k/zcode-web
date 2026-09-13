@@ -54,6 +54,7 @@ export type SessionInfo = {
   taskType?: string;
   createdAt: number;
   updatedAt: number;
+  goal?: { objective: string; status: string; tokensUsed: number; timeUsedSeconds: number; updatedAt: number } | null;
 };
 
 export type ToolCard = { name: string; status: string; detail: string };

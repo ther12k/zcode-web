@@ -3,8 +3,8 @@
 // lines). Capability states render as honest empty/clean-tree panels.
 import { useEffect, useState } from "react";
 import {
-  CheckCircle2, ChevronDown, Code2, Eye, FileCode2, FileDiff, FolderClosed,
-  Globe, LoaderCircle, Maximize2, Minimize2, Monitor, PanelBottom, Play, RefreshCw, Smartphone,
+  CheckCircle2, ChevronDown, Code2, Eye, FileCode2, FileDiff, FolderClosed, GitBranch,
+  Globe, LoaderCircle, Maximize2, Minimize2, Monitor, PanelBottom, Play, RefreshCw, Smartphone, Target,
 } from "lucide-react";
 import { IconButton } from "../ui";
 
@@ -14,7 +14,9 @@ function authHeaders() {
   return { authorization: `Bearer ${localStorage.getItem("zcode-web-token") || ""}` };
 }
 
-export function RightPanel({ cwd, onCollapse }: { cwd: string; onCollapse: () => void }) {
+type Goal = { objective: string; status: string; tokensUsed: number; timeUsedSeconds: number } | null | undefined;
+
+export function RightPanel({ cwd, onCollapse, goal }: { cwd: string; onCollapse: () => void; goal?: Goal }) {
   const [tab, setTab] = useState<Tab>("preview");
   const [expanded, setExpanded] = useState(false);
   const [mobile, setMobile] = useState(false);
@@ -37,6 +39,7 @@ export function RightPanel({ cwd, onCollapse }: { cwd: string; onCollapse: () =>
       {tab === "preview" && <PreviewTab cwd={cwd} mobile={mobile} onMobile={setMobile} />}
       {tab === "code" && <CodeTab cwd={cwd} />}
       {tab === "changes" && <ChangesTab cwd={cwd} />}
+      <GoalPanel goal={goal} />
     </section>
   );
 }
@@ -51,7 +54,7 @@ function PreviewTab({ cwd, mobile, onMobile }: { cwd: string; mobile: boolean; o
 
   useEffect(() => {
     let alive = true;
-    void fetch("/api/preview/capability").then((r) => r.json()).then((c) => alive && setCap(c)).catch(() => alive && setCap({ enabled: false }));
+    void fetch("/api/preview/capability", { headers: authHeaders() }).then((r) => r.json()).then((c) => alive && setCap(c)).catch(() => alive && setCap({ enabled: false }));
     return () => { alive = false; };
   }, []);
 
@@ -249,7 +252,7 @@ function ChangesTab({ cwd }: { cwd: string }) {
   return (
     <div className="changes-panel">
       <header className="changes-view-header">
-        <div><FileDiff size={15} /><h3>Working tree</h3><span className="branch-chip">{branch || "no branch"}</span></div>
+        <div><GitBranch size={15} /><h3>Working tree</h3><span className="branch-chip">{branch || "no branch"}</span></div>
         <span className="muted">{changed.length} changed {changed.length === 1 ? "file" : "files"}</span>
       </header>
       <div className="changes-scroll">
@@ -280,6 +283,37 @@ function ChangesTab({ cwd }: { cwd: string }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+
+// Goal panel — reference structure, fed by the CLI's real session_target row.
+function GoalPanel({ goal }: { goal?: Goal }) {
+  const [open, setOpen] = useState(false);
+  if (!goal) return null;
+  const running = goal.status === "active";
+  const mins = Math.floor(goal.timeUsedSeconds / 60);
+  return (
+    <div className={`goal-panel ${open ? "goal-open" : ""}`}>
+      <button className="goal-heading" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <Target size={14} />
+        <strong>Goal</strong>
+        <span className={`goal-state ${running ? "" : "is-complete"}`}>{running ? "In progress" : goal.status}</span>
+        <ChevronDown size={13} className={open ? "rotate-180" : ""} />
+      </button>
+      <div className="goal-description">
+        <span>{goal.objective}</span>
+        <small>{mins > 0 ? `${mins}m` : "just started"}</small>
+      </div>
+      <div className="goal-progress" aria-label="Goal activity">
+        <span className={running ? "done" : ""} />
+      </div>
+      {open && (
+        <ul className="goal-steps">
+          <li><span className="unchecked-step" /><span>Objective tracked from the CLI session target ({goal.tokensUsed.toLocaleString()} tokens used)</span></li>
+        </ul>
+      )}
     </div>
   );
 }

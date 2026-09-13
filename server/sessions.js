@@ -117,6 +117,25 @@ export class SessionStore {
     ).map((r) => ({ id: r.id, title: r.title, directory: r.directory, updatedAt: Number(r.time_updated) }));
   }
 
+  // Goal/target for a session (real CLI data from session_target).
+  goal(sessionId) {
+    const rows = this.query(
+      `SELECT objective, status, tokens_used, time_used_seconds, time_created, time_updated
+         FROM session_target WHERE session_id = ? ORDER BY time_updated DESC LIMIT 1`,
+      [sessionId]
+    );
+    const r = rows[0];
+    return r
+      ? {
+          objective: r.objective,
+          status: r.status,
+          tokensUsed: Number(r.tokens_used) || 0,
+          timeUsedSeconds: Number(r.time_used_seconds) || 0,
+          updatedAt: Number(r.time_updated),
+        }
+      : null;
+  }
+
   get(sessionId) {
     const rows = this.query(
       `SELECT id, title, directory, time_created, time_updated FROM session WHERE id = ?`,

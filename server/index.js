@@ -365,6 +365,7 @@ async function handleApi(req, res, url) {
     try {
       session = store.get(sessionMatch[1]);
       if (!session) return sendJson(res, 404, { error: "session not found" });
+      session.goal = store.goal(session.id);
       const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 5, 1), 400);
       const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0);
       page = store.transcript(session.id, { limit, offset });

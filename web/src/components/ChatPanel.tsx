@@ -4,7 +4,7 @@
 // ZWUI-016 reducer; transport from the ZWUI-017 controller.
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { ArrowUp, AtSign, Brain, Check, ChevronDown, ChevronRight, Clock3, FileText, LoaderCircle, MessageSquare, Plus, ShieldCheck, Sparkles, SquarePen, Terminal, Wrench, X } from "lucide-react";
+import { ArrowUp, AtSign, Brain, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Copy, Eye, EyeOff, FileText, LoaderCircle, MessageSquare, Plus, ShieldCheck, Sparkles, SquarePen, Terminal, Wrench, X } from "lucide-react";
 import { ZLogo, IconButton, Markdown, CheckMark } from "../ui";
 import { randomUUID } from "../lib/uuid";
 import { ApiError, type ApiClient, type ModelInfo, type TranscriptTurn } from "../api/client";
@@ -29,6 +29,8 @@ export function ChatPanel({
   const [mode, setMode] = useState(defaultMode);
   const [model, setModel] = useState("");
   const [menu, setMenu] = useState<"mode" | "model" | null>(null);
+  const [detailsHidden, setDetailsHidden] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null);
   const [attachment, setAttachment] = useState<{ name: string; path: string } | undefined>();
   const [history, setHistory] = useState<{ turns: TranscriptTurn[]; total: number; hasMore: boolean }>({ turns: [], total: 0, hasMore: false });
   const esRef = useRef<StreamController | null>(null);
@@ -80,6 +82,16 @@ export function ChatPanel({
   }, [menu]);
 
   const busy = run.phase !== "idle" && !isTerminal(run.phase);
+
+  async function copyText(id: string, text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(id);
+      setTimeout(() => setCopied(null), 1800);
+    } catch {
+      onNotify("Clipboard is unavailable in this browser.", "error");
+    }
+  }
 
   const attachFile = useCallback(async (file: File) => {
     try {
@@ -157,8 +169,8 @@ export function ChatPanel({
     <section className="chat-panel" aria-label="Agent conversation">
       <div className="chat-context">
         <span title={cwd}><span className="project-dot" /><span>{cwd.split("/").filter(Boolean).pop()}</span></span>
-        <button className="details-toggle" title={run.reasoning ? "Reasoning captured this run" : "No reasoning captured yet"}>
-          <Brain size={12} /><span>{run.reasoning ? `${run.reasoning.length} chars thinking` : "No thinking yet"}</span>
+        <button className="details-toggle" onClick={() => setDetailsHidden((v) => !v)} title="Toggle thinking and tool details for messages">
+          {detailsHidden ? <Eye size={12} /> : <EyeOff size={12} />}<span>{detailsHidden ? "Show details" : "Hide details"}</span>
         </button>
       </div>
       <div className="messages-scroll" ref={scroll}>
@@ -179,13 +191,23 @@ export function ChatPanel({
         {history.turns.map((t, i) => (
           t.role === "user" ? (
             <article className="user-message-block" key={`h${i}`}>
-              <div className="message-byline"><span className="user-avatar">Y</span><strong>You</strong></div>
+              <div className="message-byline">
+                <span className="user-avatar">Y</span><strong>You</strong>
+                <IconButton label="Copy prompt" onClick={() => void copyText(`u${i}`, t.text)}>
+                  {copied === `u${i}` ? <Check size={12} /> : <Copy size={12} />}
+                </IconButton>
+              </div>
               <div className="user-message">{t.text}</div>
             </article>
           ) : (
-            <article className="agent-message" key={`h${i}`}>
-              <div className="agent-byline"><span className="agent-avatar"><ZLogo size={18} /></span><strong>Zcode</strong></div>
-              {(t.tools || []).length > 0 && (
+            <article className={`agent-message ${detailsHidden ? "details-hidden" : ""}`} key={`h${i}`}>
+              <div className="agent-byline">
+                <span className="agent-avatar"><ZLogo size={18} /></span><strong>Zcode</strong>
+                <button className="message-details-toggle" onClick={() => setDetailsHidden((v) => !v)} aria-expanded={!detailsHidden}>
+                  {detailsHidden ? <Eye size={12} /> : <EyeOff size={12} />}<span>{detailsHidden ? "Details" : "Hide"}</span>
+                </button>
+              </div>
+              {!detailsHidden && (t.tools || []).length > 0 && (
                 <div className="activity-stack">
                   {(t.tools || []).map((tool, j) => (
                     <ToolActivity key={j} name={tool.name} status={tool.status} detail={tool.detail} />
@@ -193,6 +215,14 @@ export function ChatPanel({
                 </div>
               )}
               {t.text.startsWith("⚠") ? <div className="danger-text">{t.text}</div> : <Markdown text={t.text} />}
+              <div className="message-footer">
+                <span className="task-completed"><CheckMark />{t.text.startsWith("⚠") ? "Turn failed" : "Completed"}</span>
+                <span className="message-footer-actions">
+                  <IconButton label="Copy response" onClick={() => void copyText(`h${i}`, t.text)}>
+                    {copied === `h${i}` ? <CheckCheck size={13} /> : <Copy size={13} />}
+                  </IconButton>
+                </span>
+              </div>
             </article>
           )
         ))}
@@ -203,8 +233,11 @@ export function ChatPanel({
               <span className="agent-avatar"><ZLogo size={18} /></span><strong>Zcode</strong>
               <span className="agent-model">{(models.find((m) => m.ref === model)?.model || "GLM").toUpperCase()}</span>
               {run.phase !== "idle" && <span className="message-duration"><Clock3 size={11} />{run.phase}</span>}
+              <button className="message-details-toggle" onClick={() => setDetailsHidden((v) => !v)} aria-expanded={!detailsHidden}>
+                {detailsHidden ? <Eye size={12} /> : <EyeOff size={12} />}<span>{detailsHidden ? "Details" : "Hide"}</span>
+              </button>
             </div>
-            {run.reasoning && (
+            {!detailsHidden && run.reasoning && (
               <div className="thinking-block"><Brain size={13} /><p>{run.reasoning}</p></div>
             )}
             {liveTools.length > 0 && (

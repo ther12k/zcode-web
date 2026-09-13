@@ -15,7 +15,7 @@ test("a11y: workspace shell has no critical axe violations", async ({ page }) =>
 
 test("a11y: interactive elements are keyboard reachable", async ({ page }) => {
   await page.goto("/w/default");
-  await page.waitForLoadState("networkidle");
+  await expect(page.getByLabel("Message Zcode")).toBeVisible();
   const allowed = ["SELECT", "BUTTON", "INPUT", "TEXTAREA", "A"];
   let focused = "BODY";
   for (let i = 0; i < 8 && focused === "BODY"; i++) {
@@ -39,7 +39,9 @@ test("perf: first-load JS under 250KB gzip", async ({ page }) => {
     }
   });
   await page.goto("/w/default");
-  await page.waitForLoadState("networkidle");
+  // deterministic app-mounted wait: networkidle is fragile when any fetch
+  // leaves a body unread or a stream open
+  await expect(page.getByLabel("Message Zcode")).toBeVisible();
   expect(sizes.reduce((a, b) => a + b, 0)).toBeLessThan(250 * 1024);
 });
 
