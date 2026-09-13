@@ -364,7 +364,7 @@ export function ChatPanel({
                         <div className="popover-label">{g.provider.toUpperCase()}</div>
                         {g.models.map((m) => (
                           <button key={m.ref} onClick={() => { setModel(m.ref); savePrefs({ model: m.ref }); setMenu(null); }}>
-                            <Sparkles size={15} /><span><b>{(m.model.split("/").pop() || m.model).toUpperCase()}</b><small>{m.model.includes("/") ? m.model : m.providerName}{m.isDefault ? " · default" : ""}</small></span>
+                            <Sparkles size={15} /><span><b>{(m.model.split("/").pop() || m.model).toUpperCase()}</b><small>{[m.model.includes("/") ? m.model : "", m.isDefault ? "default" : ""].filter(Boolean).join(" · ")}</small></span>
                             {model === m.ref && <Check size={13} className="success-text" />}
                           </button>
                         ))}
