@@ -29,6 +29,21 @@ test("send a message and watch the streamed reply complete", async ({ page }) =>
   await expect(page.locator(".working-message, .agent-message").first()).toBeVisible({ timeout: 8000 });
   await expect(page.locator(".agent-message")).toContainText("echo:browser integration hello", { timeout: 20000 });
   await expect(page.locator(".message-footer, .activity")).toContainText(/Task completed|succeeded|done|completed/, { timeout: 10000 });
+  // a fresh chat adopts its session: the URL gains /s/<sessionId> while the
+  // stream keeps rendering
+  await expect(page).toHaveURL(/\/s\/sess_[A-Za-z0-9-]+/, { timeout: 10_000 });
+  await expect(page.locator(".agent-message")).toContainText("echo:browser integration hello", { timeout: 5000 });
+});
+
+test("legacy double-encoded workspace URLs still resolve", async ({ page }) => {
+  // old builds emitted %252F-style params; safeDecode must recover the path
+  await page.goto("/w/%252Fnonexistent%252Fpath");
+  await page.waitForLoadState("domcontentloaded");
+  await expect(page.getByLabel("Message Zcode")).toBeVisible();
+  // cwd falls back to the first allowed root and the composer works
+  await page.getByLabel("Message Zcode").fill("double encode probe");
+  await page.getByLabel("Message Zcode").press("Enter");
+  await expect(page.locator(".agent-message")).toContainText("echo:double encode probe", { timeout: 20_000 });
 });
 
 test("cancel affordance: busy composer shows spinner, run reaches terminal", async ({ page }) => {

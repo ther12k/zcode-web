@@ -80,30 +80,31 @@ export function App() {
   const roots = caps?.allowedRoots || [];
   const cwd = useMemo(() => {
     if (params.workspace) {
-      const decoded = decodeURIComponent(params.workspace);
+      const decoded = safeDecode(params.workspace);
       if (roots.some((r) => decoded === r || decoded.startsWith(r))) return decoded;
     }
     return prefs.rootPath && roots.includes(prefs.rootPath) ? prefs.rootPath : roots[0] || "";
   }, [params.workspace, roots, prefs.rootPath]);
 
+  // $workspace params are encoded by the router — pass the RAW path and let it
+  // encode once; pre-encoding here double-encodes (%2F becomes %252F)
   const navigateToCwd = useCallback((dir: string) => {
-    navigate({ to: "/w/$workspace", params: { workspace: encodeURIComponent(dir) } });
+    navigate({ to: "/w/$workspace", params: { workspace: dir } });
   }, [navigate]);
 
   const navigateNewChat = useCallback(() => {
-    navigateToCwd(cwd || decodeURIComponent(params.workspace || ""));
+    navigateToCwd(cwd || safeDecode(params.workspace || ""));
   }, [cwd, params.workspace, navigateToCwd]);
 
   // sessions of the current cwd (task rows under the active "project")
   const [sessions, setSessions] = useState<SessionRow[]>([]);
-  useEffect(() => {
-    let alive = true;
+  const refreshSessions = useCallback(() => {
     if (!cwd || !client) return;
-    client.sessions(cwd)
-      .then((r) => { if (alive) { setSessions(r.sessions); } })
-      .catch(() => { if (alive) setSessions([]); });
-    return () => { alive = false; };
-  }, [cwd, client, token]);
+    void client.sessions(cwd)
+      .then((r) => setSessions(r.sessions))
+      .catch(() => setSessions([]));
+  }, [cwd, client]);
+  useEffect(() => { refreshSessions(); }, [refreshSessions, token]);
   // statusbar branch chip (only when the read-only git capability is enabled)
   useEffect(() => {
     let alive = true;
@@ -135,7 +136,7 @@ export function App() {
   }, [cwd, sidebarView, token]);
 
   function selectSession(id: string) {
-    navigate({ to: "/w/$workspace/s/$sessionId", params: { workspace: encodeURIComponent(cwd), sessionId: id } });
+    navigate({ to: "/w/$workspace/s/$sessionId", params: { workspace: cwd, sessionId: id } });
   }
 
   if (!caps) {
@@ -257,13 +258,21 @@ export function App() {
 
       <div className="workspace-main">
         <ChatPanel
-          key={cwd + "/" + (activeSessionId || "new")}
+          key={cwd}
           client={client}
           cwd={cwd}
           sessionId={activeSessionId}
           modes={caps.modes}
           defaultMode={caps.modes.includes(prefs.mode) ? prefs.mode : caps.modes[0] || "plan"}
           onNotify={notify}
+          onSessionCreated={(id) => {
+            refreshSessions();
+            if (id !== activeSessionId) {
+              // replace (not push) when a fresh chat first gets its session,
+              // so Back skips the empty pre-send state
+              navigate({ to: "/w/$workspace/s/$sessionId", params: { workspace: cwd, sessionId: id }, replace: !activeSessionId });
+            }
+          }}
         />
         {!rightCollapsed ? (
           <RightPanel cwd={cwd} onCollapse={() => setRightCollapsed(true)} goal={activeSession?.goal} />
@@ -294,7 +303,7 @@ export function App() {
           onClose={() => setModal(null)}
           onSelect={(id, directory) => {
             // navigate into the session's own project directory
-            navigate({ to: "/w/$workspace/s/$sessionId", params: { workspace: encodeURIComponent(directory), sessionId: id } });
+            navigate({ to: "/w/$workspace/s/$sessionId", params: { workspace: directory, sessionId: id } });
           }}
         />
       )}
@@ -487,6 +496,21 @@ function SessionRow({ row, active, prefs, onSelect, onPin, onHide }: {
 
 function baseName(p: string) {
   return p.split("/").filter(Boolean).pop() || p;
+}
+// decode router params until stable: tolerates legacy double-encoded URLs
+// (%252F) as well as the normal single-encoded form (%2F)
+function safeDecode(v: string) {
+  let out = v;
+  for (let i = 0; i < 4; i++) {
+    try {
+      const next = decodeURIComponent(out);
+      if (next === out) break;
+      out = next;
+    } catch {
+      break;
+    }
+  }
+  return out;
 }
 function rootOf(cwd: string, roots: string[]) {
   return roots.find((r) => cwd === r || cwd.startsWith(r + "/")) || cwd;

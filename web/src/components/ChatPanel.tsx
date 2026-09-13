@@ -13,7 +13,7 @@ import { StreamController } from "../state/stream";
 import { loadDraft, saveDraft, loadPrefs, savePrefs } from "../state/prefs";
 
 export function ChatPanel({
-  client, cwd, sessionId, modes, defaultMode, onNotify,
+  client, cwd, sessionId, modes, defaultMode, onNotify, onSessionCreated,
 }: {
   client: ApiClient;
   cwd: string;
@@ -21,6 +21,7 @@ export function ChatPanel({
   modes: string[];
   defaultMode: string;
   onNotify: (text: string, type?: "success" | "error") => void;
+  onSessionCreated?: (id: string) => void;
 }) {
   const draftKey = `${cwd}::${sessionId || "new"}`;
   const [run, dispatch] = useReducer(runReducer, undefined, initialRun);
@@ -46,8 +47,11 @@ export function ChatPanel({
       .then((r) => {
         if (!alive) return;
         setModels(r.models);
+        // server default first: a persisted ref may point at a provider that
+        // is currently rate-limited or gone; the saved pick still wins over a
+        // plain first-model fallback
         const saved = loadPrefs().model;
-        setModel((cur) => cur || (r.models.some((m) => m.ref === saved) ? saved : (r.models.find((m) => m.isDefault) || r.models[0])?.ref || ""));
+        setModel((cur) => cur || (r.models.find((m) => m.isDefault) || r.models.find((m) => m.ref === saved) || r.models[0])?.ref || "");
       })
       .catch(() => {});
     return () => { alive = false; };
@@ -71,6 +75,25 @@ export function ChatPanel({
     return () => clearTimeout(t);
   }, [input, draftKey]);
   useEffect(() => () => esRef.current?.close(), []);
+  // switching conversations detaches this panel from any live run (the job
+  // itself keeps running server-side) — except when the run just created the
+  // session we are navigating to, so a fresh chat keeps its live stream
+  const activeJob = useRef<string | null>(null);
+  useEffect(() => {
+    if (run.sessionId !== null && run.sessionId !== sessionId && run.phase !== "idle") {
+      esRef.current?.close();
+      esRef.current = null;
+      activeJob.current = null;
+      dispatch({ type: "reset" });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+  // a new chat learns its session from stream envelopes (the POST /api/chat
+  // response has none yet) — surface it so the URL and sidebar catch up
+  useEffect(() => {
+    if (!sessionId && run.sessionId && run.phase !== "idle") onSessionCreated?.(run.sessionId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run.sessionId]);
   useEffect(() => {
     requestAnimationFrame(() => scroll.current?.scrollTo({ top: scroll.current.scrollHeight }));
   }, [run.answer, run.activity, history.turns.length]);
@@ -124,18 +147,21 @@ export function ChatPanel({
         requestId,
       });
       dispatch({ type: "accepted", jobId: accepted.jobId, sessionId: accepted.sessionId ?? sessionId });
+      activeJob.current = accepted.jobId;
       setInput(""); setAttachment(undefined);
+      if (accepted.sessionId && accepted.sessionId !== sessionId) onSessionCreated?.(accepted.sessionId);
       const controller = new StreamController(client, accepted.jobId, {
-        onEvents: (events: StoredEvent[]) => dispatch({ type: "events", events }),
-        onAttached: () => dispatch({ type: "stream-attached" }),
-        onDetached: () => dispatch({ type: "stream-detached" }),
-        onFatal: (message) => dispatch({ type: "submit-failed", error: message }),
+        onEvents: (events: StoredEvent[]) => { if (activeJob.current === accepted.jobId) dispatch({ type: "events", events }); },
+        onAttached: () => { if (activeJob.current === accepted.jobId) dispatch({ type: "stream-attached" }); },
+        onDetached: () => { if (activeJob.current === accepted.jobId) dispatch({ type: "stream-detached" }); },
+        onFatal: (message) => { if (activeJob.current === accepted.jobId) dispatch({ type: "submit-failed", error: message }); },
       });
       esRef.current?.close();
       esRef.current = controller;
       controller.start();
       // reconciliation poll: finalizes truthfully if the stream dies
       const poll = setInterval(async () => {
+        if (activeJob.current !== accepted.jobId) { clearInterval(poll); return; }
         try {
           const st = await client.job(accepted.jobId);
           dispatch({ type: "job-status", status: st.status as never });
@@ -146,7 +172,7 @@ export function ChatPanel({
     } catch (e) {
       dispatch({ type: "submit-failed", error: e instanceof ApiError ? e.message : String(e) });
     }
-  }, [busy, input, attachment, client, sessionId, cwd, mode, model]);
+  }, [busy, input, attachment, client, sessionId, cwd, mode, model, onSessionCreated]);
 
   // derived live message bits
   const liveTools = run.events
@@ -231,7 +257,7 @@ export function ChatPanel({
           <article className="agent-message">
             <div className="agent-byline">
               <span className="agent-avatar"><ZLogo size={18} /></span><strong>Zcode</strong>
-              <span className="agent-model">{(models.find((m) => m.ref === model)?.model || "GLM").toUpperCase()}</span>
+              <span className="agent-model">{(models.find((m) => m.ref === model)?.model || "GLM").split("/").pop()?.toUpperCase()}</span>
               {run.phase !== "idle" && <span className="message-duration"><Clock3 size={11} />{run.phase}</span>}
               <button className="message-details-toggle" onClick={() => setDetailsHidden((v) => !v)} aria-expanded={!detailsHidden}>
                 {detailsHidden ? <Eye size={12} /> : <EyeOff size={12} />}<span>{detailsHidden ? "Details" : "Hide"}</span>
@@ -312,14 +338,14 @@ export function ChatPanel({
             <div className="composer-right">
               <div className="composer-menu-wrap">
                 <button className="model-picker" onClick={() => setMenu(menu === "model" ? null : "model")}>
-                  <Sparkles size={12} /><span>{(models.find((m) => m.ref === model)?.model || "model").toUpperCase()}</span><ChevronDown size={11} />
+                  <Sparkles size={12} /><span>{(models.find((m) => m.ref === model)?.model || "model").split("/").pop()?.toUpperCase()}</span><ChevronDown size={11} />
                 </button>
                 {menu === "model" && (
                   <div className="popover model-popover">
                     <div className="popover-label">SELECT MODEL</div>
                     {models.map((m) => (
                       <button key={m.ref} onClick={() => { setModel(m.ref); savePrefs({ model: m.ref }); setMenu(null); }}>
-                        <Sparkles size={15} /><span><b>{m.model.toUpperCase()}</b><small>{m.providerName}</small></span>
+                        <Sparkles size={15} /><span><b>{(m.model.split("/").pop() || m.model).toUpperCase()}</b><small>{m.providerName}{m.model.includes("/") ? ` · ${m.model}` : ""}</small></span>
                         {model === m.ref && <Check size={13} className="success-text" />}
                       </button>
                     ))}

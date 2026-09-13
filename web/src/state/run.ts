@@ -74,8 +74,11 @@ function applyEvent(run: RunState, ev: StoredEvent): RunState {
   };
   switch (ev.kind) {
     case "line": {
-      const line = ev.line as { type?: string; payload?: Record<string, unknown> } | undefined;
+      const line = ev.line as { type?: string; sessionId?: string; payload?: Record<string, unknown> } | undefined;
       const p = (line?.payload || {}) as Record<string, unknown>;
+      // CLI envelopes carry the sessionId — adopt it when a new chat's job
+      // was accepted before the CLI had created the session
+      if (line?.sessionId) next.sessionId = line.sessionId;
       if (line?.type === "model.streaming" && typeof p.delta === "string") {
         if (p.kind === "reasoning_delta") next.reasoning = run.reasoning + p.delta;
         else if (p.kind === "text_delta" || p.kind === undefined) next.answer = run.answer + p.delta;

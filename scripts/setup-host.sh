@@ -65,20 +65,22 @@ for (const [id, p] of Object.entries(providers)) {
 const ids = Object.keys(entries);
 if (!ids.length) { console.error("No API-key providers found in desktop config — log into the desktop app first."); process.exit(1); }
 
-// prefer a coding-plan provider, fall back to the first entry
-const mainId = ids.find((i) => i.includes("coding-plan")) || ids[0];
-const firstModel = Object.keys(entries[mainId].models)[0];
-
+// default model: keep an existing model.main whose provider still exists,
+// else prefer a custom openai(-compatible) provider — the Z.ai/BigModel
+// account plans are shared and regularly hit usage limits
 let cfg = {};
 try { cfg = JSON.parse(fs.readFileSync(cliPath, "utf8")); } catch {}
 if (Object.keys(cfg).length) fs.copyFileSync(cliPath, cliPath + ".bak-" + Date.now());
+const kept = typeof cfg.model?.main === "string" ? cfg.model.main.split("/")[0] : null;
+const pick = ids.find((i) => /^openai/.test(entries[i].kind || "")) || ids[0];
+const mainId = (kept && ids.includes(kept) && cfg.model.main) || `${pick}/${Object.keys(entries[pick].models)[0]}`;
 
 cfg.provider = { ...(cfg.provider || {}), ...entries };
-cfg.model = { main: `${mainId}/${firstModel}` };
+cfg.model = { ...(cfg.model || {}), main: mainId };
 fs.writeFileSync(cliPath, JSON.stringify(cfg, null, 2));
 console.log(`Wrote ${cliPath}`);
 console.log(`  providers: ${ids.join(", ")}`);
-console.log(`  model.main: ${mainId}/${firstModel}`);
+console.log(`  model.main: ${mainId}`);
 EOF
 
 echo
