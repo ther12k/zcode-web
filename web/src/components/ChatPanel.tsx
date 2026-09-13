@@ -62,14 +62,20 @@ export function ChatPanel({
   }, [client]);
 
   // load transcript for an existing session
+  const [historyLoading, setHistoryLoading] = useState(false);
   useEffect(() => {
     let alive = true;
-    if (!sessionId) { setHistory({ turns: [], total: 0, hasMore: false }); return; }
+    if (!sessionId) { setHistory({ turns: [], total: 0, hasMore: false }); setHistoryLoading(false); return; }
+    // selecting a session: clear the previous view and show a loader until
+    // the transcript arrives
+    setHistory({ turns: [], total: 0, hasMore: false });
+    setHistoryLoading(true);
     void client.session(sessionId, 10, 0)
       .then((d) => { if (alive) setHistory({ turns: d.transcript, total: d.total, hasMore: d.hasMore }); })
-      .catch((e) => { if (alive) onNotify(e instanceof ApiError ? e.message : String(e), "error"); });
+      .catch((e) => { if (alive) onNotify(e instanceof ApiError ? e.message : String(e), "error"); })
+      .finally(() => { if (alive) setHistoryLoading(false); });
     return () => { alive = false; };
-  }, [sessionId, client]);
+  }, [sessionId, client, onNotify]);
 
   useEffect(() => {
     if (lastKey.current !== draftKey) { setInput(loadDraft(draftKey)); setAttachment(undefined); setMenu(null); lastKey.current = draftKey; }
@@ -286,7 +292,14 @@ export function ChatPanel({
           </div>
         )}
 
-        {history.turns.map((t, i) => (
+        {sessionId && historyLoading && (
+          <div className="chat-loader" role="status" aria-label="Loading conversation">
+            <LoaderCircle size={16} className="spin" />
+            <span>Loading conversation…</span>
+          </div>
+        )}
+
+        {!historyLoading && history.turns.map((t, i) => (
           t.role === "user" ? (
             <article className="user-message-block" key={`h${i}`}>
               <div className="message-byline">

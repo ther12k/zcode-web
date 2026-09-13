@@ -139,3 +139,20 @@ test("search dialog opens on the latest sessions list", async ({ page }) => {
   await dialog.getByLabel("Search sessions").fill("zz-no-such-session");
   await expect(dialog.getByText("No matches. Yet.")).toBeVisible({ timeout: 5000 });
 });
+
+test("selecting a session shows a loader in the chat area", async ({ page }) => {
+  // delay the transcript fetch so the loader state is observable
+  await page.route(/\/api\/sessions\/sess_.+\?limit=/, async (route) => {
+    await new Promise((r) => setTimeout(r, 600));
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ session: {}, transcript: [], total: 0, hasMore: false }),
+    });
+  });
+  await page.goto("/w/default/s/sess_fake0000000000000000000000000000");
+  await page.waitForLoadState("domcontentloaded");
+  await expect(page.locator(".chat-loader")).toBeVisible();
+  await expect(page.getByRole("status", { name: "Loading conversation" })).toBeVisible();
+  await expect(page.locator(".chat-loader")).toBeHidden({ timeout: 5000 });
+});
