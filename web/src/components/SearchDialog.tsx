@@ -1,71 +1,94 @@
-// Search dialog (⌘K): server-scoped session search + recent fallback.
-import { useEffect, useRef, useState } from "react";
-import { Search } from "lucide-react";
+// Search dialog — exact reference markup (command-search + search-results +
+// command-footer classes from the ported stylesheet).
+import { useEffect, useState } from "react";
+import { Search, ChevronRight, SquarePen } from "lucide-react";
 import { Dialog } from "../ui";
 
 type Row = { id: string; title: string; directory: string; updatedAt: number };
 
-export function SearchDialog({ onClose, onSelect }: { onClose: () => void; onSelect: (id: string) => void }) {
+export function SearchDialog({
+  onClose,
+  onSelect,
+}: {
+  onClose: () => void;
+  onSelect: (id: string, directory: string) => void;
+}) {
   const [query, setQuery] = useState("");
   const [rows, setRows] = useState<Row[]>([]);
   const [selected, setSelected] = useState(0);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
 
   useEffect(() => {
     let alive = true;
     const q = query.trim();
     const t = setTimeout(() => {
-      const url = q.length >= 2 ? `/api/search?q=${encodeURIComponent(q)}` : "/api/sessions/recent?root=/";
+      const url = q.length >= 2 ? `/api/search?q=${encodeURIComponent(q)}` : `/api/sessions/recent?root=${encodeURIComponent("/")}`;
       void fetch(url, { headers: { authorization: `Bearer ${localStorage.getItem("zcode-web-token") || ""}` } })
         .then((r) => r.json())
         .then((j) => {
           if (!alive) return;
           const results: Row[] = j.results || j.sessions || [];
-          setRows(results.slice(0, 12));
+          setRows(results.slice(0, 10));
           setSelected(0);
         })
         .catch(() => alive && setRows([]));
-    }, 150);
-    return () => { alive = false; clearTimeout(t); };
+    }, 140);
+    return () => {
+      alive = false;
+      clearTimeout(t);
+    };
   }, [query]);
 
-  function openRow(row: Row) {
-    // derive the workspace param from the session directory (encoded root path)
-    onClose();
-    // navigation is handled by the caller with the full path
-    onSelect(row.id);
-    // also stash the directory so the shell can resolve the workspace
-    try { sessionStorage.setItem("zcode-search-cwd", row.directory); } catch {}
-  }
-
   return (
-    <Dialog title="Search sessions" subtitle="Titles across the configured workspace roots" onClose={onClose}>
-      <input
-        ref={inputRef}
-        value={query}
-        placeholder="Type to search…"
-        onChange={(e) => setQuery(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "ArrowDown") setSelected((s) => Math.min(s + 1, rows.length - 1));
-          if (e.key === "ArrowUp") setSelected((s) => Math.max(s - 1, 0));
-          if (e.key === "Enter" && rows[selected]) { openRow(rows[selected]); }
-        }}
-        style={{ width: "100%" }}
-      />
-      <div className="search-results">
-        {rows.map((row, i) => (
-          <button key={row.id} className={`result ${i === selected ? "selected" : ""}`} onMouseEnter={() => setSelected(i)} onClick={() => openRow(row)}>
-            <Search size={12} />
-            <span>{row.title || row.id}</span>
-            <small>{row.directory.split("/").filter(Boolean).pop()}</small>
-          </button>
-        ))}
-        {!rows.length && <div className="muted" style={{ padding: 8 }}>No matching sessions.</div>}
+    <Dialog title="Find your next thought." onClose={onClose} wide>
+      <div className="command-search">
+        <Search size={20} />
+        <input
+          autoFocus
+          placeholder="Search sessions across your workspace roots…"
+          value={query}
+          aria-label="Search sessions"
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown") { e.preventDefault(); setSelected((i) => Math.min(i + 1, rows.length - 1)); }
+            if (e.key === "ArrowUp") { e.preventDefault(); setSelected((i) => Math.max(0, i - 1)); }
+            if (e.key === "Enter" && rows[selected]) { onSelect(rows[selected].id, rows[selected].directory); onClose(); }
+          }}
+        />
+        <kbd>esc</kbd>
       </div>
+      <div className="search-results" role="listbox" aria-label="Matching sessions">
+        <span className="popover-label">{query ? "RESULTS" : "RECENT SESSIONS"}</span>
+        {rows.length ? (
+          rows.map((row, i) => (
+            <button
+              key={row.id}
+              role="option"
+              aria-selected={i === selected}
+              className={i === selected ? "selected" : ""}
+              onMouseEnter={() => setSelected(i)}
+              onClick={() => { onSelect(row.id, row.directory); onClose(); }}
+            >
+              <span className="search-task-icon sage"><SquarePen size={15} /></span>
+              <span>
+                <strong>{row.title || row.id}</strong>
+                <small>{row.directory.split("/").filter(Boolean).pop()}</small>
+              </span>
+              {i === selected ? <kbd>↵</kbd> : <ChevronRight size={12} />}
+            </button>
+          ))
+        ) : (
+          <div className="no-search-results">
+            <Search size={24} />
+            <h3>No matches. Yet.</h3>
+            <p>Try a different session title.</p>
+          </div>
+        )}
+      </div>
+      <footer className="command-footer">
+        <span><kbd>↑</kbd><kbd>↓</kbd> to navigate</span>
+        <span><kbd>↵</kbd> to open</span>
+        <span>{rows.length} {rows.length === 1 ? "result" : "results"}</span>
+      </footer>
     </Dialog>
   );
 }

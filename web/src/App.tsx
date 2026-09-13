@@ -226,7 +226,10 @@ export function App() {
       {modal === "search" && (
         <SearchDialog
           onClose={() => setModal(null)}
-          onSelect={(id) => selectSession(id)}
+          onSelect={(id, directory) => {
+            // navigate into the session's own project directory
+            navigate({ to: "/w/$workspace/s/$sessionId", params: { workspace: encodeURIComponent(directory), sessionId: id } });
+          }}
         />
       )}
       {modal === "settings" && (
@@ -329,7 +332,7 @@ function ProjectGroups({ roots, activeSessionId, onSelectSession, onSelectProjec
     }
   }
 
-  if (error) return <div className="error-text">{error}</div>;
+  if (error) return <div className="danger-text">{error}</div>;
 
   return (
     <>

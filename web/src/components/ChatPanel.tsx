@@ -4,7 +4,7 @@
 // ZWUI-016 reducer; transport from the ZWUI-017 controller.
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { ArrowUp, AtSign, Brain, Check, ChevronDown, Clock3, FileText, LoaderCircle, MessageSquare, Plus, ShieldCheck, Sparkles, SquarePen, Wrench, X } from "lucide-react";
+import { ArrowUp, AtSign, Brain, Check, ChevronDown, ChevronRight, Clock3, FileText, LoaderCircle, MessageSquare, Plus, ShieldCheck, Sparkles, SquarePen, Terminal, Wrench, X } from "lucide-react";
 import { ZLogo, IconButton, Markdown, CheckMark } from "../ui";
 import { randomUUID } from "../lib/uuid";
 import { ApiError, type ApiClient, type ModelInfo, type TranscriptTurn } from "../api/client";
@@ -141,7 +141,7 @@ export function ChatPanel({
     .filter((e) => e.kind === "line" && (e.line as { type?: string })?.type?.startsWith("tool.call."))
     .map((e) => {
       const line = e.line as { type: string; payload: Record<string, unknown> };
-      return { name: String(line.payload.toolName || "tool"), status: line.type.split(".").pop() || "" };
+      return { name: String(line.payload.toolName || "tool"), status: line.type.split(".").pop() || "", detail: String(line.payload.input || "").slice(0, 400) };
     });
   const liveError = run.events.reduce<string | null>((acc, e) => {
     if (e.kind === "line") {
@@ -185,12 +185,14 @@ export function ChatPanel({
           ) : (
             <article className="agent-message" key={`h${i}`}>
               <div className="agent-byline"><span className="agent-avatar"><ZLogo size={18} /></span><strong>Zcode</strong></div>
-              {(t.tools || []).map((tool, j) => (
-                <div key={j} className={`tool-card ${tool.status === "completed" ? "done" : tool.status}`}>
-                  <Wrench size={12} /> {tool.name} — {tool.status}
+              {(t.tools || []).length > 0 && (
+                <div className="activity-stack">
+                  {(t.tools || []).map((tool, j) => (
+                    <ToolActivity key={j} name={tool.name} status={tool.status} detail={tool.detail} />
+                  ))}
                 </div>
-              ))}
-              {t.text.startsWith("⚠") ? <div className="error-text">{t.text}</div> : <Markdown text={t.text} />}
+              )}
+              {t.text.startsWith("⚠") ? <div className="danger-text">{t.text}</div> : <Markdown text={t.text} />}
             </article>
           )
         ))}
@@ -205,14 +207,16 @@ export function ChatPanel({
             {run.reasoning && (
               <div className="thinking-block"><Brain size={13} /><p>{run.reasoning}</p></div>
             )}
-            {liveTools.map((t, i) => (
-              <div key={i} className={`tool-card ${t.status === "completed" ? "done" : t.status === "started" ? "running" : t.status}`}>
-                <Wrench size={12} /> {t.name} — {t.status}
+            {liveTools.length > 0 && (
+              <div className="activity-stack">
+                {liveTools.map((t, i) => (
+                  <ToolActivity key={i} name={t.name} status={t.status} detail={t.detail || ""} live />
+                ))}
               </div>
-            ))}
+            )}
             {run.answer ? <Markdown text={run.answer} /> : null}
-            {liveError && <div className="error-text">{liveError}</div>}
-            {run.error && <div className="error-text">{run.error}</div>}
+            {liveError && <div className="danger-text">{liveError}</div>}
+            {run.error && <div className="danger-text">{run.error}</div>}
             {!busy && run.phase === "succeeded" && (
               <div className="message-footer"><span className="task-completed"><CheckMark />Task completed</span></div>
             )}
@@ -320,3 +324,22 @@ function useStickyModel(models: ModelInfo[]) {
   return models.some((m) => m.ref === prefs.model) ? prefs.model : models.find((m) => m.isDefault)?.ref || models[0]?.ref || "";
 }
 void useStickyModel;
+
+
+// Reference-pattern collapsible tool evidence (activity-stack classes).
+function ToolActivity({ name, status, detail, live = false }: { name: string; status: string; detail?: string; live?: boolean }) {
+  const [openItem, setOpenItem] = useState(false);
+  const done = status === "completed" || status === "succeeded";
+  return (
+    <div className={`activity-item ${openItem ? "is-open" : ""}`}>
+      <button className="activity-trigger" onClick={() => setOpenItem(!openItem)} aria-expanded={openItem}>
+        <ChevronRight size={12} className="activity-chevron" />
+        {name === "Bash" ? <Terminal size={14} /> : <Wrench size={14} />}
+        <span>{name}</span>
+        <small>{live && !done ? "running" : status}</small>
+        {done && <Check size={13} className="success-text" />}
+      </button>
+      {openItem && detail && <div className="activity-content"><pre className="diff-content"><code>{detail}</code></pre></div>}
+    </div>
+  );
+}

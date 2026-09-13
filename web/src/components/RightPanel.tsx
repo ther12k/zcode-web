@@ -1,8 +1,11 @@
-// Right panel ported from the reference: Preview / Code / Changes tabs.
-// Every tab is honest about capability state — disabled means disabled.
-
+// Right panel — reference structure: panel-tabs + preview (address bar +
+// frame) / code-panel (file-tabs + code-editor) / changes-panel (diff-file
+// lines). Capability states render as honest empty/clean-tree panels.
 import { useEffect, useState } from "react";
-import { CheckCircle2, ChevronDown, Code2, Eye, FileDiff, FileText, FolderClosed, Globe, LoaderCircle, Maximize2, Minimize2, RefreshCw, Wrench } from "lucide-react";
+import {
+  CheckCircle2, ChevronDown, Code2, Eye, FileCode2, FileDiff, FolderClosed,
+  Globe, LoaderCircle, Maximize2, Minimize2, Monitor, PanelBottom, Play, RefreshCw, Smartphone,
+} from "lucide-react";
 import { IconButton } from "../ui";
 
 type Tab = "preview" | "code" | "changes";
@@ -14,17 +17,15 @@ function authHeaders() {
 export function RightPanel({ cwd, onCollapse }: { cwd: string; onCollapse: () => void }) {
   const [tab, setTab] = useState<Tab>("preview");
   const [expanded, setExpanded] = useState(false);
+  const [mobile, setMobile] = useState(false);
 
   return (
     <section className="preview-panel" aria-label="Workspace panel">
-      <header className="panel-header">
-        <div className="panel-tabs" role="tablist" aria-label="Panel tabs">
-          {(["preview", "code", "changes"] as const).map((t) => (
-            <button key={t} role="tab" aria-selected={tab === t} className={`panel-tab ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
-              {t === "preview" ? <Globe size={13} /> : t === "code" ? <Code2 size={13} /> : <FileDiff size={13} />}
-              <span>{t[0].toUpperCase() + t.slice(1)}</span>
-            </button>
-          ))}
+      <div className="panel-tabs">
+        <div className="panel-tab-group" role="tablist" aria-label="Panel tabs">
+          <button role="tab" aria-selected={tab === "preview"} className={`panel-tab ${tab === "preview" ? "active" : ""}`} onClick={() => setTab("preview")}><Globe size={14} /><span>Preview</span></button>
+          <button role="tab" aria-selected={tab === "code"} className={`panel-tab ${tab === "code" ? "active" : ""}`} onClick={() => setTab("code")}><Code2 size={14} /><span>Code</span></button>
+          <button role="tab" aria-selected={tab === "changes"} className={`panel-tab ${tab === "changes" ? "active" : ""}`} onClick={() => setTab("changes")}><FileDiff size={14} /><span>Changes</span></button>
         </div>
         <div className="panel-actions">
           <IconButton label={expanded ? "Collapse panel width" : "Expand panel width"} onClick={() => setExpanded(!expanded)}>
@@ -32,37 +33,30 @@ export function RightPanel({ cwd, onCollapse }: { cwd: string; onCollapse: () =>
           </IconButton>
           <IconButton label="Hide panel" onClick={onCollapse}><Eye size={14} /></IconButton>
         </div>
-      </header>
-      <div className={`panel-body ${expanded ? "expanded" : ""}`}>
-        {tab === "preview" && <PreviewTab cwd={cwd} />}
-        {tab === "code" && <CodeTab cwd={cwd} />}
-        {tab === "changes" && <ChangesTab cwd={cwd} />}
       </div>
+      {tab === "preview" && <PreviewTab cwd={cwd} mobile={mobile} onMobile={setMobile} />}
+      {tab === "code" && <CodeTab cwd={cwd} />}
+      {tab === "changes" && <ChangesTab cwd={cwd} />}
     </section>
   );
 }
 
-// ---------- Preview (ZWUI-035/036 contract) ----------
+// ---------- Preview ----------
 
-function PreviewTab({ cwd }: { cwd: string }) {
-  const [cap, setCap] = useState<{ enabled: boolean; budgetBytes: number } | null>(null);
+function PreviewTab({ cwd, mobile, onMobile }: { cwd: string; mobile: boolean; onMobile: (m: boolean) => void }) {
+  const [cap, setCap] = useState<{ enabled: boolean } | null>(null);
   const [building, setBuilding] = useState(false);
-  const [snapId, setSnapId] = useState<string | null>(null);
-  const [meta, setMeta] = useState<{ files: number; bytes: number } | null>(null);
+  const [snap, setSnap] = useState<{ id: string; files: number; bytes: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
-    void fetch("/api/preview/capability")
-      .then((r) => r.json())
-      .then((c) => alive && setCap(c))
-      .catch(() => alive && setCap({ enabled: false, budgetBytes: 0 }));
+    void fetch("/api/preview/capability").then((r) => r.json()).then((c) => alive && setCap(c)).catch(() => alive && setCap({ enabled: false }));
     return () => { alive = false; };
   }, []);
 
   async function build() {
-    setBuilding(true);
-    setError(null);
+    setBuilding(true); setError(null);
     try {
       const r = await fetch("/api/preview/build", {
         method: "POST",
@@ -71,8 +65,7 @@ function PreviewTab({ cwd }: { cwd: string }) {
       });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || `build failed (${r.status})`);
-      setSnapId(j.snapshotId);
-      setMeta({ files: j.files, bytes: j.bytes });
+      setSnap({ id: j.snapshotId, files: j.files, bytes: j.bytes });
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -81,48 +74,66 @@ function PreviewTab({ cwd }: { cwd: string }) {
   }
 
   return (
-    <div className="preview-tab">
-      {!cap ? <div className="panel-note"><LoaderCircle size={14} className="spin" /> Checking capability…</div>
-        : !cap.enabled ? (
-          <div className="panel-note">
-            <Globe size={15} />
-            <p>Preview is disabled on this deployment.</p>
-            <small>Requires ZCODE_ENABLE_PREVIEW=1 and ZCODE_PREVIEW_ORIGIN — see the threat model (ZWUI-034).</small>
-          </div>
-        ) : (
-          <>
-            <div className="preview-toolbar">
-              <button className="ghost-button" onClick={() => void build()} disabled={building}>
-                {building ? <LoaderCircle size={13} className="spin" /> : <RefreshCw size={13} />}
-                <span>{building ? "Building…" : snapId ? "Rebuild snapshot" : "Build snapshot"}</span>
-              </button>
-              {meta && <span className="mini-badge">{meta.files} files · {Math.ceil(meta.bytes / 1024)} KB</span>}
-            </div>
-            {error && <div className="panel-note error-text">{error}</div>}
-            {snapId ? (
-              <iframe title="Static preview snapshot" src={`/api/preview/${snapId}/index.html`} sandbox="" referrerPolicy="no-referrer" />
-            ) : (
-              <div className="preview-empty"><Globe size={22} /><p>Build a snapshot to preview the project here.</p></div>
-            )}
-          </>
+    <>
+      <div className="preview-toolbar">
+        <div className="device-switch">
+          <IconButton label="Desktop view" className={!mobile ? "selected" : ""} onClick={() => onMobile(false)}><Monitor size={14} /></IconButton>
+          <IconButton label="Mobile view" className={mobile ? "selected" : ""} onClick={() => onMobile(true)}><Smartphone size={13} /></IconButton>
+        </div>
+        <div className="preview-address">
+          <Globe size={12} />
+          <span>{snap ? `${snap.id}.preview` : (cwd.split("/").filter(Boolean).pop() || "workspace")}</span>
+          {snap && <small>{snap.files}f · {Math.ceil(snap.bytes / 1024)}KB</small>}
+          <span className="preview-live-dot" title="Static snapshot" />
+        </div>
+        <IconButton label="Rebuild snapshot" onClick={() => void build()} disabled={building}>
+          {building ? <LoaderCircle size={13} className="spin" /> : <RefreshCw size={13} />}
+        </IconButton>
+        {snap && (
+          <a href={`/api/preview/${snap.id}/index.html`} target="_blank" rel="noopener noreferrer" className="icon-button" aria-label="Open preview in a new tab" title="Open preview in a new tab">
+            <Play size={13} />
+          </a>
         )}
-    </div>
+      </div>
+      {error && <div className="empty-history"><p className="danger-text">{error}</p></div>}
+      {cap === null ? (
+        <div className="empty-history"><LoaderCircle size={16} className="spin" /><p>Checking capability…</p></div>
+      ) : !cap.enabled ? (
+        <div className="empty-history">
+          <Globe size={22} />
+          <p>Preview is disabled on this deployment.</p>
+          <small>Requires ZCODE_ENABLE_PREVIEW=1 and ZCODE_PREVIEW_ORIGIN.</small>
+        </div>
+      ) : snap ? (
+        <div className={`preview-canvas ${mobile ? "mobile-canvas" : ""}`}>
+          <div className={`preview-frame ${mobile ? "mobile-frame" : ""}`}>
+            <iframe title="Static preview snapshot" src={`/api/preview/${snap.id}/index.html`} sandbox="" referrerPolicy="no-referrer" />
+          </div>
+        </div>
+      ) : (
+        <div className="empty-history">
+          <PanelBottom size={22} />
+          <p>Build a snapshot to preview the project here.</p>
+          <button className="primary-button" onClick={() => void build()} disabled={building}>
+            {building ? <LoaderCircle size={13} className="spin" /> : <Play size={13} />}Build snapshot
+          </button>
+        </div>
+      )}
+    </>
   );
 }
 
-// ---------- Code (files API) ----------
+// ---------- Code ----------
 
 function CodeTab({ cwd }: { cwd: string }) {
   const [state, setState] = useState<{ enabled: boolean } | null>(null);
-  const [dir] = useState(cwd);
   const [entries, setEntries] = useState<{ name: string; dir: boolean }[] | null>(null);
-  const [file, setFile] = useState<{ path: string; content: string } | null>(null);
+  const [openFile, setOpenFile] = useState<{ name: string; content: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loadingFile, setLoadingFile] = useState(false);
 
   useEffect(() => {
     let alive = true;
-    void fetch("/api/files/capability").then((r) => r.json()).then((c) => { if (alive) setState(c); }).catch(() => alive && setState({ enabled: false }));
+    void fetch("/api/files/capability").then((r) => r.json()).then((c) => alive && setState(c)).catch(() => alive && setState({ enabled: false }));
     return () => { alive = false; };
   }, []);
 
@@ -131,107 +142,144 @@ function CodeTab({ cwd }: { cwd: string }) {
     let alive = true;
     void fetch(`/api/files/list?dir=${encodeURIComponent(cwd)}`, { headers: authHeaders() })
       .then((r) => r.json())
-      .then((j) => { if (alive) { if (j.error) setError(j.error); else { setEntries(j.entries); setError(null); } } })
+      .then((j) => {
+        if (!alive) return;
+        if (j.error) setError(j.error);
+        else { setEntries(j.entries); setError(null); }
+      })
       .catch(() => alive && setError("listing failed"));
     return () => { alive = false; };
   }, [state, cwd]);
 
-  async function open(path: string) {
-    setLoadingFile(true);
+  async function open(name: string) {
+    setError(null);
     try {
-      const r = await fetch(`/api/files/${encodeURIComponent(path)}`, { headers: authHeaders() });
+      const r = await fetch(`/api/files/${encodeURIComponent(cwd.replace(/\/$/, "") + "/" + name)}`, { headers: authHeaders() });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || "read failed");
-      setFile({ path, content: j.content });
-      setError(null);
+      setOpenFile({ name, content: j.content });
     } catch (e) {
       setError((e as Error).message);
-    } finally {
-      setLoadingFile(false);
     }
   }
 
-  if (state && !state.enabled) {
-    return <div className="panel-note"><Code2 size={15} /><p>Code inspector is disabled on this deployment.</p><small>ZCODE_ENABLE_FILES=1 enables it.</small></div>;
+  if (state === null) return <div className="empty-history"><LoaderCircle size={16} className="spin" /><p>Checking capability…</p></div>;
+  if (!state.enabled) {
+    return (
+      <div className="empty-history">
+        <Code2 size={22} />
+        <p>Code inspector is disabled on this deployment.</p>
+        <small>ZCODE_ENABLE_FILES=1 enables read-only file access.</small>
+      </div>
+    );
   }
 
   return (
-    <div className="code-tab">
-      <div className="code-toolbar">
-        <FolderClosed size={13} />
-        <span className="code-dir" title={dir}>{dir}</span>
-        <IconButton label="Refresh listing" onClick={() => { setEntries(null); }}><RefreshCw size={12} /></IconButton>
-      </div>
-      {error && <div className="error-text" style={{ padding: 8 }}>{error}</div>}
-      <div className="code-files">
-        {(entries || []).map((e) => (
-          <button key={e.name} className={e.dir ? "file-row is-dir" : "file-row"} onClick={() => !e.dir && void open(dir.replace(/\/$/, "") + "/" + e.name)} disabled={e.dir}>
-            <FileText size={12} /><span>{e.name}</span>{e.dir && <ChevronDown size={11} style={{ marginLeft: "auto" }} />}
+    <div className="code-panel">
+      <div className="file-tabs">
+        {(entries || []).filter((e) => !e.dir).slice(0, 8).map((e) => (
+          <button key={e.name} className={openFile?.name === e.name ? "active" : ""} onClick={() => void open(e.name)}>
+            <FileCode2 size={12} />{e.name}
           </button>
         ))}
-        {loadingFile && <div className="panel-note"><LoaderCircle size={13} className="spin" /> reading…</div>}
+        {!entries?.some((e) => !e.dir) && <span className="file-state">no files at root</span>}
       </div>
-      {file && (
-        <pre className="code-content"><code>{file.content}</code></pre>
+      {error && <div className="empty-history"><p className="danger-text">{error}</p></div>}
+      {openFile ? (
+        <div className="code-editor">
+          <pre className="diff-content"><code>{openFile.content}</code></pre>
+        </div>
+      ) : (
+        <div className="empty-history">
+          <FolderClosed size={22} />
+          <p>Pick a file tab to read it here.</p>
+          <small>Directories: {(entries || []).filter((e) => e.dir).map((e) => e.name).join(", ") || "none"}</small>
+        </div>
       )}
     </div>
   );
 }
 
-// ---------- Changes (git API) ----------
+// ---------- Changes ----------
 
 function ChangesTab({ cwd }: { cwd: string }) {
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [entries, setEntries] = useState<{ status: string; path: string }[] | null>(null);
   const [branch, setBranch] = useState<string | null>(null);
-  const [diff, setDiff] = useState<string | null>(null);
+  const [diff, setDiff] = useState<{ path: string; text: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  async function load() {
-    try {
-      const r = await fetch(`/api/git/status?cwd=${encodeURIComponent(cwd)}`, { headers: authHeaders() });
-      const j = await r.json();
-      if (r.status === 403) { setEnabled(false); return; }
-      setEnabled(true);
-      setEntries(j.entries || []);
-      setBranch(j.branch || null);
-      setError(j.error || null);
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  }
-
   useEffect(() => {
-    void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    let alive = true;
+    void (async () => {
+      try {
+        const r = await fetch(`/api/git/status?cwd=${encodeURIComponent(cwd)}`, { headers: authHeaders() });
+        const j = await r.json();
+        if (!alive) return;
+        if (r.status === 403) { setEnabled(false); return; }
+        setEnabled(true);
+        setEntries(j.entries || []);
+        setBranch(j.branch || null);
+        setError(j.error || null);
+      } catch (e) {
+        if (alive) { setEnabled(true); setError((e as Error).message); }
+      }
+    })();
+    return () => { alive = false; };
   }, [cwd]);
 
-  async function showDiff(path?: string) {
-    const r = await fetch(`/api/git/diff?cwd=${encodeURIComponent(cwd)}${path ? `&path=${encodeURIComponent(path)}` : ""}`, { headers: authHeaders() });
+  async function showDiff(path: string) {
+    const r = await fetch(`/api/git/diff?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(path)}`, { headers: authHeaders() });
     const j = await r.json();
-    setDiff(j.diff || j.error);
+    setDiff({ path, text: j.diff || j.error || "" });
   }
 
-  if (enabled === null) return <div className="panel-note"><LoaderCircle size={14} className="spin" /> checking…</div>;
+  if (enabled === null) return <div className="empty-history"><LoaderCircle size={16} className="spin" /><p>Checking git…</p></div>;
   if (enabled === false) {
-    return <div className="panel-note"><FileDiff size={15} /><p>Changes inspector is disabled on this deployment.</p><small>ZCODE_ENABLE_GIT=1 enables it.</small></div>;
+    return (
+      <div className="empty-history">
+        <FileDiff size={22} />
+        <p>Changes inspector is disabled on this deployment.</p>
+        <small>ZCODE_ENABLE_GIT=1 enables read-only git status and diff.</small>
+      </div>
+    );
   }
 
+  const changed = entries || [];
   return (
-    <div className="changes-tab">
-      {branch && <div className="branch-line"><Wrench size={11} />{branch}</div>}
-      {error && <div className="error-text" style={{ padding: 8 }}>{error}</div>}
-      <div className="changed-file-list">
-        {(entries || []).map((e, i) => (
-          <button key={i} onClick={() => void showDiff(e.path)}>
-            <FileText size={12} /><span>{e.path}</span><span className="file-change-count">{e.status}</span>
+    <div className="changes-panel">
+      <header className="changes-view-header">
+        <div><FileDiff size={15} /><h3>Working tree</h3><span className="branch-chip">{branch || "no branch"}</span></div>
+        <span className="muted">{changed.length} changed {changed.length === 1 ? "file" : "files"}</span>
+      </header>
+      <div className="changes-scroll">
+        {error && <div className="empty-history"><p className="danger-text">{error}</p></div>}
+        {!error && !changed.length && (
+          <div className="clean-tree">
+            <span><CheckCircle2 size={28} /></span>
+            <h3>All caught up.</h3>
+            <p>Your working tree is clean. Changes made by agent runs will appear here.</p>
+          </div>
+        )}
+        {changed.map((e) => (
+          <button key={e.path} className="diff-file-header" onClick={() => void showDiff(e.path)}>
+            <FileCode2 size={12} />
+            <span>{e.path}</span>
+            <small className="file-state">{e.status}</small>
+            <ChevronDown size={12} />
           </button>
         ))}
-        {entries && !entries.length && (
-          <div className="panel-note"><CheckCircle2 size={15} /><p>Working tree clean.</p></div>
+        {diff && (
+          <div className="diff-file">
+            <div className="diff-file-header"><FileCode2 size={12} /><span>{diff.path}</span></div>
+            <pre className="diff-content">
+              {diff.text.split("\n").map((line, i) => (
+                <span key={i} className={`diff-line ${line.startsWith("+") ? "addition" : line.startsWith("-") ? "deletion" : ""}`}>{line || " "}</span>
+              ))}
+            </pre>
+          </div>
         )}
       </div>
-      {diff && <pre className="code-content"><code>{diff}</code></pre>}
     </div>
   );
 }

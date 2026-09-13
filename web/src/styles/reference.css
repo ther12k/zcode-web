@@ -148,3 +148,31 @@
 [data-theme="light"] .thinking-block>p{color:#6d8a58}
 [data-theme="light"] .steps-block{border-color:#c2d4ab}
 [data-theme="light"] .steps-heading{background:#e4edda;color:#5f7f47}
+
+/* ---- local additions (not in the reference sample) ----
+   .empty-history in the sample is a 9px footer note for commit lists; we
+   reuse it as the panel empty state, so give the standalone usage its own
+   roomier, contrast-safe styling. */
+.preview-panel > .empty-history,
+.changes-scroll > .empty-history,
+.code-panel > .empty-history {
+  font-size: 12.5px;
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 48px 20px;
+  text-align: center;
+  flex: 1;
+}
+.preview-panel > .empty-history p,
+.changes-scroll > .empty-history p,
+.code-panel > .empty-history p { color: var(--text); font-size: 13px; margin: 0; }
+.preview-panel > .empty-history small,
+.changes-scroll > .empty-history small,
+.code-panel > .empty-history small { color: var(--muted); font-size: 11.5px; }
+.preview-panel > .empty-history svg,
+.changes-scroll > .empty-history svg,
+.code-panel > .empty-history svg { color: var(--accent); opacity: .85; }

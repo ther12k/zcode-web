@@ -60,9 +60,9 @@ test("markdown XSS payload in model output is neutralized (T04 browser path)", a
 
 test("Ctrl+K opens the search dialog and Escape closes it", async ({ page }) => {
   await page.keyboard.press("ControlOrMeta+k");
-  await expect(page.getByRole("dialog", { name: "Search sessions" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Find your next thought." })).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(page.getByRole("dialog", { name: "Search sessions" })).toBeHidden();
+  await expect(page.getByRole("dialog", { name: "Find your next thought." })).toBeHidden();
 });
 
 test("sidebar Projects view lists roots and expands to sessions", async ({ page }) => {
