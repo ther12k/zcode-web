@@ -448,6 +448,7 @@ async function handleApi(req, res, url) {
   if (sessionMatch && req.method === "GET") {
     let session;
     let page;
+    let runInfo = { active: false, startedAt: null };
     try {
       session = store.get(sessionMatch[1]);
       if (!session) return sendJson(res, 404, { error: "session not found" });
@@ -455,6 +456,7 @@ async function handleApi(req, res, url) {
       const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 5, 1), 400);
       const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0);
       page = store.transcript(session.id, { limit, offset });
+      runInfo = store.runInfo(session.id);
     } catch (e) {
       const status = e.code === "DB_MISSING" ? 503 : 500;
       return sendJson(res, status, { error: e.message, code: e.code });
@@ -466,7 +468,8 @@ async function handleApi(req, res, url) {
       hasMore: page.hasMore,
       // a turn is running from ANY writer (desktop/CLI/web) — the UI shows
       // progress and blocks sending while this is true
-      runActive: store.runActive(session.id),
+      runActive: runInfo.active,
+      runStartedAt: runInfo.startedAt,
     });
   }
 

@@ -223,6 +223,7 @@ test("an externally running session locks the composer and shows progress", asyn
       body: JSON.stringify({
         session: {},
         runActive: true,
+        runStartedAt: Date.now() - 6500,
         transcript: [
           { role: "user", text: "keep going" },
           { role: "assistant", text: "", incomplete: true },
@@ -240,6 +241,8 @@ test("an externally running session locks the composer and shows progress", asyn
   const send = page.locator(".send-button");
   await expect(send).toBeDisabled();
   await expect(send.locator("svg.spin")).toBeVisible();
+  // desktop-style live elapsed timer on the working row
+  await expect(page.locator(".working-elapsed")).toHaveText(/[0-9]+s/, { timeout: 4000 });
 });
 
 test("slash command palette: filter, execute local action, insert run-through", async ({ page }) => {

@@ -329,6 +329,10 @@ export class SessionStore {
   // whose time.completed the CLI only writes when the turn ends. A recency
   // guard keeps crashed runs from looking busy forever.
   runActive(sessionId) {
+    return this.runInfo(sessionId).active;
+  }
+
+  runInfo(sessionId) {
     const row = this.query(
       `SELECT json_extract(m.data, '$.role') AS role,
               json_extract(m.data, '$.time.completed') AS completed,
@@ -340,9 +344,11 @@ export class SessionStore {
     )[0];
     // mid-run the newest message is the assistant reply the CLI is still
     // streaming — time.completed is only written when the turn ends
-    if (!row || row.role !== "assistant" || row.completed != null) return false;
-    const age = Date.now() - (Number(row.created) || 0);
-    return age >= 0 && age < 6 * 3600_000;
+    const startedAt = Number(row?.created) || 0;
+    const active =
+      !!row && row.role === "assistant" && row.completed == null &&
+      Date.now() - startedAt >= 0 && Date.now() - startedAt < 6 * 3600_000;
+    return { active, startedAt: active ? startedAt : null };
   }
 }
 

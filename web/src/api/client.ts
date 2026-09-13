@@ -89,6 +89,8 @@ export type SessionDetail = {
   hasMore: boolean;
   /** a turn is running in this session from any writer (desktop/CLI/web) */
   runActive?: boolean;
+  /** when that externally-running turn started (ms epoch), for the live timer */
+  runStartedAt?: number | null;
 };
 
 export type JobStatus = {

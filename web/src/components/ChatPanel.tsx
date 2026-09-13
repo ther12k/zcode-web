@@ -103,11 +103,13 @@ export function ChatPanel({
   // a turn running from another writer (desktop/CLI): the composer locks and
   // the view shows progress until the store says the turn ended
   const [externalActive, setExternalActive] = useState(false);
+  const [externalStartedAt, setExternalStartedAt] = useState<number | null>(null);
   const externalActiveRef = useRef(false);
   useEffect(() => { externalActiveRef.current = externalActive; }, [externalActive]);
   const applySessionPage = useCallback((d: SessionDetail) => {
     setHistory({ turns: d.transcript, total: d.total, hasMore: d.hasMore });
     setExternalActive(!!d.runActive);
+    setExternalStartedAt(d.runStartedAt ?? null);
     if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title });
   }, [onSessionMeta]);
   useEffect(() => {
@@ -158,6 +160,7 @@ export function ChatPanel({
           return JSON.stringify(cur) === JSON.stringify(next) ? cur : next;
         });
         setExternalActive(!!d.runActive);
+        setExternalStartedAt(d.runStartedAt ?? null);
         if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title });
       } catch { /* transient */ }
       finally { fetching = false; }
@@ -239,9 +242,24 @@ export function ChatPanel({
     if (run.sessionId && isTerminal(run.phase)) onSessionCreated?.(run.sessionId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [run.phase]);
+  // stick to the newest message while streaming, like the desktop — unless
+  // the reader has scrolled up (then leave their reading position alone)
+  const stickToBottom = useRef(true);
+  const [externalTick, setExternalTick] = useState(0);
   useEffect(() => {
-    requestAnimationFrame(() => scroll.current?.scrollTo({ top: scroll.current.scrollHeight }));
-  }, [run.answer, run.activity, history.turns.length]);
+    requestAnimationFrame(() => {
+      const el = scroll.current;
+      if (el && stickToBottom.current) el.scrollTo({ top: el.scrollHeight });
+    });
+  }, [run.answer, run.activity, history]);
+  useEffect(() => {
+    // the desktop's live timer on an in-progress turn
+    if (!externalActive || !externalStartedAt) return;
+    const t = setInterval(() => {
+      setExternalTick(Date.now());
+    }, 1000);
+    return () => clearInterval(t);
+  }, [externalActive, externalStartedAt]);
   useEffect(() => {
     if (!menu) return;
     const close = (e: MouseEvent) => { if (!(e.target as HTMLElement).closest(".composer-menu-wrap")) setMenu(null); };
@@ -527,7 +545,7 @@ export function ChatPanel({
           {detailsHidden ? <Eye size={12} /> : <EyeOff size={12} />}<span>{detailsHidden ? "Show details" : "Hide details"}</span>
         </button>
       </div>
-      <div className="messages-scroll" ref={scroll}>
+      <div className="messages-scroll" ref={scroll} onScroll={(e) => { const el = e.currentTarget; stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120; }}>
         {empty && (
           <div className="empty-conversation">
             <div className="empty-logo"><ZLogo size={35} /></div>
@@ -634,7 +652,7 @@ export function ChatPanel({
             </div>
             <div className="working-message external-working">
               <LoaderCircle size={13} className="spin" />
-              <span>Working<span className="thinking-dots"><i /><i /><i /></span></span>
+              <span>Working{externalStartedAt && externalTick ? <span className="working-elapsed">{formatDuration(Math.max(1000, externalTick - externalStartedAt))}</span> : null}<span className="thinking-dots"><i /><i /><i /></span></span>
             </div>
           </article>
         )}

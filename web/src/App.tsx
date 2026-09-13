@@ -148,7 +148,14 @@ export function App() {
     void client.sessions(cwd)
       .then((r) => { if (alive) setSessions(r.sessions); })
       .catch(() => { if (alive) setSessions([]); });
-    return () => { alive = false; };
+    // the desktop creates sessions too — follow along while the tab is open
+    const poll = setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      void client.sessions(cwd)
+        .then((r) => { if (alive) setSessions(r.sessions); })
+        .catch(() => {});
+    }, 30_000);
+    return () => { alive = false; clearInterval(poll); };
   }, [cwd, client, token]);
   useEffect(() => {
     let alive = true;

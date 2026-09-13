@@ -230,3 +230,4 @@
 .command-row.active .command-name{color:#e4e6e3}
 .command-desc{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:9px;color:#879084}
 .command-kbd{font-size:7.5px;color:#6f7a6c;border:1px solid #3d413c;border-radius:3px;padding:1px 4px;letter-spacing:.2px;white-space:nowrap}
+.working-elapsed{margin-left:7px;font-variant-numeric:tabular-nums;color:#96a195;font-size:10px}
