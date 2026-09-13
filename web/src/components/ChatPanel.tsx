@@ -723,29 +723,42 @@ function TimelineRow({ event }: { event: TimelineEvent }) {
 
 // Transcript artifacts (screenshots, PDFs, text saved by desktop tools) —
 // images render as thumbnails; everything else is a chip. Click → preview.
+// The CLI prunes old artifact files, so a referenced artifact can be gone;
+// the thumbnail falls back to a chip instead of a broken image.
 function FileCards({ files, onPreview }: { files: FileCard[]; onPreview: (f: FileCard) => void }) {
   return (
     <div className="file-cards">
-      {files.map((f, i) => {
-        const a = artifactArgs(f.url);
-        const route = a ? artifactUrl(a) : null;
-        const isImage = f.mime.startsWith("image/");
-        const label = isImage ? f.mime.replace("image/", "").toUpperCase() : (f.mime === "application/pdf" ? "PDF" : f.mime.split("/").pop()?.toUpperCase() || "FILE");
-        return (
-          <button key={`${f.url}-${i}`} className={`file-card ${isImage ? "is-image" : ""}`} onClick={() => onPreview(f)} title="Preview attachment">
-            {isImage && route ? <img src={route} alt="attached screenshot" loading="lazy" /> : <FileText size={12} />}
-            <span>{label}{f.size ? ` · ${(f.size / 1024).toFixed(0)}KB` : ""}</span>
-          </button>
-        );
-      })}
+      {files.map((f, i) => (
+        <FileChip key={`${f.url}-${i}`} file={f} onPreview={onPreview} />
+      ))}
     </div>
+  );
+}
+
+function FileChip({ file: f, onPreview }: { file: FileCard; onPreview: (f: FileCard) => void }) {
+  const [thumbFailed, setThumbFailed] = useState(false);
+  const a = artifactArgs(f.url);
+  const route = a ? artifactUrl(a) : null;
+  const isImage = f.mime.startsWith("image/");
+  // desktop shows the pasted filename; artifact-protocol URLs have none, so
+  // those fall back to the mime label
+  const base = f.url ? (f.url.split("/").pop() || "") : "";
+  const label = base && base.includes(".") ? base.slice(0, 48) : isImage ? f.mime.replace("image/", "").toUpperCase() : (f.mime === "application/pdf" ? "PDF" : f.mime.split("/").pop()?.toUpperCase() || "FILE");
+  return (
+    <button className={`file-card ${isImage && !thumbFailed ? "is-image" : ""}`} onClick={() => onPreview(f)} title="Preview attachment">
+      {isImage && route && !thumbFailed ? <img src={route} alt="attached screenshot" loading="lazy" onError={() => setThumbFailed(true)} /> : <FileText size={12} />}
+      <span>{label}{f.size ? ` · ${(f.size / 1024).toFixed(0)}KB` : ""}</span>
+    </button>
   );
 }
 
 // Full-panel preview used by both pending attachments and transcript
 // artifacts: images inline, PDFs in a sandboxed frame, text as scrollable
-// preformatted content.
+// preformatted content. Missing artifacts (the CLI prunes old ones) show a
+// notice instead of a broken frame.
 function PreviewOverlay({ preview, onClose }: { preview: PreviewState; onClose: () => void }) {
+  const [imgFailed, setImgFailed] = useState(false);
+  useEffect(() => { setImgFailed(false); }, [preview]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
@@ -760,7 +773,9 @@ function PreviewOverlay({ preview, onClose }: { preview: PreviewState; onClose: 
           <span className="preview-light-hint">esc to close</span>
           <IconButton label="Close preview" onClick={onClose}><X size={15} /></IconButton>
         </header>
-        {preview.kind === "image" && <img className="preview-light-image" src={preview.src} alt={preview.title} />}
+        {preview.kind === "image" && (imgFailed
+          ? <div className="preview-missing">This artifact is no longer stored — the CLI prunes old attachments.</div>
+          : <img className="preview-light-image" src={preview.src} alt={preview.title} onError={() => setImgFailed(true)} />)}
         {preview.kind === "pdf" && <iframe className="preview-light-frame" src={preview.src} title={preview.title} />}
         {preview.kind === "text" && <pre className="preview-light-text"><code>{preview.text}</code></pre>}
       </div>

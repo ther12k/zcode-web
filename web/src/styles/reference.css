@@ -197,3 +197,4 @@
 .preview-panel > .empty-history svg,
 .changes-scroll > .empty-history svg,
 .code-panel > .empty-history svg { color: var(--accent); opacity: .85; }
+.preview-missing{display:flex;align-items:center;justify-content:center;min-height:200px;padding:40px;color:#879084;font-size:11px}
