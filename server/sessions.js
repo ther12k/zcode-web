@@ -158,22 +158,29 @@ export class SessionStore {
   // Pagination counts from the newest turn: offset=0, limit=5 returns the
   // LAST 5 turns (the ones shown when opening a session); offset=5 returns
   // the 5 before those, etc.
+  //
+  // The part window keeps the NEWEST parts: long-running sessions (hourly
+  // automations) exceed any fixed cap, and an ascending LIMIT would silently
+  // hide the latest turns — the ones both the UI and the desktop show. The
+  // rows are fetched newest-first and re-reversed for the turn builder.
   transcript(sessionId, { limit = 400, offset = 0 } = {}) {
     const rows = this.query(
       `SELECT m.data AS mdata, m.sequence AS mseq, p.sequence AS pseq, p.data AS pdata
          FROM part p JOIN message m ON m.id = p.message_id
         WHERE p.session_id = ?
-        ORDER BY m.sequence, p.sequence
-        LIMIT 2000`,
+        ORDER BY m.sequence DESC, p.sequence DESC
+        LIMIT 6000`,
       [sessionId]
-    );
+    ).reverse();
     const turns = [];
     for (const r of rows) {
       let msg = {};
       let part = {};
       try { msg = JSON.parse(r.mdata); } catch { /* keep {} */ }
       try { part = JSON.parse(r.pdata); } catch { /* keep {} */ }
-      const text = typeof part.text === "string" ? part.text : "";
+      // reasoning parts carry .text too — the desktop keeps them out of the
+      // rendered answer (collapsible "Thinking"), so must we
+      const text = typeof part.text === "string" && part.type !== "reasoning" ? part.text : "";
       const last = turns[turns.length - 1];
       if (last && last.mseq === r.mseq) {
         if (text.trim()) last.texts.push(text);

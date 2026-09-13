@@ -297,3 +297,57 @@ describe("FAKE_MODE=fail run", () => {
     }
   });
 });
+
+// ZWUI-018 regression: the transcript part-window must keep the NEWEST parts
+// (hourly-automation sessions exceed 2000 parts; the old ascending LIMIT
+// silently hid the latest turns — the ones the desktop shows), and reasoning
+// parts must never bleed into the rendered answer.
+describe("SessionStore.transcript newest-parts window", async () => {
+  const { SessionStore } = await import("../server/sessions.js");
+  const { DatabaseSync } = await import("node:sqlite");
+
+  it("returns the newest turns of a session past 2000 parts and excludes reasoning", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zc-store-"));
+    const dbPath = join(dir, "db.sqlite");
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT);
+      CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, sequence INTEGER);
+      CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT, sequence INTEGER);
+    `);
+    db.prepare("INSERT INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)")
+      .run("sess_t", "t", "/tmp", 1, 2);
+    const insMsg = db.prepare("INSERT INTO message (id, session_id, data, sequence) VALUES (?,?,?,?)");
+    const insPart = db.prepare("INSERT INTO part (id, message_id, session_id, data, sequence) VALUES (?,?,?,?,?)");
+    db.exec("BEGIN");
+    const N = 800; // 800 messages × 3 parts = 2400 parts > the old 2000 cutoff
+    for (let i = 0; i < N; i++) {
+      const mid = `msg_${i}`;
+      insMsg.run(mid, "sess_t", JSON.stringify({ role: "assistant" }), i);
+      insPart.run(`p_${i}_a`, mid, "sess_t", JSON.stringify({ type: "step-start" }), 0);
+      insPart.run(`p_${i}_t`, mid, "sess_t", JSON.stringify({ type: "text", text: `turn-${i} body` }), 1);
+      insPart.run(`p_${i}_r`, mid, "sess_t", JSON.stringify({ type: "reasoning", text: `secret-reasoning-${i}` }), 2);
+    }
+    // the newest message carries the gate table exactly like the desktop shows
+    const last = `msg_${N}`;
+    insMsg.run(last, "sess_t", JSON.stringify({ role: "assistant" }), N);
+    insPart.run(`p_${N}_t`, last, "sess_t", JSON.stringify({
+      type: "text",
+      text: "| Gate | Status |\n| --- | --- |\n| Full verify gate | Green in CI |",
+    }), 0);
+    insPart.run(`p_${N}_r`, last, "sess_t", JSON.stringify({ type: "reasoning", text: "secret-reasoning-final" }), 1);
+    db.exec("COMMIT");
+    db.close();
+
+    const store = new SessionStore(dbPath);
+    const page = store.transcript("sess_t", { limit: 5, offset: 0 });
+    const newest = page.turns[page.turns.length - 1];
+    assert.ok(newest.text.includes("| Gate | Status |"), "newest turn (past the old 2000-part cutoff) must be present");
+    assert.ok(newest.text.includes("Full verify gate"), "table body preserved verbatim");
+    assert.ok(!page.turns.some((t) => t.text.includes("secret-reasoning")), "reasoning parts must not bleed into answers");
+    assert.ok(page.total >= N, `expected >= ${N} turns, got ${page.total}`);
+    // pagination from newest still works
+    const older = store.transcript("sess_t", { limit: 5, offset: 5 });
+    assert.notEqual(older.turns[older.turns.length - 1].text, newest.text);
+  });
+});
