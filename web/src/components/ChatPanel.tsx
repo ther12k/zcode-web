@@ -559,7 +559,8 @@ export function ChatPanel({
           </article>
         )}
 
-        {(run.answer || run.reasoning || busy || run.error) && (
+        {/* live block is for runs attached HERE; external activity has its own row */}
+        {(run.answer || run.reasoning || localBusy || run.error) && (
           <article className="agent-message">
             <div className="agent-byline">
               <span className="agent-avatar"><ZLogo size={18} /></span><strong>Zcode</strong>
