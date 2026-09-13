@@ -16,13 +16,15 @@ const SERVER_ROOT = new URL("..", import.meta.url).pathname;
 
 let server;
 let ws;
+let home; // isolated ZCODE_HOME under test
 
 function startServer(extraEnv = {}) {
   ws = mkdtempSync(join(tmpdir(), "zc-test-"));
   mkdirSync(join(ws, "proj"), { recursive: true });
   // isolated ZCODE_HOME => the sessions DB genuinely does not exist, which is
   // what ZWUI-018's DB_MISSING case asserts
-  const fakeHome = mkdtempSync(join(tmpdir(), "zc-home-"));
+  home = mkdtempSync(join(tmpdir(), "zc-home-"));
+  const fakeHome = home;
   server = spawn(process.execPath, [join(SERVER_ROOT, "server", "index.js")], {
     env: {
       ...process.env,
@@ -33,6 +35,7 @@ function startServer(extraEnv = {}) {
       ZCODE_WORKSPACE_ROOT: ws,
       ZCODE_HOME: fakeHome,
       ZCODE_JOB_TIMEOUT_MS: "15000",
+      ZCODE_ENABLE_FILES: "1",
       ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -121,6 +124,31 @@ describe("auth", () => {
   it("SSE rejects the legacy ?token= mechanism", async () => {
     const r = await fetch(`${BASE}/api/events/00000000-0000-0000-0000-000000000000?token=${TOKEN}`);
     assert.equal(r.status, 401);
+  });
+});
+
+describe("paste-attachment previews (desktop parity)", () => {
+  it("serves text pasted into the CLI under zcodeHome/tmp/paste-attachments", async () => {
+    const dir = join(home, "tmp", "paste-attachments", "2026-01-01");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "pasted-text-x.txt"), "pasted payload");
+    const r = await fetch(`${BASE}/api/files/${encodeURIComponent(join(dir, "pasted-text-x.txt"))}`, { headers: auth });
+    assert.equal(r.status, 200);
+    const j = await r.json();
+    assert.equal(j.content, "pasted payload");
+  });
+  it("still rejects host paths outside workspace roots", async () => {
+    const outside = join(tmpdir(), "zc-outside-secret.txt");
+    writeFileSync(outside, "secret");
+    const r = await fetch(`${BASE}/api/files/${encodeURIComponent(outside)}`, { headers: auth });
+    assert.equal(r.status, 403);
+  });
+  it("still rejects binary paste files", async () => {
+    const dir = join(home, "tmp", "paste-attachments", "2026-01-02");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "pasted-image-x.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x0d]));
+    const r = await fetch(`${BASE}/api/files/${encodeURIComponent(join(dir, "pasted-image-x.png"))}`, { headers: auth });
+    assert.equal(r.status, 415);
   });
 });
 

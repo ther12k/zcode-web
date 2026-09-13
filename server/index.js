@@ -676,7 +676,12 @@ async function handleApi(req, res, url) {
     }
     const rel = decodeURIComponent(filesMatch[1]);
     const abs = resolve(String(rel));
-    const inside = ALLOWED_ROOTS.some((root) => abs === root || abs.startsWith(root + sep));
+    const pasteRoot = resolve(join(config.zcodeHome, "tmp", "paste-attachments"));
+    // transcript attachments pasted into the CLI/desktop live under the
+    // shared zcode home — previewable like workspace files, without adding
+    // the CLI's internals to the browsable allowed roots
+    const inside = ALLOWED_ROOTS.some((root) => abs === root || abs.startsWith(root + sep))
+      || abs === pasteRoot || abs.startsWith(pasteRoot + sep);
     if (!inside) return sendJson(res, 403, { error: "path outside allowed roots" });
     if (!existsSync(abs) || !statSync(abs).isFile()) return sendJson(res, 404, { error: "not found" });
     const stat = statSync(abs);

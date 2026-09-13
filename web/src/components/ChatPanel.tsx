@@ -280,10 +280,23 @@ export function ChatPanel({
     }
   }, [onNotify]);
 
-  // preview a transcript artifact (server sniffs content type)
+  // preview a transcript artifact (server sniffs content type); pasted
+  // attachments stored as plain host paths go through the files route
   const previewArtifact = useCallback(async (f: FileCard) => {
     const a = artifactArgs(f.url);
-    if (!a) { onNotify("This attachment can't be previewed here.", "error"); return; }
+    if (!a) {
+      if (f.url && f.url.startsWith("/")) {
+        try {
+          const r = await fetch(`/api/files/${encodeURIComponent(f.url)}`, { headers: { authorization: `Bearer ${localStorage.getItem("zcode-web-token") || ""}` } });
+          if (!r.ok) throw new Error(r.status === 403 ? "This file is outside the shared roots." : "Could not load attachment.");
+          const j = await r.json();
+          setPreview({ kind: "text", title: f.url.split("/").pop() || "Attachment", text: String(j.content || "").slice(0, 200_000) });
+        } catch (e) { onNotify(e instanceof Error ? e.message : "Could not load attachment.", "error"); }
+      } else {
+        onNotify("This attachment can't be previewed here.", "error");
+      }
+      return;
+    }
     const route = artifactUrl(a);
     if (f.mime.startsWith("image/")) setPreview({ kind: "image", title: f.mime.replace("image/", "").toUpperCase() + " artifact", src: route });
     else if (f.mime === "application/pdf") setPreview({ kind: "pdf", title: "PDF artifact", src: route });
