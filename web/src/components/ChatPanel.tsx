@@ -3,7 +3,7 @@
 // mode/model pickers, live-run "working" message. Run state comes from the
 // ZWUI-016 reducer; transport from the ZWUI-017 controller.
 
-import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { ArrowUp, AtSign, Brain, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Copy, Eye, EyeOff, FileText, LoaderCircle, MessageSquare, Plus, ShieldCheck, Sparkles, SquarePen, Terminal, Wrench, X } from "lucide-react";
 import { ZLogo, IconButton, Markdown, CheckMark } from "../ui";
 import { randomUUID } from "../lib/uuid";
@@ -180,6 +180,17 @@ export function ChatPanel({
     }
   }, [busy, input, attachment, client, sessionId, cwd, mode, model, onSessionCreated]);
 
+  // models grouped by provider in server order (same-provider models are adjacent)
+  const modelGroups = useMemo(() => {
+    const groups: { provider: string; models: ModelInfo[] }[] = [];
+    for (const m of models) {
+      const last = groups[groups.length - 1];
+      if (last && last.provider === m.providerName) last.models.push(m);
+      else groups.push({ provider: m.providerName, models: [m] });
+    }
+    return groups;
+  }, [models]);
+
   // derived live message bits
   const liveTools = run.events
     .filter((e) => e.kind === "line" && (e.line as { type?: string })?.type?.startsWith("tool.call."))
@@ -348,12 +359,16 @@ export function ChatPanel({
                 </button>
                 {menu === "model" && (
                   <div className="popover model-popover">
-                    <div className="popover-label">SELECT MODEL</div>
-                    {models.map((m) => (
-                      <button key={m.ref} onClick={() => { setModel(m.ref); savePrefs({ model: m.ref }); setMenu(null); }}>
-                        <Sparkles size={15} /><span><b>{(m.model.split("/").pop() || m.model).toUpperCase()}</b><small>{m.providerName}{m.model.includes("/") ? ` · ${m.model}` : ""}</small></span>
-                        {model === m.ref && <Check size={13} className="success-text" />}
-                      </button>
+                    {modelGroups.map((g) => (
+                      <div className="model-provider-group" key={g.provider}>
+                        <div className="popover-label">{g.provider.toUpperCase()}</div>
+                        {g.models.map((m) => (
+                          <button key={m.ref} onClick={() => { setModel(m.ref); savePrefs({ model: m.ref }); setMenu(null); }}>
+                            <Sparkles size={15} /><span><b>{(m.model.split("/").pop() || m.model).toUpperCase()}</b><small>{m.model.includes("/") ? m.model : m.providerName}{m.isDefault ? " · default" : ""}</small></span>
+                            {model === m.ref && <Check size={13} className="success-text" />}
+                          </button>
+                        ))}
+                      </div>
                     ))}
                   </div>
                 )}

@@ -147,7 +147,7 @@ export function App() {
   const projectLabel = cwd ? baseName(cwd) : "workspace";
 
   return (
-    <main className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${rightCollapsed ? "right-collapsed" : ""}`}>
+    <main className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <header className="brand-header">
         <button className="brand-button" onClick={() => setSidebarCollapsed(!sidebarCollapsed)} aria-label="Toggle workspace navigation">
           <ZLogo size={25} /><span className="brand-name">zcode</span>
@@ -256,7 +256,7 @@ export function App() {
         </div>
       </aside>
 
-      <div className="workspace-main">
+      <div className={`workspace-main ${rightCollapsed ? "right-collapsed" : ""}`}>
         <ChatPanel
           key={cwd}
           client={client}
