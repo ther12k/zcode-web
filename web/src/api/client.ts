@@ -47,6 +47,8 @@ export type ModelInfo = {
 
 export type ProjectRoots = { roots: { path: string; projects: string[] }[] };
 
+export type SkillInfo = { name: string; description: string; scope: string };
+
 export type SessionInfo = {
   id: string;
   title: string;
@@ -140,6 +142,9 @@ export class ApiClient {
   }
   session(id: string, limit = 5, offset = 0) {
     return this.request<SessionDetail>(`/api/sessions/${id}?limit=${limit}&offset=${offset}`);
+  }
+  skills() {
+    return this.request<{ skills: SkillInfo[] }>("/api/skills");
   }
   upload(name: string, data: string) {
     return this.request<{ path: string; name: string; size: number }>("/api/upload", {

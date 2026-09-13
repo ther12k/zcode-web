@@ -99,6 +99,21 @@ test("Ctrl+K opens the search dialog and Escape closes it", async ({ page }) => 
   await expect(page.getByRole("dialog", { name: "Find your next thought." })).toBeHidden();
 });
 
+test("skills launcher lists real skills and drafts the composer", async ({ page }) => {
+  await page.locator(".secondary-nav .nav-button", { hasText: "Skills" }).click();
+  const dialog = page.getByRole("dialog", { name: /expertise, on demand/ });
+  await expect(dialog).toBeVisible();
+  // the fake CLI registry serves three skills
+  await expect(dialog.locator(".skill-card")).toHaveCount(3);
+  // search filters
+  await dialog.getByLabel("Search skills").fill("deploy");
+  await expect(dialog.locator(".skill-card")).toHaveCount(1);
+  // selecting a skill lands its prompt in the composer and closes the dialog
+  await dialog.locator(".skill-card").click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByLabel("Message Zcode")).toHaveValue("Use the fake-deploy skill: ");
+});
+
 test("sidebar Projects view lists roots and expands to sessions", async ({ page }) => {
   // fresh CI workspaces are empty — create a project like a user would
   await page.request.post("/api/projects", {

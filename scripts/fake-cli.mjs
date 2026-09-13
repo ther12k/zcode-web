@@ -20,6 +20,20 @@ const delay = Number(process.env.FAKE_DELAY_MS || 0);
 // answer delta): lets tests exercise the submit→first-event window
 const firstDelay = /\bslowfirst\b/i.test(prompt) ? 5000 : 0;
 
+// `skills list --json`: deterministic registry for the /api/skills endpoint
+if (args[0] === "skills" && args[1] === "list") {
+  process.stdout.write(JSON.stringify({
+    cwd: process.cwd(),
+    diagnostics: [],
+    skills: [
+      { name: "fake-review", description: "Review this project and explain its structure.", directory: "/tmp/skills/fake-review", path: "/tmp/skills/fake-review/SKILL.md", rootPath: "/tmp/skills/fake-review", scope: "user/zcode", source: "user" },
+      { name: "fake-deploy", description: "Deploy the project to the staging environment.", directory: "/tmp/skills/fake-deploy", path: "/tmp/skills/fake-deploy/SKILL.md", rootPath: "/tmp/skills/fake-deploy", scope: "user/agents", source: "user" },
+      { name: "fake-design", description: "Refine the project's look and feel.", directory: "/tmp/skills/fake-design", path: "/tmp/skills/fake-design/SKILL.md", rootPath: "/tmp/skills/fake-design", scope: "system/plugin", source: "plugin" },
+    ],
+  }));
+  process.exit(0);
+}
+
 let seq = 0;
 function emit(type, payload = {}) {
   seq += 1;

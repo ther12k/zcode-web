@@ -13,7 +13,7 @@ import { StreamController } from "../state/stream";
 import { loadDraft, saveDraft, loadPrefs, savePrefs } from "../state/prefs";
 
 export function ChatPanel({
-  client, cwd, sessionId, modes, defaultMode, branch, newChatNonce = 0, onNotify, onSessionCreated, onBusyChange,
+  client, cwd, sessionId, modes, defaultMode, branch, newChatNonce = 0, injectedDraft, onNotify, onSessionCreated, onBusyChange,
 }: {
   client: ApiClient;
   cwd: string;
@@ -22,6 +22,7 @@ export function ChatPanel({
   defaultMode: string;
   branch?: string | null;
   newChatNonce?: number;
+  injectedDraft?: { text: string; key: number } | null;
   onNotify: (text: string, type?: "success" | "error") => void;
   onSessionCreated?: (id: string) => void;
   onBusyChange?: (busy: boolean) => void;
@@ -73,6 +74,18 @@ export function ChatPanel({
   useEffect(() => {
     if (lastKey.current !== draftKey) { setInput(loadDraft(draftKey)); setAttachment(undefined); setMenu(null); lastKey.current = draftKey; }
   }, [draftKey]);
+  // injected drafts (skills launcher) land in the composer, keeping what's
+  // already typed; the saved draft follows so it survives a remount
+  const lastInjected = useRef(0);
+  useEffect(() => {
+    if (!injectedDraft || injectedDraft.key === lastInjected.current) return;
+    lastInjected.current = injectedDraft.key;
+    const next = (input ? input.trimEnd() + " " : "") + injectedDraft.text;
+    setInput(next);
+    saveDraft(draftKey, next);
+    requestAnimationFrame(() => { textarea.current?.focus(); textarea.current?.setSelectionRange(next.length, next.length); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [injectedDraft?.key]);
   useEffect(() => {
     const t = setTimeout(() => saveDraft(draftKey, input), 250);
     return () => clearTimeout(t);

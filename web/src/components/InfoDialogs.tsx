@@ -1,9 +1,17 @@
-// Reference-style utility dialogs: keyboard shortcuts and workspace tools.
-import { useEffect, useRef } from "react";
-import { BookOpen, Check, Database, FileCode2, FolderClosed, Globe, ShieldCheck, TerminalSquare } from "lucide-react";
-import type { AppConfig } from "../api/client";
+// Reference-style utility dialogs: keyboard shortcuts, workspace tools,
+// and the skills launcher backed by the CLI's real skill registry.
+import { useEffect, useMemo, useRef, useState } from "react";
+import { BookOpen, Check, Database, FileCode2, FolderClosed, Globe, Search, ShieldCheck, Sparkles, TerminalSquare, WandSparkles } from "lucide-react";
+import type { AppConfig, SkillInfo } from "../api/client";
 
 type ToolsCaps = Pick<AppConfig, "allowedRoots" | "cliPresent" | "providerConfigured">;
+
+const TONES = ["sage", "violet", "blue", "orange"];
+function toneFor(name: string) {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  return TONES[h % TONES.length];
+}
 
 function DialogShell({ title, subtitle, onClose, children }: { title: string; subtitle?: string; onClose: () => void; children: React.ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -122,6 +130,44 @@ export function ToolsDialog({ caps, onClose }: { caps: ToolsCaps; onClose: () =>
           <ShieldCheck size={16} />
           <p>Tools operate only inside the allowed workspace roots. Nothing else on this machine is exposed.</p>
         </div>
+      </div>
+    </DialogShell>
+  );
+}
+
+export function SkillsDialog({ skills, loading, error, onSelect, onClose }: {
+  skills: SkillInfo[];
+  loading: boolean;
+  error: string | null;
+  onSelect: (name: string) => void;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const filtered = useMemo(() => {
+    const q = query.toLowerCase();
+    return skills.filter((s) => `${s.name} ${s.description}`.toLowerCase().includes(q));
+  }, [skills, query]);
+  return (
+    <DialogShell title="A little expertise, on demand." subtitle="Your real ZCode skills — reusable prompts to get you into your flow." onClose={onClose}>
+      <div className="dialog-body">
+        <div className="search-field">
+          <Search size={15} />
+          <input aria-label="Search skills" placeholder="Find a skill…" value={query} onChange={(e) => setQuery(e.target.value)} autoFocus />
+        </div>
+        {loading && <p className="empty-search">Listing your skills…</p>}
+        {error && <p className="empty-search danger-text">{error}</p>}
+        <div className="skill-grid">
+          {filtered.map((s) => (
+            <button className="skill-card" key={s.name + s.scope} onClick={() => onSelect(s.name)} title={s.description}>
+              <span className={`skill-icon ${toneFor(s.name)}`}><WandSparkles size={21} /></span>
+              <span className="skill-tag">{(s.scope || "skill").toUpperCase()}</span>
+              <h3>{s.name}</h3>
+              <p>{s.description}</p>
+              <span className="skill-action">Use skill <Sparkles size={13} /></span>
+            </button>
+          ))}
+        </div>
+        {!loading && !filtered.length && !error && <p className="empty-search">No skills match that search.</p>}
       </div>
     </DialogShell>
   );

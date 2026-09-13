@@ -8,7 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive, ArrowDownWideNarrow, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, CloudCheck,
   FolderClosed, FolderOpen, History, Keyboard, LoaderCircle, Menu, MoreHorizontal, PanelLeft, PanelRight, Pin, PinOff, Plus,
-  Search, Settings2, SquarePen, Unplug, X, GitBranch,
+  Search, Settings2, SquarePen, Unplug, WandSparkles, X, GitBranch,
 } from "lucide-react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useWorkspace } from "./workspace";
@@ -18,7 +18,7 @@ import { ChatPanel } from "./components/ChatPanel";
 import { RightPanel } from "./components/RightPanel";
 import { SearchDialog } from "./components/SearchDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
-import { ShortcutsDialog, ToolsDialog } from "./components/InfoDialogs";
+import { ShortcutsDialog, SkillsDialog, ToolsDialog } from "./components/InfoDialogs";
 
 type SessionRow = {
   id: string; title: string; directory: string; updatedAt: number;
@@ -41,9 +41,12 @@ export function App() {
   );
   const [sortMenu, setSortMenu] = useState(false);
   const [branch, setBranch] = useState<string | null>(null);
-  const [modal, setModal] = useState<null | "search" | "settings" | "shortcuts" | "tools">(null);
+  const [modal, setModal] = useState<null | "search" | "settings" | "shortcuts" | "tools" | "skills">(null);
   const [taskMenu, setTaskMenu] = useState(false);
   const [runBusy, setRunBusy] = useState(false);
+  // real CLI skills for the launcher (fetched once per page load)
+  const [skills, setSkills] = useState<{ list: import("./api/client").SkillInfo[]; loading: boolean; error: string | null }>({ list: [], loading: true, error: null });
+  const [draft, setDraft] = useState<{ text: string; key: number } | null>(null);
   const [toast, setToast] = useState<{ text: string; type: "success" | "error"; key: number } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -123,6 +126,14 @@ export function App() {
       .catch(() => { if (alive) setSessions([]); });
     return () => { alive = false; };
   }, [cwd, client, token]);
+  useEffect(() => {
+    let alive = true;
+    if (!client) return;
+    void client.skills()
+      .then((r) => { if (alive) setSkills({ list: r.skills, loading: false, error: null }); })
+      .catch((e) => { if (alive) setSkills((s) => ({ ...s, loading: false, error: e instanceof Error ? e.message : String(e) })); });
+    return () => { alive = false; };
+  }, [client, token]);
   // statusbar branch chip (only when the read-only git capability is enabled)
   useEffect(() => {
     let alive = true;
@@ -283,6 +294,7 @@ export function App() {
           )}
         </div>
         <div className="secondary-nav">
+          <button className="nav-button" title="Skills" onClick={() => setModal("skills")}><WandSparkles size={15} /><span className="nav-label">Skills</span><span className="nav-count">{skills.loading ? "…" : skills.list.length || ""}</span></button>
           <button className="nav-button" title="Workspace tools" onClick={() => setModal("tools")}><Unplug size={15} /><span className="nav-label">Workspace tools</span><span className="tools-dot" /></button>
           <button className="nav-button" title="Help and shortcuts" onClick={() => setModal("shortcuts")}><CircleHelp size={15} /><span className="nav-label">Help & shortcuts</span><CircleHelp size={12} className="nav-end" /></button>
         </div>
@@ -305,6 +317,7 @@ export function App() {
           defaultMode={caps.modes.includes(prefs.mode) ? prefs.mode : caps.modes[0] || "plan"}
           branch={branch}
           newChatNonce={newChatNonce}
+          injectedDraft={draft}
           onNotify={notify}
           onBusyChange={setRunBusy}
           onSessionCreated={(id) => {
@@ -354,6 +367,18 @@ export function App() {
       )}
       {modal === "shortcuts" && <ShortcutsDialog onClose={() => setModal(null)} />}
       {modal === "tools" && <ToolsDialog caps={caps} onClose={() => setModal(null)} />}
+      {modal === "skills" && (
+        <SkillsDialog
+          skills={skills.list}
+          loading={skills.loading}
+          error={skills.error}
+          onClose={() => setModal(null)}
+          onSelect={(name) => {
+            setDraft({ text: `Use the ${name} skill: `, key: Date.now() });
+            setModal(null);
+          }}
+        />
+      )}
       {toast && (
         <div className={`toast ${toast.type}`} role={toast.type === "error" ? "alert" : "status"} key={toast.key}>
           {toast.type === "error" ? <CircleHelp size={16} /> : <CheckCircle2 size={16} />}

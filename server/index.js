@@ -4,7 +4,7 @@
 
 import { createServer } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -213,6 +213,43 @@ function listModels({ withKeys = false } = {}) {
 }
 
 
+// Skills come from the CLI's own registry (user dirs + plugins). First
+// occurrence wins on duplicate names — the CLI lists user scopes before
+// plugin caches, so the user's own skill shadows same-named plugin ones.
+const skillsCache = { at: 0, value: null };
+function listSkills() {
+  return new Promise((resolve) => {
+    const cli = cliStatus();
+    if (!cli.present) return resolve([]);
+    const proc = spawn(config.cliNode, [cli.entry, "skills", "list", "--json"], {
+      timeout: 10_000,
+    });
+    let out = "";
+    proc.stdout.on("data", (c) => { out += c; });
+    proc.on("error", () => resolve(skillsCache.value || []));
+    proc.on("close", (code) => {
+      if (code !== 0) return resolve(skillsCache.value || []);
+      try {
+        const parsed = JSON.parse(out);
+        const seen = new Set();
+        const skills = [];
+        for (const s of parsed.skills || []) {
+          if (seen.has(s.name)) continue;
+          seen.add(s.name);
+          skills.push({
+            name: String(s.name || ""),
+            description: String(s.description || "").slice(0, 500),
+            scope: String(s.scope || ""),
+          });
+        }
+        resolve(skills);
+      } catch {
+        resolve(skillsCache.value || []);
+      }
+    });
+  });
+}
+
 // ---- ZWUI-035 snapshot builder (threat-model compliant) ----
 const PREVIEW_BUDGET_BYTES = 8 * 1024 * 1024;
 const PREVIEW_MAX_FILES = 400;
@@ -378,6 +415,19 @@ async function handleApi(req, res, url) {
 
   if (route === "/api/models" && req.method === "GET") {
     return sendJson(res, 200, { models: listModels() });
+  }
+
+  // Real ZCode skills, listed by the CLI itself (`skills list --json`).
+  // Deduped by name (the CLI lists the same skill once per scope); spawn
+  // runs on the approved CLI runtime with a hard timeout, results cached
+  // for 60s — skills rarely change and the spawn is not cheap.
+  if (route === "/api/skills" && req.method === "GET") {
+    const now = Date.now();
+    if (!skillsCache.value || now - skillsCache.at > 60_000) {
+      skillsCache.value = await listSkills();
+      skillsCache.at = now;
+    }
+    return sendJson(res, 200, { skills: skillsCache.value });
   }
 
   // Upload a file (base64 JSON body) for use as a prompt attachment. Files
