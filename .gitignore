@@ -1,17 +1,19 @@
-# proprietary CLI bundle — never commit (see cli/README.md)
+
+
+
+
 cli/zcode.cjs
-
-# local state: CLI config with API keys, session db, credentials, projects
 data/
+.DS_Store
+.e2e-home/
+.e2e-ws/
 .env
-
+# local state: CLI config with API keys, session db, credentials, projects
+*.log
 # misc
 node_modules/
-*.log
-.DS_Store
-
+# proprietary CLI bundle — never commit (see cli/README.md)
+test-results/
+web/dist/
 # web frontend (ZWUI-002)
 web/node_modules/
-web/dist/
-.e2e-ws/
-.e2e-home/
