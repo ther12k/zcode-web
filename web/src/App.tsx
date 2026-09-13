@@ -399,12 +399,11 @@ function ProjectGroups({ roots, activeSessionId, onSelectSession, onSelectProjec
         setDirsByRoot((m) => ({ ...m, ...(Object.fromEntries((j.roots || []).map((x: { path: string; projects: string[] }) => [x.path, x.projects]))) }));
       } catch { /* keep previous listing */ }
     }
-    if (!sessionsByDir[dir]) {
-      void fetch(`/api/sessions?cwd=${encodeURIComponent(dir)}`, { headers: { authorization: `Bearer ${token}` } })
-        .then((r) => r.json())
-        .then((j) => setSessionsByDir((m) => ({ ...m, [dir]: j.sessions || [] })))
-        .catch(() => setSessionsByDir((m) => ({ ...m, [dir]: [] })));
-    }
+    // re-fetch on every expand: a cached list hides newly finished chats
+    void fetch(`/api/sessions?cwd=${encodeURIComponent(dir)}`, { headers: { authorization: `Bearer ${token}` } })
+      .then((r) => r.json())
+      .then((j) => setSessionsByDir((m) => ({ ...m, [dir]: j.sessions || [] })))
+      .catch(() => setSessionsByDir((m) => ({ ...m, [dir]: m[dir] || [] })));
   }
 
   if (error) return <div className="danger-text">{error}</div>;
