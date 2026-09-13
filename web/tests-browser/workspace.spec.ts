@@ -241,3 +241,39 @@ test("an externally running session locks the composer and shows progress", asyn
   await expect(send).toBeDisabled();
   await expect(send.locator("svg.spin")).toBeVisible();
 });
+
+test("slash command palette: filter, execute local action, insert run-through", async ({ page }) => {
+  await page.goto("/w/default");
+  await page.waitForLoadState("domcontentloaded");
+  const box = page.getByLabel("Message Zcode");
+  await box.click();
+  // typing "/" opens the palette with local + run-through entries
+  await box.fill("/");
+  const menu = page.locator(".command-menu");
+  await expect(menu).toBeVisible();
+  await expect(menu.locator(".command-name", { hasText: "/new" })).toBeVisible();
+  await expect(menu.locator(".command-name", { hasText: "/compact" })).toBeVisible();
+  // filtering narrows as you type
+  await box.fill("/sea");
+  await expect(menu.locator(".command-row")).toHaveCount(1);
+  await expect(menu.locator(".command-name")).toHaveText("/search");
+  // Enter executes the local action: the search dialog opens, input clears
+  await box.press("Enter");
+  await expect(page.getByRole("dialog", { name: "Find your next thought." })).toBeVisible();
+  await expect(box).toHaveValue("");
+  await page.keyboard.press("Escape");
+  // custom commands from the (fake) registry are offered per workspace
+  await box.click();
+  await box.fill("/fake-");
+  await expect(menu.locator(".command-name", { hasText: "/fake-ship" })).toBeVisible();
+  await expect(menu.locator(".command-name", { hasText: "/fake-audit" })).toBeVisible();
+  // Tab inserts a run-through command with a trailing space (args follow)
+  await box.press("Tab");
+  await expect(box).toHaveValue("/fake-ship ");
+  await expect(menu).toBeHidden();
+  // Escape dismisses the palette for the current draft
+  await box.fill("/");
+  await expect(menu).toBeVisible();
+  await box.press("Escape");
+  await expect(menu).toBeHidden();
+});

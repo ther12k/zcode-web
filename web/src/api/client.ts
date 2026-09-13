@@ -48,6 +48,7 @@ export type ModelInfo = {
 export type ProjectRoots = { roots: { path: string; projects: string[] }[] };
 
 export type SkillInfo = { name: string; description: string; scope: string };
+export type CommandInfo = { name: string; description: string; scope: string };
 
 export type SessionInfo = {
   id: string;
@@ -159,6 +160,9 @@ export class ApiClient {
   }
   skills() {
     return this.request<{ skills: SkillInfo[] }>("/api/skills");
+  }
+  commands(cwd: string) {
+    return this.request<{ commands: CommandInfo[] }>(`/api/commands?cwd=${encodeURIComponent(cwd)}`);
   }
   upload(name: string, data: string) {
     return this.request<{ path: string; name: string; size: number }>("/api/upload", {

@@ -543,6 +543,24 @@ describe("SessionStore turn durations + runActive", async () => {
   });
 });
 
+// Slash-command palette backing: /api/commands lists the CLI's custom
+// command registry for a workspace, and refuses cwds outside the roots.
+describe("/api/commands", () => {
+  it("lists custom commands from the (fake) CLI registry", async () => {
+    const r = await fetch(`${BASE}/api/commands?cwd=${encodeURIComponent(ws)}`, { headers: auth });
+    assert.equal(r.status, 200);
+    const j = await r.json();
+    const names = j.commands.map((c) => c.name);
+    assert.ok(names.includes("fake-ship"), "project command listed");
+    assert.ok(names.includes("fake-audit"), "user command listed");
+    assert.ok(j.commands.every((c) => typeof c.description === "string"));
+  });
+  it("403s for a cwd outside the allowed roots", async () => {
+    const r = await fetch(`${BASE}/api/commands?cwd=${encodeURIComponent("/etc")}`, { headers: auth });
+    assert.equal(r.status, 403);
+  });
+});
+
 // Search-dialog empty state: recent() merges across all allowed roots.
 describe("SessionStore.recent across roots", async () => {
   const { SessionStore } = await import("../server/sessions.js");

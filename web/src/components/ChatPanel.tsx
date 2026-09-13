@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import { ArrowLeftRight, ArrowUp, ArrowUpRight, AtSign, BadgeCheck, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Copy, Eye, EyeOff, FileText, FoldVertical, GitBranch, LoaderCircle, MessageSquare, Plus, ShieldCheck, Sparkles, Square, SquarePen, Terminal, Wrench, X } from "lucide-react";
 import { ZLogo, IconButton, Markdown, CheckMark } from "../ui";
 import { randomUUID } from "../lib/uuid";
-import { ApiError, type ApiClient, type FileCard, type ModelInfo, type SessionDetail, type TimelineEvent, type TranscriptTurn } from "../api/client";
+import { ApiError, type ApiClient, type CommandInfo, type FileCard, type ModelInfo, type SessionDetail, type TimelineEvent, type TranscriptTurn } from "../api/client";
 import { runReducer, initialRun, isTerminal, type StoredEvent } from "../state/run";
 import { StreamController } from "../state/stream";
 import { loadDraft, saveDraft, loadPrefs, savePrefs } from "../state/prefs";
@@ -29,7 +29,7 @@ const artifactUrl = (a: { sessionId: string; uuid: string }) => `/api/artifacts/
 
 
 export function ChatPanel({
-  client, cwd, sessionId, modes, defaultMode, branch, newChatNonce = 0, reloadKey = 0, injectedDraft, onNotify, onSessionCreated, onBusyChange,
+  client, cwd, sessionId, modes, defaultMode, branch, newChatNonce = 0, reloadKey = 0, injectedDraft, onNotify, onSessionCreated, onBusyChange, onSlashAction,
 }: {
   client: ApiClient;
   cwd: string;
@@ -43,6 +43,8 @@ export function ChatPanel({
   onNotify: (text: string, type?: "success" | "error") => void;
   onSessionCreated?: (id: string) => void;
   onBusyChange?: (busy: boolean) => void;
+  /** app-level slash actions (open dialogs, new chat) — true when handled */
+  onSlashAction?: (action: string) => boolean;
 }) {
   const draftKey = `${cwd}::${sessionId || "new"}`;
   const [run, dispatch] = useReducer(runReducer, undefined, initialRun);
@@ -51,6 +53,18 @@ export function ChatPanel({
   const [mode, setMode] = useState(defaultMode);
   const [model, setModel] = useState("");
   const [menu, setMenu] = useState<"mode" | "model" | null>(null);
+  // "/" palette: local actions run in the app; send-through commands go to
+  // the CLI as the prompt (it expands them — verified for /compact and
+  // custom .zcode/commands)
+  const [cmdIndex, setCmdIndex] = useState(0);
+  const [customCommands, setCustomCommands] = useState<CommandInfo[]>([]);
+  useEffect(() => {
+    let alive = true;
+    void client.commands(cwd)
+      .then((r) => { if (alive) setCustomCommands(r.commands); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [client, cwd]);
   const [detailsHidden, setDetailsHidden] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -239,6 +253,66 @@ export function ChatPanel({
   const busy = localBusy || externalActive;
   useEffect(() => { onBusyChange?.(busy); }, [busy]);
 
+  // ---- "/" command palette ----
+  type Cmd = { name: string; desc: string; run: () => void; group: string; sendThrough?: boolean };
+  const commandList: Cmd[] = useMemo(() => {
+    const local: Cmd[] = [
+      { name: "new", desc: "Start a new chat", group: "Chat", run: () => { onSlashAction?.("new"); } },
+      ...modes.map((m) => ({
+        name: m,
+        desc: `Switch to ${m} mode`,
+        group: "Mode",
+        run: () => { setMode(m); savePrefs({ mode: m }); },
+      })),
+      { name: "model", desc: "Choose the model", group: "Chat", run: () => { setMenu("model"); } },
+      { name: "stop", desc: "Stop the running turn", group: "Chat", run: () => { stopRunRef.current?.(); } },
+      { name: "search", desc: "Search sessions", group: "Navigate", run: () => { onSlashAction?.("search"); } },
+      { name: "skills", desc: "Browse skills", group: "Navigate", run: () => { onSlashAction?.("skills"); } },
+      { name: "tools", desc: "Browse tools", group: "Navigate", run: () => { onSlashAction?.("tools"); } },
+      { name: "settings", desc: "Open settings", group: "Navigate", run: () => { onSlashAction?.("settings"); } },
+      { name: "shortcuts", desc: "Keyboard shortcuts", group: "Navigate", run: () => { onSlashAction?.("shortcuts"); } },
+    ];
+    // /compact is verified to run headlessly and lands as a timeline
+    // separator in the transcript
+    const cliBuiltins: Cmd[] = [
+      { name: "compact", desc: "Summarize the conversation to free context", group: "Run in session", sendThrough: true, run: () => {} },
+    ];
+    const custom: Cmd[] = customCommands.map((c) => ({
+      name: c.name,
+      desc: c.description || "Custom command",
+      group: c.scope === "user" ? "Custom (user)" : "Custom (project)",
+      sendThrough: true,
+      run: () => {},
+    }));
+    return [...local, ...cliBuiltins, ...custom];
+  }, [modes, customCommands, onSlashAction]);
+  // palette shows while the draft is exactly "/query" (no space yet) and
+  // wasn't dismissed with Escape for this draft
+  const [cmdDismissed, setCmdDismissed] = useState(false);
+  const cmdQuery = !cmdDismissed && input.startsWith("/") && !input.includes(" ") ? input.slice(1).toLowerCase() : null;
+  const cmdMatches = useMemo(
+    () => (cmdQuery == null ? [] : commandList.filter((c) => c.name.toLowerCase().startsWith(cmdQuery))),
+    [cmdQuery, commandList]
+  );
+  useEffect(() => { setCmdDismissed(false); }, [input]);
+  useEffect(() => { setCmdIndex((i) => Math.min(i, Math.max(0, cmdMatches.length - 1))); }, [cmdMatches.length]);
+  const stopRunRef = useRef<(() => void) | null>(null);
+  const pickCommand = useCallback((c: Cmd) => {
+    if (c.sendThrough) {
+      // insert and keep focus — commands can take args after the name; Enter
+      // then sends it as the prompt and the CLI expands/executes it
+      setInput(`/${c.name} `);
+      setCmdDismissed(true);
+      textarea.current?.focus();
+      return;
+    }
+    c.run();
+    setInput("");
+    saveDraft(draftKey, "");
+    setCmdDismissed(true);
+    textarea.current?.focus();
+  }, [draftKey]);
+
   async function copyText(id: string, text: string) {
     try {
       await navigator.clipboard.writeText(text);
@@ -347,6 +421,7 @@ export function ChatPanel({
     if (!run.jobId) return;
     void client.cancel(run.jobId).catch(() => onNotify("Could not stop the run.", "error"));
   }, [run.jobId, client, onNotify]);
+  stopRunRef.current = stopRun;
 
   const send = useCallback(async () => {
     if (busy || uploading > 0) return;
@@ -612,6 +687,26 @@ export function ChatPanel({
         onDragOver={(e) => { e.preventDefault(); }}
         onDrop={(e) => { e.preventDefault(); if (e.dataTransfer.files?.length) void attachFiles(e.dataTransfer.files); }}
       >
+        {cmdQuery != null && cmdMatches.length > 0 && (
+          <div className="command-menu" role="listbox" aria-label="Slash commands">
+            {cmdMatches.map((c, i) => (
+              <button
+                key={`${c.group}:${c.name}`}
+                role="option"
+                aria-selected={i === cmdIndex}
+                className={`command-row ${i === cmdIndex ? "active" : ""}`}
+                onMouseEnter={() => setCmdIndex(i)}
+                onMouseDown={(e) => { e.preventDefault(); pickCommand(c); }}
+              >
+                <span className="command-name">/{c.name}</span>
+                <span className="command-desc">{c.desc}</span>
+                {c.sendThrough
+                  ? <kbd className="command-kbd">runs in session</kbd>
+                  : <kbd className="command-kbd">action</kbd>}
+              </button>
+            ))}
+          </div>
+        )}
         <div className={`composer ${busy ? "composer-working" : ""}`}>
           {attachments.length > 0 && (
             <div className="attached-files">
@@ -638,6 +733,13 @@ export function ChatPanel({
             aria-label="Message Zcode"
             rows={2}
             onKeyDown={(e) => {
+              // "/" palette navigation takes precedence while it is open
+              if (cmdQuery != null && cmdMatches.length > 0) {
+                if (e.key === "ArrowDown") { e.preventDefault(); setCmdIndex((i) => (i + 1) % cmdMatches.length); return; }
+                if (e.key === "ArrowUp") { e.preventDefault(); setCmdIndex((i) => (i - 1 + cmdMatches.length) % cmdMatches.length); return; }
+                if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); pickCommand(cmdMatches[cmdIndex] || cmdMatches[0]); return; }
+                if (e.key === "Escape") { e.preventDefault(); setCmdDismissed(true); return; }
+              }
               if (e.key === "Enter" && !e.shiftKey && !(e.nativeEvent as KeyboardEvent).isComposing) { e.preventDefault(); void send(); }
               if (e.key === "Tab" && e.shiftKey) {
                 e.preventDefault();

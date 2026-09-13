@@ -222,3 +222,11 @@
 .font-size-option small{font-size:8px;color:#879084}
 .font-size-sample{font-weight:500;line-height:1}
 .fs-xs{font-size:12px}.fs-s{font-size:14px}.fs-m{font-size:16px}.fs-l{font-size:19px}
+/* "/" command palette above the composer */
+.command-menu{display:flex;flex-direction:column;max-height:280px;overflow-y:auto;margin-bottom:8px;border:1px solid #4d514b;border-radius:9px;background:#2c2f2b;box-shadow:0 8px 24px #0004;padding:4px}
+.command-row{display:flex;align-items:center;gap:9px;min-height:31px;padding:4px 9px;background:transparent;border:0;border-radius:6px;text-align:left;cursor:pointer}
+.command-row.active{background:#383c37}
+.command-name{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10px;color:#c9cec7;white-space:nowrap}
+.command-row.active .command-name{color:#e4e6e3}
+.command-desc{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:9px;color:#879084}
+.command-kbd{font-size:7.5px;color:#6f7a6c;border:1px solid #3d413c;border-radius:3px;padding:1px 4px;letter-spacing:.2px;white-space:nowrap}

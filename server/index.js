@@ -257,6 +257,48 @@ function listSkills() {
   });
 }
 
+// Custom slash commands come from the CLI's own registry — .zcode/commands
+// discovered for a workspace (--cwd is the run cwd, so commands are per
+// project). The CLI expands them itself when a run prompt starts with "/",
+// so the web only needs names + descriptions for the palette.
+const commandsCache = new Map(); // cwd → { at, value }
+function listCommands(cwd) {
+  return new Promise((resolve) => {
+    const cached = commandsCache.get(cwd);
+    const cli = cliStatus();
+    if (!cli.present || !cwd) return resolve([]);
+    if (cached && Date.now() - cached.at < 60_000) return resolve(cached.value);
+    const proc = spawn(config.cliNode, [cli.entry, "commands", "list", "--json"], {
+      timeout: 10_000,
+      cwd,
+    });
+    let out = "";
+    proc.stdout.on("data", (c) => { out += c; });
+    proc.on("error", () => resolve(cached?.value || []));
+    proc.on("close", (code) => {
+      if (code !== 0) return resolve(cached?.value || []);
+      try {
+        const parsed = JSON.parse(out);
+        const seen = new Set();
+        const commands = [];
+        for (const c of parsed.commands || []) {
+          if (seen.has(c.name)) continue;
+          seen.add(c.name);
+          commands.push({
+            name: String(c.name || ""),
+            description: String(c.description || "").slice(0, 500),
+            scope: String(c.scope || ""),
+          });
+        }
+        commandsCache.set(cwd, { at: Date.now(), value: commands });
+        resolve(commands);
+      } catch {
+        resolve(cached?.value || []);
+      }
+    });
+  });
+}
+
 // ---- ZWUI-035 snapshot builder (threat-model compliant) ----
 const PREVIEW_BUDGET_BYTES = 8 * 1024 * 1024;
 const PREVIEW_MAX_FILES = 400;
@@ -443,6 +485,20 @@ async function handleApi(req, res, url) {
       skillsCache.at = now;
     }
     return sendJson(res, 200, { skills: skillsCache.value });
+  }
+
+  // Custom slash commands for a workspace (the composer's "/" palette).
+  // cwd optional — without it the server's own workspace is listed.
+  if (route === "/api/commands" && req.method === "GET") {
+    const rawCwd = url.searchParams.get("cwd") || "";
+    let cwd = "";
+    if (rawCwd) {
+      cwd = resolve(decodeURIComponent(rawCwd));
+      const inside = ALLOWED_ROOTS.some((root) => cwd === root || cwd.startsWith(root + sep));
+      if (!inside) return sendJson(res, 403, { error: "cwd outside allowed roots" });
+    }
+    const commands = await listCommands(cwd || undefined);
+    return sendJson(res, 200, { commands });
   }
 
   // Upload a file (base64 JSON body) for use as a prompt attachment. Files

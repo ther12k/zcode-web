@@ -34,6 +34,21 @@ if (args[0] === "skills" && args[1] === "list") {
   process.exit(0);
 }
 
+// `commands list --json`: deterministic custom-command registry for
+// /api/commands (the composer's "/" palette)
+if (args[0] === "commands" && args[1] === "list") {
+  process.stdout.write(JSON.stringify({
+    cwd: process.cwd(),
+    diagnostics: [],
+    totalDiscovered: 2,
+    commands: [
+      { name: "fake-ship", description: "Ship the current branch to staging.", path: "/tmp/.zcode/commands/fake-ship.md", rootPath: "/tmp/.zcode/commands", scope: "project", source: "zcode" },
+      { name: "fake-audit", description: "Audit dependencies for known issues.", path: "/tmp/.zcode/commands/fake-audit.md", rootPath: "/tmp/.zcode/commands", scope: "user", source: "zcode" },
+    ],
+  }));
+  process.exit(0);
+}
+
 let seq = 0;
 function emit(type, payload = {}) {
   seq += 1;

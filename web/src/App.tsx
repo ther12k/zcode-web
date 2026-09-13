@@ -370,6 +370,11 @@ export function App() {
           injectedDraft={draft}
           onNotify={notify}
           onBusyChange={setRunBusy}
+          onSlashAction={(action) => {
+            if (action === "new") { navigateNewChat(); return true; }
+            if (action === "search" || action === "skills" || action === "tools" || action === "settings" || action === "shortcuts") { setModal(action); return true; }
+            return false;
+          }}
           onSessionCreated={(id) => {
             refreshSessions();
             if (id !== activeSessionId) {
