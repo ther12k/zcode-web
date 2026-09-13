@@ -167,6 +167,11 @@ test("timeline separators render like the desktop transcript", async ({ page }) 
         transcript: [
           { role: "user", text: "hello", timeline: [] },
           {
+            role: "user",
+            text: "with a screenshot",
+            files: [{ mime: "image/png", url: "", size: 1234, storageKind: "attachment", image: { height: 100, width: 200 } }],
+          },
+          {
             role: "assistant",
             text: "",
             timeline: [{ kind: "model_change", label: "Model changed", detail: "GLM-5.3 → gemini-3.8" }],
@@ -193,4 +198,6 @@ test("timeline separators render like the desktop transcript", async ({ page }) 
   // a separator attached to a text turn renders inside that turn (its stack), not as a bare row
   await expect(page.locator(".timeline-stack .timeline-separator[data-kind=compaction]")).toHaveCount(1);
   await expect(page.getByText("answer body")).toBeVisible();
+  // user-message attachments render as chips/thumbnails under the message
+  await expect(page.locator(".user-message-block .file-cards")).toHaveCount(1);
 });

@@ -460,6 +460,9 @@ export function ChatPanel({
                 </IconButton>
               </div>
               <div className="user-message">{t.text}</div>
+              {(t.files || []).length > 0 && (
+                <FileCards files={t.files || []} onPreview={(f) => void previewArtifact(f)} />
+              )}
             </article>
           ) : (
             <article className={`agent-message ${detailsHidden ? "details-hidden" : ""}`} key={`h${i}`}>
