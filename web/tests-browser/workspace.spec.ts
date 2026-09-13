@@ -156,3 +156,41 @@ test("selecting a session shows a loader in the chat area", async ({ page }) => 
   await expect(page.getByRole("status", { name: "Loading conversation" })).toBeVisible();
   await expect(page.locator(".chat-loader")).toBeHidden({ timeout: 5000 });
 });
+
+test("timeline separators render like the desktop transcript", async ({ page }) => {
+  await page.route(/\/api\/sessions\/sess_.+\?limit=/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        session: {},
+        transcript: [
+          { role: "user", text: "hello", timeline: [] },
+          {
+            role: "assistant",
+            text: "",
+            timeline: [{ kind: "model_change", label: "Model changed", detail: "GLM-5.3 → gemini-3.8" }],
+          },
+          {
+            role: "assistant",
+            text: "answer body",
+            timeline: [{ kind: "compaction", label: "Context compacted", detail: "196k → 5k tokens" }],
+          },
+          { role: "assistant", text: "", timeline: [{ kind: "session_fork", label: "Session forked", detail: "" }] },
+        ],
+        total: 4,
+        hasMore: false,
+      }),
+    });
+  });
+  await page.goto("/w/default/s/sess_tlsep00000000000000000000000000");
+  await page.waitForLoadState("domcontentloaded");
+  await expect(page.locator(".chat-loader")).toBeHidden({ timeout: 5000 });
+  // a hairline row per event, with the label and optional detail
+  await expect(page.locator('.timeline-separator[data-kind="model_change"]')).toHaveText(/GLM-5.3 → gemini-3.8/);
+  await expect(page.locator('.timeline-separator[data-kind="compaction"]')).toHaveText(/196k → 5k tokens/);
+  await expect(page.locator('.timeline-separator[data-kind="session_fork"]')).toHaveCount(1);
+  // a separator attached to a text turn renders inside that turn (its stack), not as a bare row
+  await expect(page.locator(".timeline-stack .timeline-separator[data-kind=compaction]")).toHaveCount(1);
+  await expect(page.getByText("answer body")).toBeVisible();
+});

@@ -352,6 +352,77 @@ describe("SessionStore.transcript newest-parts window", async () => {
   });
 });
 
+// Desktop parity: timeline separators (model switches, compactions, forks,
+// goal verification) interleave with the transcript instead of vanishing.
+describe("SessionStore.transcript timeline separators", async () => {
+  const { SessionStore } = await import("../server/sessions.js");
+  const { DatabaseSync } = await import("node:sqlite");
+
+  it("emits model_change, compaction (deduped), fork and verification entries", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zc-store-"));
+    const dbPath = join(dir, "db.sqlite");
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT);
+      CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, sequence INTEGER);
+      CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT, sequence INTEGER);
+    `);
+    db.prepare("INSERT INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)")
+      .run("sess_tl", "tl", "/tmp", 1, 2);
+    const insMsg = db.prepare("INSERT INTO message (id, session_id, data, sequence) VALUES (?,?,?,?)");
+    const insPart = db.prepare("INSERT INTO part (id, message_id, session_id, data, sequence) VALUES (?,?,?,?,?)");
+    // a user turn, then an assistant turn carrying separators + an answer
+    insMsg.run("m0", "sess_tl", JSON.stringify({ role: "user" }), 0);
+    insPart.run("m0_p", "m0", "sess_tl", JSON.stringify({ type: "text", text: "hello" }), 0);
+    insMsg.run("m1", "sess_tl", JSON.stringify({ role: "assistant" }), 1);
+    insPart.run("m1_mc", "m1", "sess_tl", JSON.stringify({
+      type: "timeline", timelineType: "model_change",
+      fromModel: { providerID: "builtin:zai", modelID: "GLM-5.3" },
+      toModel: { providerID: "p1", modelID: "gemini-3.8" },
+    }), 0);
+    // compaction is stored twice: timeline part + compaction part, same operationId
+    insPart.run("m1_c1", "m1", "sess_tl", JSON.stringify({
+      type: "timeline", timelineType: "context_compaction", operationId: "cmp_1",
+      preCompactTokenCount: 196364, postCompactTokenCount: 311908, truePostCompactTokenCount: 5174,
+    }), 1);
+    insPart.run("m1_c2", "m1", "sess_tl", JSON.stringify({
+      type: "compaction", operationId: "cmp_1", trigger: "manual", auto: false,
+      preCompactTokenCount: 196364, postCompactTokenCount: 311908, truePostCompactTokenCount: 5174,
+    }), 2);
+    insPart.run("m1_t", "m1", "sess_tl", JSON.stringify({ type: "text", text: "answer body" }), 3);
+    // separator-only assistant turn (fork) and a failed verification
+    insMsg.run("m2", "sess_tl", JSON.stringify({ role: "assistant" }), 2);
+    insPart.run("m2_f", "m2", "sess_tl", JSON.stringify({
+      type: "timeline", timelineType: "session_fork", parentSessionId: "sess_parent_abcd1234-0000",
+    }), 0);
+    insMsg.run("m3", "sess_tl", JSON.stringify({ role: "assistant" }), 3);
+    insPart.run("m3_g", "m3", "sess_tl", JSON.stringify({
+      type: "timeline", timelineType: "goal_verification", verification: { passed: false },
+    }), 0);
+    db.close();
+
+    const store = new SessionStore(dbPath);
+    const page = store.transcript("sess_tl", { limit: 50 });
+    const kinds = page.turns.flatMap((t) => (t.timeline || []).map((e) => e.kind + ":" + e.label));
+    assert.ok(kinds.includes("model_change:Model changed"), "model_change entry present");
+    const mc = page.turns.flatMap((t) => t.timeline || []).find((e) => e.kind === "model_change");
+    assert.equal(mc.detail, "GLM-5.3 → gemini-3.8");
+    const comps = page.turns.flatMap((t) => t.timeline || []).filter((e) => e.kind === "compaction");
+    assert.equal(comps.length, 1, "timeline + compaction twins collapse to one entry");
+    assert.equal(comps[0].detail, "196k → 5k tokens");
+    assert.ok(kinds.includes("session_fork:Session forked"), "fork separator present");
+    const forkTurn = page.turns.find((t) => (t.timeline || []).some((e) => e.kind === "session_fork"));
+    assert.equal(forkTurn.text, "", "separator-only turns carry no text");
+    assert.ok(kinds.includes("goal_verification:Goal verification"), "verification separator present");
+    const gv = page.turns.flatMap((t) => t.timeline || []).find((e) => e.kind === "goal_verification");
+    assert.equal(gv.detail, "not passed");
+    // no internal bookkeeping leaks
+    assert.ok(JSON.stringify(page.turns).includes('"op"') === false, "operationId bookkeeping must not leak");
+    // separator-only turns count toward the page (they render as dividers)
+    assert.ok(page.turns.some((t) => !t.text && (t.timeline || []).length > 0 && !(t.tools || []).length));
+  });
+});
+
 // Search-dialog empty state: recent() merges across all allowed roots.
 describe("SessionStore.recent across roots", async () => {
   const { SessionStore } = await import("../server/sessions.js");

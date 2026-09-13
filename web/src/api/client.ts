@@ -61,12 +61,16 @@ export type SessionInfo = {
 
 export type ToolCard = { name: string; status: string; detail: string };
 export type FileCard = { mime: string; url: string; size: number | null; storageKind: string };
+// Desktop timeline separators interleaved with turns (model switches,
+// context compactions, session forks, goal-verification marks).
+export type TimelineEvent = { kind: string; label: string; detail: string };
 
 export type TranscriptTurn = {
   role: string;
   text: string;
   reasoning?: string;
   tokens?: number;
+  timeline?: TimelineEvent[];
   tools?: ToolCard[];
   files?: FileCard[];
 };

@@ -4,10 +4,10 @@
 // ZWUI-016 reducer; transport from the ZWUI-017 controller.
 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { ArrowUp, ArrowUpRight, AtSign, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Copy, Eye, EyeOff, FileText, GitBranch, LoaderCircle, MessageSquare, Plus, ShieldCheck, Sparkles, Square, SquarePen, Terminal, Wrench, X } from "lucide-react";
+import { ArrowLeftRight, ArrowUp, ArrowUpRight, AtSign, BadgeCheck, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Copy, Eye, EyeOff, FileText, FoldVertical, GitBranch, LoaderCircle, MessageSquare, Plus, ShieldCheck, Sparkles, Square, SquarePen, Terminal, Wrench, X } from "lucide-react";
 import { ZLogo, IconButton, Markdown, CheckMark } from "../ui";
 import { randomUUID } from "../lib/uuid";
-import { ApiError, type ApiClient, type FileCard, type ModelInfo, type TranscriptTurn } from "../api/client";
+import { ApiError, type ApiClient, type FileCard, type ModelInfo, type TimelineEvent, type TranscriptTurn } from "../api/client";
 import { runReducer, initialRun, isTerminal, type StoredEvent } from "../state/run";
 import { StreamController } from "../state/stream";
 import { loadDraft, saveDraft, loadPrefs, savePrefs } from "../state/prefs";
@@ -444,9 +444,15 @@ export function ChatPanel({
             <span>{loadingOlder ? "Loading…" : `Load older turns`}</span>
           </button>
         )}
-        {!historyLoading && history.turns.map((t, i) => (
-          t.role === "user" ? (
+        {!historyLoading && history.turns.map((t, i) => {
+          const events = t.timeline || [];
+          const timelineOnly = events.length > 0 && !t.text.trim() && !(t.tools || []).length && !(t.files || []).length && !t.reasoning;
+          if (timelineOnly) {
+            return <div className="timeline-stack" key={`h${i}`}>{events.map((ev, j) => <TimelineRow key={j} event={ev} />)}</div>;
+          }
+          return t.role === "user" ? (
             <article className="user-message-block" key={`h${i}`}>
+              {events.length > 0 && <div className="timeline-stack">{events.map((ev, j) => <TimelineRow key={j} event={ev} />)}</div>}
               <div className="message-byline">
                 <span className="user-avatar">Y</span><strong>You</strong>
                 <IconButton label="Copy prompt" onClick={() => void copyText(`u${i}`, t.text)}>
@@ -457,6 +463,7 @@ export function ChatPanel({
             </article>
           ) : (
             <article className={`agent-message ${detailsHidden ? "details-hidden" : ""}`} key={`h${i}`}>
+              {events.length > 0 && <div className="timeline-stack">{events.map((ev, j) => <TimelineRow key={j} event={ev} />)}</div>}
               <div className="agent-byline">
                 <span className="agent-avatar"><ZLogo size={18} /></span><strong>Zcode</strong>
                 <button className="message-details-toggle" onClick={() => setDetailsHidden((v) => !v)} aria-expanded={!detailsHidden}>
@@ -489,8 +496,8 @@ export function ChatPanel({
                 </span>
               </div>
             </article>
-          )
-        ))}
+          );
+        })}
 
         {(run.answer || run.reasoning || busy || run.error) && (
           <article className="agent-message">
@@ -681,6 +688,19 @@ function ToolActivity({ name, status, detail, live = false }: { name: string; st
         {done && <Check size={13} className="success-text" />}
       </button>
       {openItem && detail && <div className="activity-content"><pre className="diff-content"><code>{detail}</code></pre></div>}
+    </div>
+  );
+}
+
+// Desktop timeline separators: hairline rows marking model switches,
+// context compactions, forks and goal-verification marks in the transcript.
+function TimelineRow({ event }: { event: TimelineEvent }) {
+  const Icon = event.kind === "model_change" ? ArrowLeftRight : event.kind === "compaction" ? FoldVertical : event.kind === "session_fork" ? GitBranch : BadgeCheck;
+  return (
+    <div className="timeline-separator" data-kind={event.kind}>
+      <Icon size={12} />
+      <span className="timeline-label">{event.label}</span>
+      {event.detail && <span className="timeline-detail">{event.detail}</span>}
     </div>
   );
 }

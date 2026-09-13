@@ -35,6 +35,46 @@ function fileSummary(part) {
   };
 }
 
+// The desktop interleaves timeline separators in the transcript: model
+// switches, context compactions, session forks and goal-verification marks.
+// They arrive either as {type:"timeline", timelineType} or as a
+// {type:"compaction"} twin of the same event; both collapse to one entry.
+function timelineSummary(part) {
+  const kind = part.timelineType || (part.type === "compaction" ? "context_compaction" : "");
+  const fmt = (n) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+  if (kind === "context_compaction") {
+    const pre = Number(part.preCompactTokenCount) || 0;
+    const post = Number(part.truePostCompactTokenCount ?? part.postCompactTokenCount) || 0;
+    return {
+      kind: "compaction",
+      label: part.auto || part.trigger === "auto" ? "Context auto-compacted" : "Context compacted",
+      detail: pre && post ? `${fmt(pre)} → ${fmt(post)} tokens` : "",
+    };
+  }
+  if (kind === "model_change") {
+    const from = part.fromModel || {};
+    const to = part.toModel || {};
+    const short = (m) => (m.variant && m.variant !== "none" ? `${m.modelID}:${m.variant}` : m.modelID || m.label || "?");
+    const shortProvider = (m) => (String(m.providerID || "").startsWith("builtin:") ? m.providerID.slice(8) : String(m.providerID || "").slice(0, 8));
+    // show what actually changed: the model, else the variant, else the provider
+    const detail =
+      from.modelID !== to.modelID
+        ? `${short(from)} → ${short(to)}`
+        : short(from) !== short(to)
+          ? `${from.modelID}: ${from.variant || "?"} → ${to.variant || "?"}`
+          : `${from.modelID} · ${shortProvider(from)} → ${shortProvider(to)}`;
+    return { kind: "model_change", label: "Model changed", detail };
+  }
+  if (kind === "session_fork") {
+    return { kind: "session_fork", label: "Session forked", detail: part.parentSessionId ? `from ${part.parentSessionId.slice(0, 18)}…` : "" };
+  }
+  if (kind === "goal_verification") {
+    const passed = part.verification?.passed;
+    return { kind: "goal_verification", label: "Goal verification", detail: passed === true ? "passed" : passed === false ? "not passed" : part.status || "" };
+  }
+  return null;
+}
+
 export class SessionStore {
   constructor(dbPath) {
     this.dbPath = dbPath;
@@ -197,11 +237,15 @@ export class SessionStore {
       const text = typeof part.text === "string" && part.type !== "reasoning" ? part.text : "";
       const reasoning = part.type === "reasoning" && typeof part.text === "string" ? part.text : "";
       const stepTokens = part.type === "step-finish" ? Number(part.tokens?.total) || 0 : 0;
+      const timelineEntry = part.type === "timeline" || part.type === "compaction" ? timelineSummary(part) : null;
       const last = turns[turns.length - 1];
       if (last && last.mseq === r.mseq) {
         if (text.trim()) last.texts.push(text);
         if (reasoning) last.reasonings.push(reasoning);
         last.tokens += stepTokens;
+        // a compaction is stored twice (timeline part + compaction part);
+        // one row per operationId
+        if (timelineEntry && !last.timeline.some((e) => e.op === part.operationId)) last.timeline.push(timelineEntry);
         if (part.type === "tool") last.tools.push(toolSummary(part));
         else if (part.type === "file") last.files.push(fileSummary(part));
       } else {
@@ -212,20 +256,23 @@ export class SessionStore {
           texts: text.trim() ? [text] : [],
           reasonings: reasoning ? [reasoning] : [],
           tokens: stepTokens,
+          timeline: timelineEntry ? [timelineEntry] : [],
           tools: part.type === "tool" ? [toolSummary(part)] : [],
           files: part.type === "file" ? [fileSummary(part)] : [],
           error: errMsg,
         });
       }
+      if (timelineEntry) timelineEntry.op = part.operationId || undefined;
     }    // one entry per logical message (mseq), each carrying its text plus tool
     // and file parts — pagination must not split a message from its artifacts
     const all = turns
-      .filter((t) => t.texts.length || t.error || t.reasonings.length || (t.tools && t.tools.length) || (t.files && t.files.length))
+      .filter((t) => t.texts.length || t.error || t.reasonings.length || (t.tools && t.tools.length) || (t.files && t.files.length) || (t.timeline && t.timeline.length))
       .map((t) => ({
         role: t.role,
         text: t.texts.length ? t.texts.join("\n") : t.error ? `⚠ turn failed: ${t.error}` : "",
         reasoning: t.reasonings.length ? t.reasonings.join("\n") : "",
         tokens: t.tokens,
+        timeline: (t.timeline || []).map(({ op, ...e }) => e),
         tools: t.tools || [],
         files: t.files || [],
       }));
