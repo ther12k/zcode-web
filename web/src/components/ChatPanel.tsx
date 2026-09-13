@@ -4,16 +4,32 @@
 // ZWUI-016 reducer; transport from the ZWUI-017 controller.
 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { ArrowUp, ArrowUpRight, AtSign, Brain, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Copy, Eye, EyeOff, FileText, GitBranch, LoaderCircle, MessageSquare, Plus, ShieldCheck, Sparkles, SquarePen, Terminal, Wrench, X } from "lucide-react";
+import { ArrowUp, ArrowUpRight, AtSign, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Copy, Eye, EyeOff, FileText, GitBranch, LoaderCircle, MessageSquare, Plus, ShieldCheck, Sparkles, Square, SquarePen, Terminal, Wrench, X } from "lucide-react";
 import { ZLogo, IconButton, Markdown, CheckMark } from "../ui";
 import { randomUUID } from "../lib/uuid";
-import { ApiError, type ApiClient, type ModelInfo, type TranscriptTurn } from "../api/client";
+import { ApiError, type ApiClient, type FileCard, type ModelInfo, type TranscriptTurn } from "../api/client";
 import { runReducer, initialRun, isTerminal, type StoredEvent } from "../state/run";
 import { StreamController } from "../state/stream";
 import { loadDraft, saveDraft, loadPrefs, savePrefs } from "../state/prefs";
 
+// One pending attachment: uploaded path for --attach plus the local File for
+// in-composer preview (object URL created lazily, revoked on removal)
+type Attachment = { name: string; path: string; file?: File; previewUrl?: string };
+type PreviewState =
+  | { kind: "image"; title: string; src: string }
+  | { kind: "pdf"; title: string; src: string }
+  | { kind: "text"; title: string; text: string };
+
+// zcode-artifact://<sessionId>/tool-result-<uuid> → server route args
+function artifactArgs(url: string): { sessionId: string; uuid: string } | null {
+  const m = url.match(/zcode-artifact:\/\/(sess_[A-Za-z0-9-]+)\/tool-result-([A-Za-z0-9-]+)$/);
+  return m ? { sessionId: m[1], uuid: m[2] } : null;
+}
+const artifactUrl = (a: { sessionId: string; uuid: string }) => `/api/artifacts/${a.sessionId}/${a.uuid}`;
+
+
 export function ChatPanel({
-  client, cwd, sessionId, modes, defaultMode, branch, newChatNonce = 0, injectedDraft, onNotify, onSessionCreated, onBusyChange,
+  client, cwd, sessionId, modes, defaultMode, branch, newChatNonce = 0, reloadKey = 0, injectedDraft, onNotify, onSessionCreated, onBusyChange,
 }: {
   client: ApiClient;
   cwd: string;
@@ -22,6 +38,7 @@ export function ChatPanel({
   defaultMode: string;
   branch?: string | null;
   newChatNonce?: number;
+  reloadKey?: number;
   injectedDraft?: { text: string; key: number } | null;
   onNotify: (text: string, type?: "success" | "error") => void;
   onSessionCreated?: (id: string) => void;
@@ -36,8 +53,11 @@ export function ChatPanel({
   const [menu, setMenu] = useState<"mode" | "model" | null>(null);
   const [detailsHidden, setDetailsHidden] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
-  const [attachment, setAttachment] = useState<{ name: string; path: string } | undefined>();
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [uploading, setUploading] = useState(0);
+  const [preview, setPreview] = useState<PreviewState | null>(null);
   const [history, setHistory] = useState<{ turns: TranscriptTurn[]; total: number; hasMore: boolean }>({ turns: [], total: 0, hasMore: false });
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const esRef = useRef<StreamController | null>(null);
   const scroll = useRef<HTMLDivElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
@@ -63,6 +83,7 @@ export function ChatPanel({
 
   // load transcript for an existing session
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [syncTick, setSyncTick] = useState(0);
   useEffect(() => {
     let alive = true;
     if (!sessionId) { setHistory({ turns: [], total: 0, hasMore: false }); setHistoryLoading(false); return; }
@@ -75,10 +96,46 @@ export function ChatPanel({
       .catch((e) => { if (alive) onNotify(e instanceof ApiError ? e.message : String(e), "error"); })
       .finally(() => { if (alive) setHistoryLoading(false); });
     return () => { alive = false; };
-  }, [sessionId, client, onNotify]);
+  }, [sessionId, client, onNotify, syncTick, reloadKey]);
+  // desktop↔web sync: both apps write the same session store, so pull the
+  // transcript fresh when the tab becomes visible again (e.g. the ZCode app
+  // continued the session meanwhile). Skipped while a run is attached here —
+  // the live stream is the fresher source until it ends.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== "visible" || !sessionId) return;
+      if (run.phase !== "idle" && !isTerminal(run.phase)) return;
+      setSyncTick((t) => t + 1);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [sessionId, run.phase]);
+  // and poll while you watch: the desktop's in-progress turns land in the
+  // shared store as they commit, so an open web view follows along (10s,
+  // silent — the view only updates when the transcript actually changed)
+  useEffect(() => {
+    if (!sessionId) return;
+    if (run.phase !== "idle" && !isTerminal(run.phase)) return;
+    let alive = true;
+    let fetching = false;
+    const tick = setInterval(async () => {
+      if (fetching || document.visibilityState !== "visible") return;
+      fetching = true;
+      try {
+        const d = await client.session(sessionId, 10, 0);
+        if (!alive) return;
+        setHistory((cur) => {
+          const next = { turns: d.transcript, total: d.total, hasMore: d.hasMore };
+          return JSON.stringify(cur) === JSON.stringify(next) ? cur : next;
+        });
+      } catch { /* transient */ }
+      finally { fetching = false; }
+    }, 10_000);
+    return () => { alive = false; clearInterval(tick); };
+  }, [sessionId, run.phase, client]);
 
   useEffect(() => {
-    if (lastKey.current !== draftKey) { setInput(loadDraft(draftKey)); setAttachment(undefined); setMenu(null); lastKey.current = draftKey; }
+    if (lastKey.current !== draftKey) { setInput(loadDraft(draftKey)); setAttachments([]); setMenu(null); lastKey.current = draftKey; }
   }, [draftKey]);
   // injected drafts (skills launcher) land in the composer, keeping what's
   // already typed; the saved draft follows so it survives a remount
@@ -174,36 +231,105 @@ export function ChatPanel({
     }
   }
 
-  const attachFile = useCallback(async (file: File) => {
-    try {
-      const data = await new Promise<string>((resolve, reject) => {
-        const r = new FileReader();
-        r.onload = () => resolve(String(r.result).split(",")[1] || "");
-        r.onerror = () => reject(new Error("could not read file"));
-        r.readAsDataURL(file);
-      });
-      const saved = await client.upload(file.name, data);
-      setAttachment({ name: saved.name, path: saved.path });
-    } catch (e) {
-      onNotify((e as Error).message, "error");
+  // multi-file attach: upload each, keep the local File for click-to-preview
+  const attachFiles = useCallback(async (files: FileList | File[]) => {
+    const list = Array.from(files);
+    if (!list.length) return;
+    setUploading((n) => n + list.length);
+    for (const file of list) {
+      try {
+        const data = await new Promise<string>((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => resolve(String(r.result).split(",")[1] || "");
+          r.onerror = () => reject(new Error("could not read file"));
+          r.readAsDataURL(file);
+        });
+        const saved = await client.upload(file.name, data);
+        setAttachments((a) => [...a, { name: saved.name, path: saved.path, file }]);
+      } catch (e) {
+        onNotify(`${file.name}: ${(e as Error).message}`, "error");
+      } finally {
+        setUploading((n) => Math.max(0, n - 1));
+      }
     }
   }, [client, onNotify]);
 
+  const removeAttachment = useCallback((path: string) => {
+    setAttachments((a) => {
+      const gone = a.find((x) => x.path === path);
+      // nothing to revoke yet — object URLs are created lazily on preview
+      if (gone?.previewUrl) URL.revokeObjectURL(gone.previewUrl);
+      return a.filter((x) => x.path !== path);
+    });
+  }, []);
+
+  // preview a pending attachment (image inline, pdf in a frame, text as text)
+  const previewAttachment = useCallback(async (att: Attachment) => {
+    if (!att.file) return;
+    const t = att.file.type;
+    if (t.startsWith("image/")) {
+      att.previewUrl = att.previewUrl || URL.createObjectURL(att.file);
+      setPreview({ kind: "image", title: att.name, src: att.previewUrl });
+    } else if (t === "application/pdf") {
+      att.previewUrl = att.previewUrl || URL.createObjectURL(att.file);
+      setPreview({ kind: "pdf", title: att.name, src: att.previewUrl });
+    } else if (t.startsWith("text/") || /\.(txt|md|json|csv|log|ya?ml|toml|html?|css|js|jsx|ts|tsx|py|sh|xml)$/i.test(att.name)) {
+      setPreview({ kind: "text", title: att.name, text: (await att.file.text()).slice(0, 200_000) });
+    } else {
+      onNotify(`No preview for ${att.name}`, "error");
+    }
+  }, [onNotify]);
+
+  // preview a transcript artifact (server sniffs content type)
+  const previewArtifact = useCallback(async (f: FileCard) => {
+    const a = artifactArgs(f.url);
+    if (!a) { onNotify("This attachment can't be previewed here.", "error"); return; }
+    const route = artifactUrl(a);
+    if (f.mime.startsWith("image/")) setPreview({ kind: "image", title: f.mime.replace("image/", "").toUpperCase() + " artifact", src: route });
+    else if (f.mime === "application/pdf") setPreview({ kind: "pdf", title: "PDF artifact", src: route });
+    else {
+      try {
+        const text = await fetch(route, { headers: { authorization: `Bearer ${localStorage.getItem("zcode-web-token") || ""}` } }).then((r) => r.text());
+        setPreview({ kind: "text", title: "Artifact content", text: text.slice(0, 200_000) });
+      } catch { onNotify("Could not load artifact.", "error"); }
+    }
+  }, [onNotify]);
+
+  // scrollback: prepend the next older page, keeping the reading position
+  const loadOlder = useCallback(async () => {
+    if (!sessionId || loadingOlder) return;
+    setLoadingOlder(true);
+    const el = scroll.current;
+    const before = el?.scrollHeight ?? 0;
+    try {
+      const d = await client.session(sessionId, 10, history.turns.length);
+      setHistory((h) => ({ turns: [...d.transcript, ...h.turns], total: d.total, hasMore: d.hasMore }));
+      requestAnimationFrame(() => { if (el) el.scrollTop = el.scrollHeight - before; });
+    } catch (e) {
+      onNotify(e instanceof ApiError ? e.message : String(e), "error");
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [sessionId, loadingOlder, history.turns.length, client, onNotify]);
+
+  const stopRun = useCallback(() => {
+    if (!run.jobId) return;
+    void client.cancel(run.jobId).catch(() => onNotify("Could not stop the run.", "error"));
+  }, [run.jobId, client, onNotify]);
+
   const send = useCallback(async () => {
-    if (busy) return;
+    if (busy || uploading > 0) return;
     const text = input.trim();
-    if (!text && !attachment) return;
+    if (!text && !attachments.length) return;
     const requestId = randomUUID();
     const submitView = sessionId ?? "new";
     runViewKey.current = submitView;
     dispatch({ type: "submit", requestId });
     try {
-      let attachmentPath: string | undefined;
-      if (attachment) attachmentPath = attachment.path;
       const accepted = await client.chat({
         text: text || "Analyze the attached file(s).",
         sessionId, cwd, mode, model: model || undefined,
-        attachments: attachmentPath ? [attachmentPath] : undefined,
+        attachments: attachments.length ? attachments.map((a) => a.path) : undefined,
         requestId,
       });
       // the user may have switched views (or hit New chat) while the POST
@@ -211,7 +337,7 @@ export function ChatPanel({
       if (runViewKey.current !== submitView) return;
       dispatch({ type: "accepted", jobId: accepted.jobId, sessionId: accepted.sessionId ?? sessionId });
       activeJob.current = accepted.jobId;
-      setInput(""); setAttachment(undefined);
+      setInput(""); setAttachments([]);
       if (accepted.sessionId && accepted.sessionId !== sessionId) onSessionCreated?.(accepted.sessionId);
       const controller = new StreamController(client, accepted.jobId, {
         onEvents: (events: StoredEvent[]) => { if (activeJob.current === accepted.jobId) dispatch({ type: "events", events }); },
@@ -238,7 +364,7 @@ export function ChatPanel({
         dispatch({ type: "submit-failed", error: e instanceof ApiError ? e.message : String(e) });
       }
     }
-  }, [busy, input, attachment, client, sessionId, cwd, mode, model, onSessionCreated]);
+  }, [busy, uploading, input, attachments, client, sessionId, cwd, mode, model, onSessionCreated]);
 
   // models grouped by provider in server order (same-provider models are adjacent)
   const modelGroups = useMemo(() => {
@@ -250,6 +376,19 @@ export function ChatPanel({
     }
     return groups;
   }, [models]);
+
+  // tokens reported by the latest turn.completed envelope
+  const liveTokens = useMemo(() => {
+    for (let i = run.events.length - 1; i >= 0; i--) {
+      const e = run.events[i];
+      if (e.kind !== "line") continue;
+      const line = e.line as { type?: string; payload?: { usage?: { totalTokens?: number } } } | undefined;
+      if (line?.type === "turn.completed" && typeof line.payload?.usage?.totalTokens === "number") {
+        return line.payload.usage.totalTokens;
+      }
+    }
+    return null;
+  }, [run.events]);
 
   // derived live message bits
   const liveTools = run.events
@@ -299,6 +438,12 @@ export function ChatPanel({
           </div>
         )}
 
+        {!historyLoading && history.hasMore && (
+          <button className="load-older" onClick={() => void loadOlder()} disabled={loadingOlder}>
+            {loadingOlder ? <LoaderCircle size={12} className="spin" /> : <ChevronUp size={12} />}
+            <span>{loadingOlder ? "Loading…" : `Load older turns`}</span>
+          </button>
+        )}
         {!historyLoading && history.turns.map((t, i) => (
           t.role === "user" ? (
             <article className="user-message-block" key={`h${i}`}>
@@ -318,6 +463,12 @@ export function ChatPanel({
                   {detailsHidden ? <Eye size={12} /> : <EyeOff size={12} />}<span>{detailsHidden ? "Details" : "Hide"}</span>
                 </button>
               </div>
+              {!detailsHidden && t.reasoning && (
+                <details className="thinking-block history-thinking">
+                  <summary className="thinking-heading"><Brain size={13} /><span>Thinking</span><span className="thinking-hint">How I approached this</span></summary>
+                  <p>{t.reasoning}</p>
+                </details>
+              )}
               {!detailsHidden && (t.tools || []).length > 0 && (
                 <div className="activity-stack">
                   {(t.tools || []).map((tool, j) => (
@@ -325,9 +476,12 @@ export function ChatPanel({
                   ))}
                 </div>
               )}
+              {!detailsHidden && (t.files || []).length > 0 && (
+                <FileCards files={t.files || []} onPreview={(f) => void previewArtifact(f)} />
+              )}
               {t.text.startsWith("⚠") ? <div className="danger-text">{t.text}</div> : <Markdown text={t.text} />}
               <div className="message-footer">
-                <span className="task-completed"><CheckMark />{t.text.startsWith("⚠") ? "Turn failed" : "Task completed"}</span>
+                <span className="task-completed"><CheckMark />{t.text.startsWith("⚠") ? "Turn failed" : "Task completed"}{t.tokens ? <span className="turn-tokens">· {(t.tokens / 1000).toFixed(1)}k tokens</span> : null}</span>
                 <span className="message-footer-actions">
                   <IconButton label="Copy response" onClick={() => void copyText(`h${i}`, t.text)}>
                     {copied === `h${i}` ? <CheckCheck size={13} /> : <Copy size={13} />}
@@ -362,7 +516,17 @@ export function ChatPanel({
             {liveError && <div className="danger-text">{liveError}</div>}
             {run.error && <div className="danger-text">{run.error}</div>}
             {!busy && run.phase === "succeeded" && (
-              <div className="message-footer"><span className="task-completed"><CheckMark />{mode === "plan" ? "Plan ready" : "Task completed"}</span></div>
+              <div className="message-footer">
+                <span className="task-completed">
+                  <CheckMark />{mode === "plan" ? "Plan ready" : "Task completed"}
+                  {liveTokens ? <span className="turn-tokens">· {(liveTokens / 1000).toFixed(1)}k tokens</span> : null}
+                </span>
+                {mode === "plan" && (
+                  <button className="plan-apply" onClick={() => { setMode("build"); savePrefs({ mode: "build" }); textarea.current?.focus(); }}>
+                    <SquarePen size={12} />Switch to Build to apply
+                  </button>
+                )}
+              </div>
             )}
           </article>
         )}
@@ -375,15 +539,33 @@ export function ChatPanel({
         )}
       </div>
 
-      <div className="composer-shell">
+      <div
+        className="composer-shell"
+        onDragOver={(e) => { e.preventDefault(); }}
+        onDrop={(e) => { e.preventDefault(); if (e.dataTransfer.files?.length) void attachFiles(e.dataTransfer.files); }}
+      >
         <div className={`composer ${busy ? "composer-working" : ""}`}>
-          {attachment && (
-            <div className="attached-file"><FileText size={12} /><span>{attachment.name}</span><IconButton label="Remove attachment" onClick={() => setAttachment(undefined)}><X size={11} /></IconButton></div>
+          {attachments.length > 0 && (
+            <div className="attached-files">
+              {attachments.map((a) => (
+                <span className="attached-file" key={a.path}>
+                  <button className="attached-file-name" onClick={() => void previewAttachment(a)} title="Preview attachment">
+                    <FileText size={12} /><span>{a.name}</span>
+                  </button>
+                  <IconButton label={`Remove ${a.name}`} onClick={() => removeAttachment(a.path)}><X size={11} /></IconButton>
+                </span>
+              ))}
+              {uploading > 0 && <span className="attached-file"><LoaderCircle size={12} className="spin" /><span>uploading {uploading}…</span></span>}
+            </div>
           )}
           <textarea
             ref={textarea}
             value={input}
             onChange={(e) => setInput(e.target.value)}
+            onPaste={(e) => {
+              const files = Array.from(e.clipboardData.files || []);
+              if (files.length) { e.preventDefault(); void attachFiles(files); }
+            }}
             placeholder={sessionId ? "Ask for follow-up changes…" : "What would you like to build?"}
             aria-label="Message Zcode"
             rows={2}
@@ -448,7 +630,10 @@ export function ChatPanel({
                   </div>
                 )}
               </div>
-              <button className="send-button" disabled={busy || (!input.trim() && !attachment)} aria-label="Send message" title="Send message (Enter)" onClick={() => void send()}>
+              {busy && run.jobId && (
+                <IconButton label="Stop run" onClick={stopRun}><Square size={13} /></IconButton>
+              )}
+              <button className="send-button" disabled={busy || uploading > 0 || (!input.trim() && !attachments.length)} aria-label="Send message" title="Send message (Enter)" onClick={() => void send()}>
                 {busy ? <LoaderCircle size={16} className="spin" /> : <ArrowUp size={17} strokeWidth={2.2} />}
               </button>
             </div>
@@ -462,14 +647,15 @@ export function ChatPanel({
       <input
         ref={fileInput}
         type="file"
-        aria-label="Attach a file"
+        multiple
+        aria-label="Attach files"
         className="visually-hidden"
         onChange={async (e) => {
-          const file = e.target.files?.[0];
-          if (file) await attachFile(file);
+          if (e.target.files?.length) await attachFiles(e.target.files);
           e.target.value = "";
         }}
       />
+      {preview && <PreviewOverlay preview={preview} onClose={() => setPreview(null)} />}
     </section>
   );
 }
@@ -495,6 +681,53 @@ function ToolActivity({ name, status, detail, live = false }: { name: string; st
         {done && <Check size={13} className="success-text" />}
       </button>
       {openItem && detail && <div className="activity-content"><pre className="diff-content"><code>{detail}</code></pre></div>}
+    </div>
+  );
+}
+
+// Transcript artifacts (screenshots, PDFs, text saved by desktop tools) —
+// images render as thumbnails; everything else is a chip. Click → preview.
+function FileCards({ files, onPreview }: { files: FileCard[]; onPreview: (f: FileCard) => void }) {
+  return (
+    <div className="file-cards">
+      {files.map((f, i) => {
+        const a = artifactArgs(f.url);
+        const route = a ? artifactUrl(a) : null;
+        const isImage = f.mime.startsWith("image/");
+        const label = isImage ? f.mime.replace("image/", "").toUpperCase() : (f.mime === "application/pdf" ? "PDF" : f.mime.split("/").pop()?.toUpperCase() || "FILE");
+        return (
+          <button key={`${f.url}-${i}`} className={`file-card ${isImage ? "is-image" : ""}`} onClick={() => onPreview(f)} title="Preview attachment">
+            {isImage && route ? <img src={route} alt="attached screenshot" loading="lazy" /> : <FileText size={12} />}
+            <span>{label}{f.size ? ` · ${(f.size / 1024).toFixed(0)}KB` : ""}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// Full-panel preview used by both pending attachments and transcript
+// artifacts: images inline, PDFs in a sandboxed frame, text as scrollable
+// preformatted content.
+function PreviewOverlay({ preview, onClose }: { preview: PreviewState; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div className="preview-backdrop" role="dialog" aria-modal="true" aria-label={`Preview ${preview.title}`} onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="preview-panel-light">
+        <header className="preview-light-header">
+          <FileText size={13} />
+          <strong>{preview.title}</strong>
+          <span className="preview-light-hint">esc to close</span>
+          <IconButton label="Close preview" onClick={onClose}><X size={15} /></IconButton>
+        </header>
+        {preview.kind === "image" && <img className="preview-light-image" src={preview.src} alt={preview.title} />}
+        {preview.kind === "pdf" && <iframe className="preview-light-frame" src={preview.src} title={preview.title} />}
+        {preview.kind === "text" && <pre className="preview-light-text"><code>{preview.text}</code></pre>}
+      </div>
     </div>
   );
 }

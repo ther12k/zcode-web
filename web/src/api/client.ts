@@ -65,6 +65,8 @@ export type FileCard = { mime: string; url: string; size: number | null; storage
 export type TranscriptTurn = {
   role: string;
   text: string;
+  reasoning?: string;
+  tokens?: number;
   tools?: ToolCard[];
   files?: FileCard[];
 };

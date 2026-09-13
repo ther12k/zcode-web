@@ -12,6 +12,7 @@ import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { JobManager, cliStatus, cliRuntimeStatus, config, uploadsDir } from "./zcode.js";
+import { ContentSearchIndex, renameSession } from "./sessions.js";
 import { SessionStore } from "./sessions.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -36,6 +37,12 @@ const ALLOWED_ROOTS = [
 
 const jobs = new JobManager();
 const store = new SessionStore(cliStatus().dbPath);
+// sidecar FTS index for message-content search — our own file, the CLI's
+// session DB is never written
+const contentIndex = new ContentSearchIndex(
+  join(config.zcodeHome, "web", "search-index.sqlite"),
+  cliStatus().dbPath,
+);
 const TERMINAL_STATUS = new Set(["succeeded", "failed", "cancelled", "timeout"]);
 
 // Short-lived tickets let EventSource connect without putting the long-lived
@@ -473,6 +480,57 @@ async function handleApi(req, res, url) {
     return res.end(readFileSync(file));
   }
 
+  // Serve a desktop artifact (tool outputs saved by the CLI: screenshots,
+  // PDFs, text) so transcripts can render their attached media. Addressed by
+  // session id + the artifact suffix from the zcode-artifact:// URL; the file
+  // is resolved inside the session's artifact dir only. Content type is
+  // sniffed from magic bytes — artifact filenames are .txt regardless of
+  // their true payload.
+  const artifactMatch = route.match(/^\/api\/artifacts\/(sess_[A-Za-z0-9-]+)\/([A-Za-z0-9-]+)$/);
+  if (artifactMatch && (req.method === "GET" || req.method === "HEAD")) {
+    const [, artifactSess, artifactUuid] = artifactMatch;
+    if (artifactSess.length > 80 || artifactUuid.length > 80) return sendJson(res, 404, { error: "not found" });
+    const dir = normalize(join(config.zcodeHome, "cli", "artifacts", artifactSess));
+    if (!dir.startsWith(join(config.zcodeHome, "cli", "artifacts") + sep)) return sendJson(res, 404, { error: "not found" });
+    let file = null;
+    if (existsSync(dir)) {
+      const needle = `tool-result-${artifactUuid}`;
+      const hit = readdirSync(dir).find((f) => f.includes(needle));
+      if (hit) file = normalize(join(dir, hit));
+    }
+    if (!file || !file.startsWith(dir + sep) || !existsSync(file) || !statSync(file).isFile()) {
+      return sendJson(res, 404, { error: "not found" });
+    }
+    const buf = readFileSync(file);
+    let contentType = "application/octet-stream";
+    if (buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50) contentType = "image/png";
+    else if (buf.length > 3 && buf[0] === 0xff && buf[1] === 0xd8) contentType = "image/jpeg";
+    else if (buf.subarray(0, 3).toString("latin1") === "GIF") contentType = "image/gif";
+    else if (buf.subarray(0, 4).toString("latin1") === "RIFF" && buf.subarray(8, 12).toString("latin1") === "WEBP") contentType = "image/webp";
+    else if (buf.subarray(0, 5).toString("latin1") === "%PDF-") contentType = "application/pdf";
+    else if (!buf.subarray(0, 8192).includes(0)) contentType = "text/plain; charset=utf-8";
+    res.writeHead(200, { "content-type": contentType, "cache-control": "private, max-age=3600" });
+    if (req.method === "HEAD") return res.end();
+    return res.end(buf);
+  }
+
+  // Session rename — writes only the session row's title (same fields the
+  // CLI's own rename sets: title + title_source='user').
+  const renameMatch = route.match(/^\/api\/sessions\/(sess_[A-Za-z0-9-]+)\/rename$/);
+  if (renameMatch && req.method === "POST") {
+    const body = JSON.parse(await readBody(req, 8192));
+    const title = String(body.title || "").trim();
+    if (!title) return sendJson(res, 400, { error: "title is required" });
+    if (!cliStatus().dbPresent) return sendJson(res, 503, { error: "session database not found", code: "DB_MISSING" });
+    try {
+      const ok = renameSession(cliStatus().dbPath, renameMatch[1], title);
+      if (!ok) return sendJson(res, 404, { error: "session not found" });
+      return sendJson(res, 200, { ok: true, title: title.slice(0, 200) });
+    } catch (e) {
+      return sendJson(res, 500, { error: e.message });
+    }
+  }
+
   if (route === "/api/chat" && req.method === "POST") {
     const body = JSON.parse(await readBody(req, 1024 * 1024));
     let text = String(body.text || "").trim();
@@ -576,12 +634,23 @@ async function handleApi(req, res, url) {
 
   // ---- ZWUI-029: bounded authorized session search ----
   // LIKE-based title search across the sessions table, bounded (LIMIT 20),
-  // scoped to the allowed roots by directory prefix matching.
+  // scoped to the allowed roots by directory prefix matching. Longer queries
+  // additionally search message CONTENT through the sidecar FTS index, which
+  // is built incrementally (bounded chunk per call) — results merge.
   if (route === "/api/search" && req.method === "GET") {
     const q = (url.searchParams.get("q") || "").trim();
     if (q.length < 2) return sendJson(res, 200, { results: [] });
     try {
       const results = store.searchSessions(q, ALLOWED_ROOTS, 20);
+      const seen = new Set(results.map((r) => r.id));
+      if (q.length >= 3) {
+        const progress = contentIndex.indexChunk(ALLOWED_ROOTS);
+        const contentHits = contentIndex.search(q, ALLOWED_ROOTS, 20).filter((r) => !seen.has(r.id));
+        return sendJson(res, 200, {
+          results: [...results, ...contentHits].slice(0, 20),
+          index: { through: progress.indexedThrough, total: progress.total },
+        });
+      }
       return sendJson(res, 200, { results });
     } catch (e) {
       const status = e.code === "DB_MISSING" ? 503 : 500;

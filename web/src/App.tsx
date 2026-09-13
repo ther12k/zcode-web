@@ -48,6 +48,7 @@ export function App() {
   const [modal, setModal] = useState<null | "search" | "settings" | "shortcuts" | "tools" | "skills">(null);
   const [taskMenu, setTaskMenu] = useState(false);
   const [runBusy, setRunBusy] = useState(false);
+  const [transcriptReload, setTranscriptReload] = useState(0);
   // real CLI skills for the launcher (fetched once per page load)
   const [skills, setSkills] = useState<{ list: import("./api/client").SkillInfo[]; loading: boolean; error: string | null }>({ list: [], loading: true, error: null });
   const [draft, setDraft] = useState<{ text: string; key: number } | null>(null);
@@ -125,6 +126,9 @@ export function App() {
       .then((r) => setSessions(r.sessions))
       .catch(() => setSessions([]));
   }, [cwd, client]);
+  const [renaming, setRenaming] = useState<{ title: string; busy: boolean } | null>(null);
+
+
   useEffect(() => {
     let alive = true;
     if (!cwd || !client) return;
@@ -155,6 +159,25 @@ export function App() {
 
 
   const activeSessionId = params.sessionId || null;
+  const renameSession = useCallback(async () => {
+    if (!activeSessionId || !renaming?.title.trim() || renaming.busy) return;
+    setRenaming((r) => (r ? { ...r, busy: true } : r));
+    try {
+      const r = await fetch(`/api/sessions/${activeSessionId}/rename`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${loadTokenSafe()}` },
+        body: JSON.stringify({ title: renaming.title.trim() }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "rename failed");
+      notify("Session renamed.");
+      setRenaming(null);
+      refreshSessions();
+    } catch (e) {
+      notify((e as Error).message, "error");
+      setRenaming((r2) => (r2 ? { ...r2, busy: false } : r2));
+    }
+  }, [activeSessionId, renaming, notify, refreshSessions]);
   const activeSession = sessions.find((s) => s.id === activeSessionId) || null;
 
   // recent sessions across the current root for the "Sessions" view
@@ -172,6 +195,12 @@ export function App() {
   }, [cwd, sidebarView, token]);
 
   function selectSession(id: string) {
+    if (id === activeSessionId) {
+      // re-selecting the open session pulls the transcript fresh — the
+      // ZCode app may have continued it meanwhile (shared session store)
+      setTranscriptReload((k) => k + 1);
+      return;
+    }
     navigate({ to: "/w/$workspace/s/$sessionId", params: { workspace: cwd, sessionId: id } });
   }
 
@@ -210,6 +239,9 @@ export function App() {
                 <div className="popover-label">SESSION ACTIONS</div>
                 <button onClick={() => { const pinned = !prefs.pinnedSessions.includes(activeSessionId); savePrefs({ pinnedSessions: pinned ? [...prefs.pinnedSessions, activeSessionId] : prefs.pinnedSessions.filter((x) => x !== activeSessionId) }); notify(pinned ? "Pinned to the top of your sidebar." : "Removed from pinned."); setTaskMenu(false); }}>
                   {prefs.pinnedSessions.includes(activeSessionId) ? <PinOff size={14} /> : <Pin size={14} />}{prefs.pinnedSessions.includes(activeSessionId) ? "Unpin session" : "Pin session"}
+                </button>
+                <button onClick={() => { setRenaming({ title: activeSession?.title || "", busy: false }); setTaskMenu(false); }}>
+                  <SquarePen size={14} />Rename session
                 </button>
                 <button onClick={() => { savePrefs({ hiddenSessions: prefs.hiddenSessions.includes(activeSessionId) ? prefs.hiddenSessions.filter((x) => x !== activeSessionId) : [...prefs.hiddenSessions, activeSessionId] }); notify("Hidden on this device."); setTaskMenu(false); }}>
                   <Archive size={14} />{prefs.hiddenSessions.includes(activeSessionId) ? "Unhide on this device" : "Hide on this device"}
@@ -324,6 +356,7 @@ export function App() {
           defaultMode={caps.modes.includes(prefs.mode) ? prefs.mode : caps.modes[0] || "plan"}
           branch={branch}
           newChatNonce={newChatNonce}
+          reloadKey={transcriptReload}
           injectedDraft={draft}
           onNotify={notify}
           onBusyChange={setRunBusy}
@@ -371,6 +404,23 @@ export function App() {
       )}
       {modal === "settings" && (
         <SettingsDialog caps={caps} onClose={() => setModal(null)} onLogout={() => { clearTokenSafe(); setToken(""); }} />
+      )}
+      {renaming && activeSessionId && (
+        <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) setRenaming(null); }}>
+          <div className="dialog" role="dialog" aria-modal="true" aria-label="Rename session">
+            <header className="dialog-header"><div><h2>Give it a good name.</h2><p>Something that makes it easy to pick up where you left off.</p></div></header>
+            <form onSubmit={(e) => { e.preventDefault(); void renameSession(); }}>
+              <div className="dialog-body">
+                <label className="field-label" htmlFor="rename-session">Session name</label>
+                <input id="rename-session" className="text-field" autoFocus value={renaming.title} onChange={(e) => setRenaming({ title: e.target.value, busy: renaming.busy })} maxLength={200} required />
+              </div>
+              <footer className="dialog-footer">
+                <button type="button" className="secondary-button" onClick={() => setRenaming(null)}>Cancel</button>
+                <button className="primary-button" disabled={!renaming.title.trim() || renaming.busy}>{renaming.busy ? <LoaderCircle size={13} className="spin" /> : <CheckCircle2 size={13} />}Save name</button>
+              </footer>
+            </form>
+          </div>
+        </div>
       )}
       {modal === "shortcuts" && <ShortcutsDialog onClose={() => setModal(null)} />}
       {modal === "tools" && <ToolsDialog caps={caps} onClose={() => setModal(null)} />}
