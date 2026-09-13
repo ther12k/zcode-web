@@ -94,6 +94,12 @@ export function ChatPanel({
     if (!sessionId && run.sessionId && run.phase !== "idle") onSessionCreated?.(run.sessionId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [run.sessionId]);
+  // refresh the sidebar when a run finishes: the session row often commits
+  // after the first envelope, so the creation-time refresh can miss it
+  useEffect(() => {
+    if (run.sessionId && isTerminal(run.phase)) onSessionCreated?.(run.sessionId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run.phase]);
   useEffect(() => {
     requestAnimationFrame(() => scroll.current?.scrollTo({ top: scroll.current.scrollHeight }));
   }, [run.answer, run.activity, history.turns.length]);
