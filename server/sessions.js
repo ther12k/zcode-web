@@ -117,6 +117,18 @@ export class SessionStore {
     ).map((r) => ({ id: r.id, title: r.title, directory: r.directory, updatedAt: Number(r.time_updated) }));
   }
 
+  // Latest sessions across ALL allowed roots in one query — the search
+  // dialog's empty-state list ("show me my 50 most recent sessions").
+  recent(roots, limit = 50) {
+    if (!roots.length) return [];
+    return this.query(
+      `SELECT id, title, directory, time_updated FROM session
+        WHERE id NOT LIKE 'sess_subagent_%' AND (${roots.map(() => "directory LIKE ? || '%'").join(" OR ")})
+        ORDER BY time_updated DESC LIMIT ?`,
+      [...roots, limit]
+    ).map((r) => ({ id: r.id, title: r.title, directory: r.directory, updatedAt: Number(r.time_updated) }));
+  }
+
   // Goal/target for a session (real CLI data from session_target).
   goal(sessionId) {
     const rows = this.query(

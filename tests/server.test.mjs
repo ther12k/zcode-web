@@ -351,3 +351,34 @@ describe("SessionStore.transcript newest-parts window", async () => {
     assert.notEqual(older.turns[older.turns.length - 1].text, newest.text);
   });
 });
+
+// Search-dialog empty state: recent() merges across all allowed roots.
+describe("SessionStore.recent across roots", async () => {
+  const { SessionStore } = await import("../server/sessions.js");
+  const { DatabaseSync } = await import("node:sqlite");
+
+  it("returns latest sessions across roots, newest first, bounded", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zc-store2-"));
+    const dbPath = join(dir, "db.sqlite");
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT);
+    `);
+    const ins = db.prepare("INSERT INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)");
+    ins.run("sess_a1", "root A newest", "/home/x/Workspace/a", 1, 500);
+    ins.run("sess_a2", "root A older", "/home/x/Workspace/a", 1, 100);
+    ins.run("sess_b1", "root B newest", "/home/x/.zcode/workspace/b", 1, 900);
+    ins.run("sess_subagent_agent_1234", "subagent noise", "/home/x/Workspace/a", 1, 999);
+    db.close();
+
+    const store = new SessionStore(dbPath);
+    const rows = store.recent(["/home/x/Workspace", "/home/x/.zcode/workspace"], 50);
+    assert.equal(rows.length, 3, "subagent sessions excluded");
+    assert.equal(rows[0].id, "sess_b1", "globally newest first");
+    assert.equal(rows[1].id, "sess_a1");
+    assert.equal(rows[2].id, "sess_a2");
+    const capped = store.recent(["/home/x/Workspace", "/home/x/.zcode/workspace"], 1);
+    assert.equal(capped.length, 1);
+    assert.equal(capped[0].id, "sess_b1");
+  });
+});

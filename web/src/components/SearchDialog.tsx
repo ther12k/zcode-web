@@ -21,13 +21,15 @@ export function SearchDialog({
     let alive = true;
     const q = query.trim();
     const t = setTimeout(() => {
-      const url = q.length >= 2 ? `/api/search?q=${encodeURIComponent(q)}` : `/api/sessions/recent?root=${encodeURIComponent("/")}`;
+      // empty query: the 50 latest sessions across all allowed roots;
+      // typing switches to the bounded title search
+      const url = q.length >= 2 ? `/api/search?q=${encodeURIComponent(q)}` : "/api/sessions/recent?limit=50";
       void fetch(url, { headers: { authorization: `Bearer ${localStorage.getItem("zcode-web-token") || ""}` } })
         .then((r) => r.json())
         .then((j) => {
           if (!alive) return;
           const results: Row[] = j.results || j.sessions || [];
-          setRows(results.slice(0, 10));
+          setRows(q.length >= 2 ? results.slice(0, 20) : results.slice(0, 50));
           setSelected(0);
         })
         .catch(() => alive && setRows([]));

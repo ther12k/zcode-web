@@ -35,7 +35,11 @@ export function App() {
     (() => { try { return localStorage.getItem("zcode-sidebar-collapsed") === "1"; } catch { return false; } })()
   );
   const [rightCollapsed, setRightCollapsed] = useState(false);
-  const [sidebarView, setSidebarView] = useState<"projects" | "sessions">("projects");
+  // Sessions is the default active view (persisted; an explicit Projects
+  // choice is remembered too)
+  const [sidebarView, setSidebarView] = useState<"projects" | "sessions">(
+    (() => { try { return localStorage.getItem("zcode-sidebar-view") === "projects" ? "projects" : "sessions"; } catch { return "sessions"; } })()
+  );
   const [sidebarSort, setSidebarSort] = useState<"recent" | "name">(
     (() => { try { const v = localStorage.getItem("zcode-sidebar-sort"); return v === "name" ? "name" : "recent"; } catch { return "recent"; } })()
   );
@@ -62,6 +66,9 @@ export function App() {
   useEffect(() => {
     try { localStorage.setItem("zcode-sidebar-sort", sidebarSort); } catch {}
   }, [sidebarSort]);
+  useEffect(() => {
+    try { localStorage.setItem("zcode-sidebar-view", sidebarView); } catch {}
+  }, [sidebarView]);
   useEffect(() => {
     if (!sortMenu && !taskMenu) return;
     const close = (e: MouseEvent) => {

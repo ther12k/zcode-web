@@ -115,6 +115,8 @@ test("skills launcher lists real skills and drafts the composer", async ({ page 
 });
 
 test("sidebar Projects view lists roots and expands to sessions", async ({ page }) => {
+  // Sessions is the default active view — switch to Projects explicitly
+  await page.getByRole("tab", { name: "Projects" }).click();
   // fresh CI workspaces are empty — create a project like a user would
   await page.request.post("/api/projects", {
     headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
@@ -125,4 +127,15 @@ test("sidebar Projects view lists roots and expands to sessions", async ({ page 
   await toggle.click();
   // project headings (dirs) appear inside the expanded group
   await expect(page.locator(".project-heading").first()).toBeVisible({ timeout: 5000 });
+});
+
+test("search dialog opens on the latest sessions list", async ({ page }) => {
+  await page.keyboard.press("ControlOrMeta+k");
+  const dialog = page.getByRole("dialog", { name: "Find your next thought." });
+  await expect(dialog).toBeVisible();
+  // empty query lists the most recent sessions across roots (503-free even
+  // without a session DB — the list is just empty)
+  await expect(dialog.locator(".search-results")).toBeVisible();
+  await dialog.getByLabel("Search sessions").fill("zz-no-such-session");
+  await expect(dialog.getByText("No matches. Yet.")).toBeVisible({ timeout: 5000 });
 });

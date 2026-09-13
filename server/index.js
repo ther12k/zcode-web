@@ -555,13 +555,19 @@ async function handleApi(req, res, url) {
   // Recent sessions under a root (directory LIKE root%), bounded — powers the
   // sidebar "Sessions" view. Same scoping rules as search (ZWUI-029).
   if (route === "/api/sessions/recent" && req.method === "GET") {
-    const root = url.searchParams.get("root") || "";
-    const abs = resolve(root);
-    if (!ALLOWED_ROOTS.some((r) => abs === r || abs.startsWith(r + sep))) {
-      return sendJson(res, 403, { error: "root outside allowed roots" });
-    }
+    const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 30, 1), 100);
+    const rootParam = url.searchParams.get("root");
     try {
-      return sendJson(res, 200, { sessions: store.recentUnder(abs, 30) });
+      if (!rootParam) {
+        // no root → latest across every allowed root (search dialog's
+        // "latest 50 sessions" empty state)
+        return sendJson(res, 200, { sessions: store.recent(ALLOWED_ROOTS, limit) });
+      }
+      const abs = resolve(rootParam);
+      if (!ALLOWED_ROOTS.some((r) => abs === r || abs.startsWith(r + sep))) {
+        return sendJson(res, 403, { error: "root outside allowed roots" });
+      }
+      return sendJson(res, 200, { sessions: store.recentUnder(abs, limit) });
     } catch (e) {
       const status = e.code === "DB_MISSING" ? 503 : 500;
       return sendJson(res, status, { error: e.message, code: e.code });
