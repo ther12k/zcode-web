@@ -277,3 +277,23 @@ test("slash command palette: filter, execute local action, insert run-through", 
   await box.press("Escape");
   await expect(menu).toBeHidden();
 });
+
+test("deep-linked session shows its real title in the topbar", async ({ page }) => {
+  await page.route(/\/api\/sessions\/sess_.+\?limit=/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        session: { id: "sess_title0000000000000000000000000", title: "Probe: gate-out combo", directory: "/tmp/x", createdAt: 1, updatedAt: 2 },
+        runActive: false,
+        transcript: [{ role: "user", text: "hi" }],
+        total: 1,
+        hasMore: false,
+      }),
+    });
+  });
+  await page.goto("/w/default/s/sess_title0000000000000000000000000");
+  await page.waitForLoadState("domcontentloaded");
+  await expect(page.locator(".chat-loader")).toBeHidden({ timeout: 5000 });
+  await expect(page.getByRole("heading", { name: "Probe: gate-out combo" })).toBeVisible();
+});

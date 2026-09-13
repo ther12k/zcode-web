@@ -29,7 +29,7 @@ const artifactUrl = (a: { sessionId: string; uuid: string }) => `/api/artifacts/
 
 
 export function ChatPanel({
-  client, cwd, sessionId, modes, defaultMode, branch, newChatNonce = 0, reloadKey = 0, injectedDraft, onNotify, onSessionCreated, onBusyChange, onSlashAction,
+  client, cwd, sessionId, modes, defaultMode, branch, newChatNonce = 0, reloadKey = 0, injectedDraft, onNotify, onSessionCreated, onBusyChange, onSlashAction, onSessionMeta,
 }: {
   client: ApiClient;
   cwd: string;
@@ -45,6 +45,8 @@ export function ChatPanel({
   onBusyChange?: (busy: boolean) => void;
   /** app-level slash actions (open dialogs, new chat) — true when handled */
   onSlashAction?: (action: string) => boolean;
+  /** session metadata from transcript fetches (title lift for deep links) */
+  onSessionMeta?: (s: { id: string; title: string }) => void;
 }) {
   const draftKey = `${cwd}::${sessionId || "new"}`;
   const [run, dispatch] = useReducer(runReducer, undefined, initialRun);
@@ -106,7 +108,8 @@ export function ChatPanel({
   const applySessionPage = useCallback((d: SessionDetail) => {
     setHistory({ turns: d.transcript, total: d.total, hasMore: d.hasMore });
     setExternalActive(!!d.runActive);
-  }, []);
+    if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title });
+  }, [onSessionMeta]);
   useEffect(() => {
     let alive = true;
     if (!sessionId) { setHistory({ turns: [], total: 0, hasMore: false }); setHistoryLoading(false); setExternalActive(false); return; }
@@ -155,13 +158,14 @@ export function ChatPanel({
           return JSON.stringify(cur) === JSON.stringify(next) ? cur : next;
         });
         setExternalActive(!!d.runActive);
+        if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title });
       } catch { /* transient */ }
       finally { fetching = false; }
       if (alive && !timer) timer = setTimeout(tick, externalActiveRef.current ? 4_000 : 10_000);
     };
     timer = setTimeout(tick, externalActiveRef.current ? 500 : 10_000);
     return () => { alive = false; if (timer) clearTimeout(timer); };
-  }, [sessionId, run.phase, client, applySessionPage]);
+  }, [sessionId, run.phase, client, applySessionPage, onSessionMeta]);
 
   useEffect(() => {
     if (lastKey.current !== draftKey) { setInput(loadDraft(draftKey)); setAttachments([]); setMenu(null); lastKey.current = draftKey; }
@@ -272,10 +276,11 @@ export function ChatPanel({
       { name: "settings", desc: "Open settings", group: "Navigate", run: () => { onSlashAction?.("settings"); } },
       { name: "shortcuts", desc: "Keyboard shortcuts", group: "Navigate", run: () => { onSlashAction?.("shortcuts"); } },
     ];
-    // /compact is verified to run headlessly and lands as a timeline
-    // separator in the transcript
+    // /compact and /fork run headlessly (verified) and land as timeline
+    // separators in the transcript
     const cliBuiltins: Cmd[] = [
       { name: "compact", desc: "Summarize the conversation to free context", group: "Run in session", sendThrough: true, run: () => {} },
+      { name: "fork", desc: "Fork the session from the last checkpoint", group: "Run in session", sendThrough: true, run: () => {} },
     ];
     const custom: Cmd[] = customCommands.map((c) => ({
       name: c.name,

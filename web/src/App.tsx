@@ -59,6 +59,9 @@ export function App() {
   const [taskMenu, setTaskMenu] = useState(false);
   const [runBusy, setRunBusy] = useState(false);
   const [transcriptReload, setTranscriptReload] = useState(0);
+  // titles seen in transcript fetches — deep-linked sessions outside the
+  // recent list still show their real title (desktop parity)
+  const [sessionTitles, setSessionTitles] = useState<Record<string, string>>({});
   // real CLI skills for the launcher (fetched once per page load)
   const [skills, setSkills] = useState<{ list: import("./api/client").SkillInfo[]; loading: boolean; error: string | null }>({ list: [], loading: true, error: null });
   const [draft, setDraft] = useState<{ text: string; key: number } | null>(null);
@@ -188,7 +191,11 @@ export function App() {
       setRenaming((r2) => (r2 ? { ...r2, busy: false } : r2));
     }
   }, [activeSessionId, renaming, notify, refreshSessions]);
-  const activeSession = sessions.find((s) => s.id === activeSessionId) || null;
+  const listed = sessions.find((s) => s.id === activeSessionId) || null;
+  const activeSession = listed
+    || (activeSessionId && sessionTitles[activeSessionId]
+      ? { id: activeSessionId, title: sessionTitles[activeSessionId], directory: cwd, createdAt: 0, updatedAt: 0, goal: null }
+      : null);
 
   // recent sessions across the current root for the "Sessions" view
   const [recent, setRecent] = useState<SessionRow[]>([]);
@@ -375,6 +382,7 @@ export function App() {
             if (action === "search" || action === "skills" || action === "tools" || action === "settings" || action === "shortcuts") { setModal(action); return true; }
             return false;
           }}
+          onSessionMeta={(s) => setSessionTitles((m) => (m[s.id] === s.title ? m : { ...m, [s.id]: s.title }))}
           onSessionCreated={(id) => {
             refreshSessions();
             if (id !== activeSessionId) {
