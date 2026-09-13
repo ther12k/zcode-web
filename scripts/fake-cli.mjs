@@ -16,6 +16,9 @@ const promptIdx = args.indexOf("--prompt");
 const prompt = promptIdx >= 0 ? args[promptIdx + 1] : "";
 const mode = process.env.FAKE_MODE || "ok";
 const delay = Number(process.env.FAKE_DELAY_MS || 0);
+// a "slowfirst" token in the prompt delays the FIRST envelope (not just the
+// answer delta): lets tests exercise the submit→first-event window
+const firstDelay = /\bslowfirst\b/i.test(prompt) ? 5000 : 0;
 
 let seq = 0;
 function emit(type, payload = {}) {
@@ -34,16 +37,16 @@ function emit(type, payload = {}) {
   );
 }
 
-emit("session.titleUpdated", { previousTitle: "", source: "first_input", title: prompt.slice(0, 40) });
-emit("turn.started", { turnNumber: 0, input: prompt });
-emit("session.updated", { model: "fake/model", modelRef: { providerId: "fake", modelId: "model" }, toolCount: 0 });
-emit("session.updated", { type: "model_request_started" });
-emit("model.streaming", { assistantMessageId: "m1", delta: "", done: false, kind: "start" });
-emit("model.streaming", { assistantMessageId: "m1", delta: "", done: false, kind: "reasoning_delta" });
-
 const timer = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {
+  if (firstDelay) await timer(firstDelay);
+  emit("session.titleUpdated", { previousTitle: "", source: "first_input", title: prompt.slice(0, 40) });
+  emit("turn.started", { turnNumber: 0, input: prompt });
+  emit("session.updated", { model: "fake/model", modelRef: { providerId: "fake", modelId: "model" }, toolCount: 0 });
+  emit("session.updated", { type: "model_request_started" });
+  emit("model.streaming", { assistantMessageId: "m1", delta: "", done: false, kind: "start" });
+  emit("model.streaming", { assistantMessageId: "m1", delta: "", done: false, kind: "reasoning_delta" });
   if (delay) await timer(delay);
   emit("model.streaming", { assistantMessageId: "m1", delta: `echo:${prompt}`, done: false, kind: "text_delta" });
   if (mode === "fail") {

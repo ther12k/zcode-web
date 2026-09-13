@@ -13,7 +13,7 @@ import { StreamController } from "../state/stream";
 import { loadDraft, saveDraft, loadPrefs, savePrefs } from "../state/prefs";
 
 export function ChatPanel({
-  client, cwd, sessionId, modes, defaultMode, branch, onNotify, onSessionCreated, onBusyChange,
+  client, cwd, sessionId, modes, defaultMode, branch, newChatNonce = 0, onNotify, onSessionCreated, onBusyChange,
 }: {
   client: ApiClient;
   cwd: string;
@@ -21,6 +21,7 @@ export function ChatPanel({
   modes: string[];
   defaultMode: string;
   branch?: string | null;
+  newChatNonce?: number;
   onNotify: (text: string, type?: "success" | "error") => void;
   onSessionCreated?: (id: string) => void;
   onBusyChange?: (busy: boolean) => void;
@@ -76,24 +77,51 @@ export function ChatPanel({
     const t = setTimeout(() => saveDraft(draftKey, input), 250);
     return () => clearTimeout(t);
   }, [input, draftKey]);
-  useEffect(() => () => esRef.current?.close(), []);
   // switching conversations detaches this panel from any live run (the job
   // itself keeps running server-side) — except when the run just created the
   // session we are navigating to, so a fresh chat keeps its live stream
   const activeJob = useRef<string | null>(null);
+  // the view identity a run was submitted under ("new" for a fresh chat);
+  // adoption re-points it at the created session so the URL catching up is
+  // not mistaken for a switch. undefined = no run attached to this view.
+  const runViewKey = useRef<string | null | undefined>(undefined);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const detachRun = useCallback(() => {
+    if (runViewKey.current === undefined) return;
+    esRef.current?.close();
+    esRef.current = null;
+    activeJob.current = null;
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    runViewKey.current = undefined;
+    dispatch({ type: "reset" });
+  }, []);
+  // unmount (cwd switch remounts this panel): stop the stream subscription
+  // and the reconciliation poll — the job itself keeps running server-side
+  useEffect(() => () => {
+    esRef.current?.close();
+    if (pollRef.current) clearInterval(pollRef.current);
+  }, []);
   useEffect(() => {
-    if (run.sessionId !== null && run.sessionId !== sessionId && run.phase !== "idle") {
-      esRef.current?.close();
-      esRef.current = null;
-      activeJob.current = null;
-      dispatch({ type: "reset" });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId]);
+    const viewKey = sessionId ?? "new";
+    if (runViewKey.current !== undefined && runViewKey.current !== viewKey) detachRun();
+  }, [sessionId, detachRun]);
+  // New chat detaches any run — including one still awaiting its first
+  // envelope under the same "new" view key; the job keeps running server-side
+  const lastNonce = useRef(newChatNonce);
+  useEffect(() => {
+    if (lastNonce.current === newChatNonce) return;
+    lastNonce.current = newChatNonce;
+    detachRun();
+  }, [newChatNonce, detachRun]);
   // a new chat learns its session from stream envelopes (the POST /api/chat
   // response has none yet) — surface it so the URL and sidebar catch up
   useEffect(() => {
-    if (!sessionId && run.sessionId && run.phase !== "idle") onSessionCreated?.(run.sessionId);
+    if (!sessionId && run.sessionId && run.phase !== "idle") {
+      runViewKey.current = run.sessionId;
+      // keep anything typed since submit: the draft key flips with the URL
+      if (input) saveDraft(`${cwd}::${run.sessionId}`, input);
+      onSessionCreated?.(run.sessionId);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [run.sessionId]);
   // refresh the sidebar when a run finishes: the session row often commits
@@ -147,6 +175,8 @@ export function ChatPanel({
     const text = input.trim();
     if (!text && !attachment) return;
     const requestId = randomUUID();
+    const submitView = sessionId ?? "new";
+    runViewKey.current = submitView;
     dispatch({ type: "submit", requestId });
     try {
       let attachmentPath: string | undefined;
@@ -157,6 +187,9 @@ export function ChatPanel({
         attachments: attachmentPath ? [attachmentPath] : undefined,
         requestId,
       });
+      // the user may have switched views (or hit New chat) while the POST
+      // was in flight — a detached panel must not adopt this job
+      if (runViewKey.current !== submitView) return;
       dispatch({ type: "accepted", jobId: accepted.jobId, sessionId: accepted.sessionId ?? sessionId });
       activeJob.current = accepted.jobId;
       setInput(""); setAttachment(undefined);
@@ -171,17 +204,20 @@ export function ChatPanel({
       esRef.current = controller;
       controller.start();
       // reconciliation poll: finalizes truthfully if the stream dies
-      const poll = setInterval(async () => {
-        if (activeJob.current !== accepted.jobId) { clearInterval(poll); return; }
+      if (pollRef.current) clearInterval(pollRef.current);
+      const poll = pollRef.current = setInterval(async () => {
+        if (activeJob.current !== accepted.jobId) { clearInterval(poll); pollRef.current = null; return; }
         try {
           const st = await client.job(accepted.jobId);
           dispatch({ type: "job-status", status: st.status as never });
-          if (["succeeded", "failed", "cancelled", "timeout"].includes(st.status)) clearInterval(poll);
+          if (["succeeded", "failed", "cancelled", "timeout"].includes(st.status)) { clearInterval(poll); pollRef.current = null; }
         } catch { /* transient */ }
       }, 5000);
-      setTimeout(() => clearInterval(poll), 17 * 60_000);
+      setTimeout(() => { clearInterval(poll); if (pollRef.current === poll) pollRef.current = null; }, 17 * 60_000);
     } catch (e) {
-      dispatch({ type: "submit-failed", error: e instanceof ApiError ? e.message : String(e) });
+      if (runViewKey.current === submitView) {
+        dispatch({ type: "submit-failed", error: e instanceof ApiError ? e.message : String(e) });
+      }
     }
   }, [busy, input, attachment, client, sessionId, cwd, mode, model, onSessionCreated]);
 

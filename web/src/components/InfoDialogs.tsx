@@ -1,14 +1,33 @@
 // Reference-style utility dialogs: keyboard shortcuts and workspace tools.
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { BookOpen, Check, Database, FileCode2, FolderClosed, Globe, ShieldCheck, TerminalSquare } from "lucide-react";
 import type { AppConfig } from "../api/client";
 
 type ToolsCaps = Pick<AppConfig, "allowedRoots" | "cliPresent" | "providerConfigured">;
 
 function DialogShell({ title, subtitle, onClose, children }: { title: string; subtitle?: string; onClose: () => void; children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const timer = setTimeout(() => {
+      ref.current?.querySelector<HTMLElement>("button")?.focus();
+    }, 30);
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+      if (event.key === "Tab") {
+        const elements = ref.current?.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], input:not([disabled])');
+        if (!elements?.length) return;
+        const first = elements[0], last = elements[elements.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => { clearTimeout(timer); document.removeEventListener("keydown", onKey); previouslyFocused?.focus(); };
+  }, [onClose]);
   return (
     <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="dialog" role="dialog" aria-modal="true" aria-label={title}>
+      <div className="dialog" role="dialog" aria-modal="true" aria-label={title} ref={ref}>
         <header className="dialog-header">
           <div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div>
           <button className="icon-button" aria-label="Close dialog" onClick={onClose}>✕</button>
@@ -20,11 +39,6 @@ function DialogShell({ title, subtitle, onClose, children }: { title: string; su
 }
 
 export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
   const rows = [
     { label: "Find a session", keys: ["⌘ / Ctrl", "K"] },
     { label: "Start a new chat", keys: ["⌘ / Ctrl", "N"] },
@@ -56,11 +70,6 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
 }
 
 export function ToolsDialog({ caps, onClose }: { caps: ToolsCaps; onClose: () => void }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
   const rows = [
     {
       icon: <FolderClosed size={21} />, tone: "",

@@ -46,6 +46,25 @@ test("legacy double-encoded workspace URLs still resolve", async ({ page }) => {
   await expect(page.locator(".agent-message")).toContainText("echo:double encode probe", { timeout: 20_000 });
 });
 
+test("New chat during a pending fresh-chat run detaches it without hijack", async ({ page }) => {
+  // "slowfirst" delays the run's first envelope: submit, then immediately
+  // start a new chat while the run is still pending
+  const input = page.getByLabel("Message Zcode");
+  await input.fill("slowfirst pending probe");
+  await input.press("Enter");
+  await page.locator(".new-task-button").click();
+  // the new chat must be free: empty state, and a typed composer can send
+  await expect(page.getByRole("heading", { name: "Let's build something." })).toBeVisible({ timeout: 5000 });
+  await input.fill("still free");
+  await expect(page.getByRole("button", { name: "Send message" })).toBeEnabled({ timeout: 5000 });
+  // when the detached run's envelope finally arrives it must NOT navigate
+  // this view into its session or render its stream
+  await page.waitForTimeout(6500);
+  await expect(page).not.toHaveURL(/\/s\//);
+  await expect(page.locator(".agent-message")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Send message" })).toBeEnabled();
+});
+
 test("cancel affordance: busy composer shows spinner, run reaches terminal", async ({ page }) => {
   const input = page.getByLabel("Message Zcode");
   await input.fill("busy probe");

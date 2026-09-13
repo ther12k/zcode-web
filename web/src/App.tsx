@@ -36,8 +36,8 @@ export function App() {
   );
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [sidebarView, setSidebarView] = useState<"projects" | "sessions">("projects");
-  const [sidebarSort, setSidebarSort] = useState<"recent" | "name" | "pinned">(
-    (() => { try { return (localStorage.getItem("zcode-sidebar-sort") as "recent" | "name" | "pinned") || "recent"; } catch { return "recent"; } })()
+  const [sidebarSort, setSidebarSort] = useState<"recent" | "name">(
+    (() => { try { const v = localStorage.getItem("zcode-sidebar-sort"); return v === "name" ? "name" : "recent"; } catch { return "recent"; } })()
   );
   const [sortMenu, setSortMenu] = useState(false);
   const [branch, setBranch] = useState<string | null>(null);
@@ -99,7 +99,11 @@ export function App() {
     navigate({ to: "/w/$workspace", params: { workspace: dir } });
   }, [navigate]);
 
+  // bumping this signals the chat panel that any run shown there belongs to
+  // a previous "new chat" — it detaches (the job keeps running server-side)
+  const [newChatNonce, setNewChatNonce] = useState(0);
   const navigateNewChat = useCallback(() => {
+    setNewChatNonce((n) => n + 1);
     navigateToCwd(cwd || safeDecode(params.workspace || ""));
   }, [cwd, params.workspace, navigateToCwd]);
 
@@ -111,7 +115,14 @@ export function App() {
       .then((r) => setSessions(r.sessions))
       .catch(() => setSessions([]));
   }, [cwd, client]);
-  useEffect(() => { refreshSessions(); }, [refreshSessions, token]);
+  useEffect(() => {
+    let alive = true;
+    if (!cwd || !client) return;
+    void client.sessions(cwd)
+      .then((r) => { if (alive) setSessions(r.sessions); })
+      .catch(() => { if (alive) setSessions([]); });
+    return () => { alive = false; };
+  }, [cwd, client, token]);
   // statusbar branch chip (only when the read-only git capability is enabled)
   useEffect(() => {
     let alive = true;
@@ -211,7 +222,7 @@ export function App() {
             {sortMenu && (
               <div className="popover sort-popover">
                 <div className="popover-label">SORT BY</div>
-                {([["recent", "Most recent", "Latest activity first"], ["name", "Name", "Alphabetical order"], ["pinned", "Pinned first", "Pinned and active first"]] as const).map(([id, label, hint]) => (
+                {([["recent", "Most recent", "Latest activity first"], ["name", "Name", "Alphabetical order"]] as const).map(([id, label, hint]) => (
                   <button key={id} onClick={() => { setSidebarSort(id); setSortMenu(false); }}>
                     <span><b>{label}</b><small>{hint}</small></span>
                     {sidebarSort === id && <CheckCircle2 size={13} className="success-text" />}
@@ -247,11 +258,7 @@ export function App() {
               )}
               {[...recent]
                 .filter((s) => !prefs.pinnedSessions.includes(s.id) && !prefs.hiddenSessions.includes(s.id))
-                .sort((a, b) => {
-                  if (sidebarSort === "name") return (a.title || "").localeCompare(b.title || "");
-                  if (sidebarSort === "pinned") return Number(prefs.pinnedSessions.includes(b.id)) - Number(prefs.pinnedSessions.includes(a.id));
-                  return 0;
-                })
+                .sort((a, b) => (sidebarSort === "name" ? (a.title || "").localeCompare(b.title || "") : 0))
                 .map((s) => (
                   <SessionRow
                     key={s.id}
@@ -269,6 +276,7 @@ export function App() {
             <ProjectGroups
               roots={roots}
               activeSessionId={activeSessionId}
+              pinnedSessions={prefs.pinnedSessions}
               onSelectSession={selectSession}
               onSelectProject={(dir) => { updatePrefs({ rootPath: dir }); navigateToCwd(dir); }}
             />
@@ -296,6 +304,7 @@ export function App() {
           modes={caps.modes}
           defaultMode={caps.modes.includes(prefs.mode) ? prefs.mode : caps.modes[0] || "plan"}
           branch={branch}
+          newChatNonce={newChatNonce}
           onNotify={notify}
           onBusyChange={setRunBusy}
           onSessionCreated={(id) => {
@@ -391,9 +400,10 @@ function TokenPrompt({ onSubmit }: { onSubmit: (t: string) => void }) {
   );
 }
 
-function ProjectGroups({ roots, activeSessionId, onSelectSession, onSelectProject }: {
+function ProjectGroups({ roots, activeSessionId, pinnedSessions, onSelectSession, onSelectProject }: {
   roots: string[];
   activeSessionId: string | null;
+  pinnedSessions: string[];
   onSelectSession: (id: string) => void;
   onSelectProject: (dir: string) => void;
 }) {
@@ -460,7 +470,10 @@ function ProjectGroups({ roots, activeSessionId, onSelectSession, onSelectProjec
                 {!dirs.length && <p className="no-tasks">No projects in this root.</p>}
                 {dirs.map((d) => {
                   const dir = root.replace(/\/$/, "") + "/" + d;
-                  const rows = sessionsByDir[dir];
+                  // pinned sessions always float to the top of their project
+                  const rows = [...(sessionsByDir[dir] || [])].sort(
+                    (a, b) => Number(pinnedSessions.includes(b.id)) - Number(pinnedSessions.includes(a.id)),
+                  );
                   const isOpen = open[dir];
                   return (
                     <div className="project-group" key={dir}>
