@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive, ArrowDownWideNarrow, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, CloudCheck,
-  FolderClosed, FolderOpen, History, Keyboard, Menu, PanelLeft, PanelRight, Pin, PinOff, Plus,
+  FolderClosed, FolderOpen, History, Keyboard, LoaderCircle, Menu, MoreHorizontal, PanelLeft, PanelRight, Pin, PinOff, Plus,
   Search, Settings2, SquarePen, Unplug, X, GitBranch,
 } from "lucide-react";
 import { useNavigate, useParams } from "@tanstack/react-router";
@@ -18,6 +18,7 @@ import { ChatPanel } from "./components/ChatPanel";
 import { RightPanel } from "./components/RightPanel";
 import { SearchDialog } from "./components/SearchDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { ShortcutsDialog, ToolsDialog } from "./components/InfoDialogs";
 
 type SessionRow = {
   id: string; title: string; directory: string; updatedAt: number;
@@ -35,12 +36,14 @@ export function App() {
   );
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [sidebarView, setSidebarView] = useState<"projects" | "sessions">("projects");
-  const [sidebarSort, setSidebarSort] = useState<"recent" | "name">(
-    (() => { try { return (localStorage.getItem("zcode-sidebar-sort") as "recent" | "name") || "recent"; } catch { return "recent"; } })()
+  const [sidebarSort, setSidebarSort] = useState<"recent" | "name" | "pinned">(
+    (() => { try { return (localStorage.getItem("zcode-sidebar-sort") as "recent" | "name" | "pinned") || "recent"; } catch { return "recent"; } })()
   );
   const [sortMenu, setSortMenu] = useState(false);
   const [branch, setBranch] = useState<string | null>(null);
-  const [modal, setModal] = useState<null | "search" | "settings">(null);
+  const [modal, setModal] = useState<null | "search" | "settings" | "shortcuts" | "tools">(null);
+  const [taskMenu, setTaskMenu] = useState(false);
+  const [runBusy, setRunBusy] = useState(false);
   const [toast, setToast] = useState<{ text: string; type: "success" | "error"; key: number } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -57,11 +60,15 @@ export function App() {
     try { localStorage.setItem("zcode-sidebar-sort", sidebarSort); } catch {}
   }, [sidebarSort]);
   useEffect(() => {
-    if (!sortMenu) return;
-    const close = (e: MouseEvent) => { if (!(e.target as HTMLElement).closest(".sort-menu-wrap")) setSortMenu(false); };
+    if (!sortMenu && !taskMenu) return;
+    const close = (e: MouseEvent) => {
+      const el = e.target as HTMLElement;
+      if (!el.closest(".sort-menu-wrap")) setSortMenu(false);
+      if (!el.closest(".task-menu-wrap")) setTaskMenu(false);
+    };
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
-  }, [sortMenu]);
+  }, [sortMenu, taskMenu]);
 
   useEffect(() => {
     function keyboard(event: KeyboardEvent) {
@@ -71,7 +78,7 @@ export function App() {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "n") { event.preventDefault(); navigateNewChat(); }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "b") { event.preventDefault(); setSidebarCollapsed((c) => !c); }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "j") { event.preventDefault(); setRightCollapsed((c) => !c); }
-      if (event.key === "Escape") setModal(null);
+      if (event.key === "Escape") { setModal(null); setTaskMenu(false); setSortMenu(false); }
     }
     window.addEventListener("keydown", keyboard);
     return () => window.removeEventListener("keydown", keyboard);
@@ -162,12 +169,32 @@ export function App() {
           <button onClick={() => navigateToCwd(cwd)}><FolderClosed size={13} /><span>{projectLabel}</span></button>
           <span className="breadcrumb-divider">/</span>
           <h1>{activeSession?.title || "New chat"}</h1>
+          {activeSessionId && prefs.pinnedSessions.includes(activeSessionId) && <span className="mini-badge pinned-badge"><Pin size={8} />Pinned</span>}
         </div>
         <div className="topbar-actions">
-          <span className="save-status"><CloudCheck size={14} /><span>{jobsActive() ? "Working…" : "All changes saved"}</span></span>
+          <span className="save-status">{runBusy ? <LoaderCircle size={12} className="spin" /> : <CloudCheck size={14} />}<span>{runBusy ? "Working…" : "All changes saved"}</span></span>
           <IconButton label={rightCollapsed ? "Show preview panel" : "Hide preview panel"} className="desktop-pane-button" onClick={() => setRightCollapsed(!rightCollapsed)}><PanelRight size={16} /></IconButton>
           <div className="task-menu-wrap">
-            <IconButton label="Settings" onClick={() => setModal("settings")}><Settings2 size={17} /></IconButton>
+            <IconButton label="Session options" className={taskMenu ? "selected" : ""} onClick={() => setTaskMenu(!taskMenu)}><MoreHorizontal size={18} /></IconButton>
+            {taskMenu && activeSessionId && (
+              <div className="popover task-popover">
+                <div className="popover-label">SESSION ACTIONS</div>
+                <button onClick={() => { const pinned = !prefs.pinnedSessions.includes(activeSessionId); savePrefs({ pinnedSessions: pinned ? [...prefs.pinnedSessions, activeSessionId] : prefs.pinnedSessions.filter((x) => x !== activeSessionId) }); notify(pinned ? "Pinned to the top of your sidebar." : "Removed from pinned."); setTaskMenu(false); }}>
+                  {prefs.pinnedSessions.includes(activeSessionId) ? <PinOff size={14} /> : <Pin size={14} />}{prefs.pinnedSessions.includes(activeSessionId) ? "Unpin session" : "Pin session"}
+                </button>
+                <button onClick={() => { savePrefs({ hiddenSessions: prefs.hiddenSessions.includes(activeSessionId) ? prefs.hiddenSessions.filter((x) => x !== activeSessionId) : [...prefs.hiddenSessions, activeSessionId] }); notify("Hidden on this device."); setTaskMenu(false); }}>
+                  <Archive size={14} />{prefs.hiddenSessions.includes(activeSessionId) ? "Unhide on this device" : "Hide on this device"}
+                </button>
+                <div className="popover-divider" />
+                <button onClick={() => { setModal("settings"); setTaskMenu(false); }}><Settings2 size={14} />Settings</button>
+              </div>
+            )}
+            {taskMenu && !activeSessionId && (
+              <div className="popover task-popover">
+                <div className="popover-label">SESSION ACTIONS</div>
+                <button onClick={() => { setModal("settings"); setTaskMenu(false); }}><Settings2 size={14} />Settings</button>
+              </div>
+            )}
           </div>
         </div>
       </header>
@@ -184,7 +211,7 @@ export function App() {
             {sortMenu && (
               <div className="popover sort-popover">
                 <div className="popover-label">SORT BY</div>
-                {([["recent", "Most recent", "Latest activity first"], ["name", "Name", "Alphabetical order"]] as const).map(([id, label, hint]) => (
+                {([["recent", "Most recent", "Latest activity first"], ["name", "Name", "Alphabetical order"], ["pinned", "Pinned first", "Pinned and active first"]] as const).map(([id, label, hint]) => (
                   <button key={id} onClick={() => { setSidebarSort(id); setSortMenu(false); }}>
                     <span><b>{label}</b><small>{hint}</small></span>
                     {sidebarSort === id && <CheckCircle2 size={13} className="success-text" />}
@@ -220,7 +247,11 @@ export function App() {
               )}
               {[...recent]
                 .filter((s) => !prefs.pinnedSessions.includes(s.id) && !prefs.hiddenSessions.includes(s.id))
-                .sort((a, b) => (sidebarSort === "name" ? (a.title || "").localeCompare(b.title || "") : 0))
+                .sort((a, b) => {
+                  if (sidebarSort === "name") return (a.title || "").localeCompare(b.title || "");
+                  if (sidebarSort === "pinned") return Number(prefs.pinnedSessions.includes(b.id)) - Number(prefs.pinnedSessions.includes(a.id));
+                  return 0;
+                })
                 .map((s) => (
                   <SessionRow
                     key={s.id}
@@ -244,8 +275,8 @@ export function App() {
           )}
         </div>
         <div className="secondary-nav">
-          <button className="nav-button" title="Workspace tools" onClick={() => notify("Workspace tools: files/git/preview capabilities — see the inspector.", "success")}><Unplug size={15} /><span className="nav-label">Workspace tools</span><span className="tools-dot" /></button>
-          <button className="nav-button" title="Help and shortcuts" onClick={() => notify("Shortcuts: ⌘K search · ⌘N new chat · ⌘B sidebar · ⌘J preview pane", "success")}><CircleHelp size={15} /><span className="nav-label">Help & shortcuts</span></button>
+          <button className="nav-button" title="Workspace tools" onClick={() => setModal("tools")}><Unplug size={15} /><span className="nav-label">Workspace tools</span><span className="tools-dot" /></button>
+          <button className="nav-button" title="Help and shortcuts" onClick={() => setModal("shortcuts")}><CircleHelp size={15} /><span className="nav-label">Help & shortcuts</span><CircleHelp size={12} className="nav-end" /></button>
         </div>
         <div className="profile-section">
           <button className="profile-button" title="Settings" onClick={() => setModal("settings")}>
@@ -264,7 +295,9 @@ export function App() {
           sessionId={activeSessionId}
           modes={caps.modes}
           defaultMode={caps.modes.includes(prefs.mode) ? prefs.mode : caps.modes[0] || "plan"}
+          branch={branch}
           onNotify={notify}
+          onBusyChange={setRunBusy}
           onSessionCreated={(id) => {
             refreshSessions();
             if (id !== activeSessionId) {
@@ -293,8 +326,8 @@ export function App() {
         </div>
         <div>
           <button onClick={() => setModal("settings")}>{providerLive ? "Z.AI enabled" : "No provider"}</button>
-          <span>{jobsActive() ? `${jobsActive()} running` : "idle"}</span>
-          <button className="shortcut-button" aria-label="Keyboard shortcuts" onClick={() => notify("Shortcuts: ⌘K search · ⌘N new chat · ⌘B sidebar · ⌘J preview", "success")}><Keyboard size={12} /></button>
+          <span>{runBusy ? "1 running" : "idle"}</span>
+          <button className="shortcut-button" aria-label="Keyboard shortcuts" onClick={() => setModal("shortcuts")}><Keyboard size={12} /></button>
         </div>
       </footer>
 
@@ -310,6 +343,8 @@ export function App() {
       {modal === "settings" && (
         <SettingsDialog caps={caps} onClose={() => setModal(null)} onLogout={() => { clearTokenSafe(); setToken(""); }} />
       )}
+      {modal === "shortcuts" && <ShortcutsDialog onClose={() => setModal(null)} />}
+      {modal === "tools" && <ToolsDialog caps={caps} onClose={() => setModal(null)} />}
       {toast && (
         <div className={`toast ${toast.type}`} role={toast.type === "error" ? "alert" : "status"} key={toast.key}>
           {toast.type === "error" ? <CircleHelp size={16} /> : <CheckCircle2 size={16} />}
@@ -321,9 +356,6 @@ export function App() {
     </main>
   );
 
-  function jobsActive() {
-    return 0; // authoritative count comes from job polls inside runs
-  }
   function needsToken() {
     return Boolean(caps?.authRequired) && !token;
   }

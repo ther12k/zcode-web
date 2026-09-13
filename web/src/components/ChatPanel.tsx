@@ -4,7 +4,7 @@
 // ZWUI-016 reducer; transport from the ZWUI-017 controller.
 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { ArrowUp, AtSign, Brain, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Copy, Eye, EyeOff, FileText, LoaderCircle, MessageSquare, Plus, ShieldCheck, Sparkles, SquarePen, Terminal, Wrench, X } from "lucide-react";
+import { ArrowUp, ArrowUpRight, AtSign, Brain, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Copy, Eye, EyeOff, FileText, GitBranch, LoaderCircle, MessageSquare, Plus, ShieldCheck, Sparkles, SquarePen, Terminal, Wrench, X } from "lucide-react";
 import { ZLogo, IconButton, Markdown, CheckMark } from "../ui";
 import { randomUUID } from "../lib/uuid";
 import { ApiError, type ApiClient, type ModelInfo, type TranscriptTurn } from "../api/client";
@@ -13,15 +13,17 @@ import { StreamController } from "../state/stream";
 import { loadDraft, saveDraft, loadPrefs, savePrefs } from "../state/prefs";
 
 export function ChatPanel({
-  client, cwd, sessionId, modes, defaultMode, onNotify, onSessionCreated,
+  client, cwd, sessionId, modes, defaultMode, branch, onNotify, onSessionCreated, onBusyChange,
 }: {
   client: ApiClient;
   cwd: string;
   sessionId: string | null;
   modes: string[];
   defaultMode: string;
+  branch?: string | null;
   onNotify: (text: string, type?: "success" | "error") => void;
   onSessionCreated?: (id: string) => void;
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const draftKey = `${cwd}::${sessionId || "new"}`;
   const [run, dispatch] = useReducer(runReducer, undefined, initialRun);
@@ -106,11 +108,14 @@ export function ChatPanel({
   useEffect(() => {
     if (!menu) return;
     const close = (e: MouseEvent) => { if (!(e.target as HTMLElement).closest(".composer-menu-wrap")) setMenu(null); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMenu(null); };
     document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
+    window.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", close); window.removeEventListener("keydown", onKey); };
   }, [menu]);
 
   const busy = run.phase !== "idle" && !isTerminal(run.phase);
+  useEffect(() => { onBusyChange?.(busy); }, [busy]);
 
   async function copyText(id: string, text: string) {
     try {
@@ -211,7 +216,8 @@ export function ChatPanel({
   return (
     <section className="chat-panel" aria-label="Agent conversation">
       <div className="chat-context">
-        <span title={cwd}><span className="project-dot" /><span>{cwd.split("/").filter(Boolean).pop()}</span></span>
+        <span title={cwd}><span className="project-dot" /><span>{cwd.split("/").filter(Boolean).pop()}</span><ChevronDown size={12} /></span>
+        {branch && <span className="branch-chip" title="git branch (read-only)"><GitBranch size={12} />{branch}</span>}
         <button className="details-toggle" onClick={() => setDetailsHidden((v) => !v)} title="Toggle thinking and tool details for messages">
           {detailsHidden ? <Eye size={12} /> : <EyeOff size={12} />}<span>{detailsHidden ? "Show details" : "Hide details"}</span>
         </button>
@@ -225,7 +231,7 @@ export function ChatPanel({
             <p>Describe what you have in mind.<br />I'll help you take it from here.</p>
             <div className="prompt-suggestions">
               {["Explain this project", "Write tests for the API", "Make a refactor plan"].map((text) => (
-                <button key={text} onClick={() => { setInput(text); textarea.current?.focus(); }}><Sparkles size={13} />{text}</button>
+                <button key={text} onClick={() => { setInput(text); textarea.current?.focus(); }}><Sparkles size={13} />{text}<ArrowUpRight size={12} /></button>
               ))}
             </div>
           </div>
@@ -259,7 +265,7 @@ export function ChatPanel({
               )}
               {t.text.startsWith("⚠") ? <div className="danger-text">{t.text}</div> : <Markdown text={t.text} />}
               <div className="message-footer">
-                <span className="task-completed"><CheckMark />{t.text.startsWith("⚠") ? "Turn failed" : "Completed"}</span>
+                <span className="task-completed"><CheckMark />{t.text.startsWith("⚠") ? "Turn failed" : "Task completed"}</span>
                 <span className="message-footer-actions">
                   <IconButton label="Copy response" onClick={() => void copyText(`h${i}`, t.text)}>
                     {copied === `h${i}` ? <CheckCheck size={13} /> : <Copy size={13} />}
@@ -294,7 +300,7 @@ export function ChatPanel({
             {liveError && <div className="danger-text">{liveError}</div>}
             {run.error && <div className="danger-text">{run.error}</div>}
             {!busy && run.phase === "succeeded" && (
-              <div className="message-footer"><span className="task-completed"><CheckMark />Task completed</span></div>
+              <div className="message-footer"><span className="task-completed"><CheckMark />{mode === "plan" ? "Plan ready" : "Task completed"}</span></div>
             )}
           </article>
         )}
@@ -321,6 +327,13 @@ export function ChatPanel({
             rows={2}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey && !(e.nativeEvent as KeyboardEvent).isComposing) { e.preventDefault(); void send(); }
+              if (e.key === "Tab" && e.shiftKey) {
+                e.preventDefault();
+                const i = modes.indexOf(mode);
+                const next = modes[(i + 1 + modes.length) % modes.length] || modes[0] || mode;
+                setMode(next);
+                savePrefs({ mode: next });
+              }
             }}
           />
           <div className="composer-toolbar">
@@ -335,7 +348,7 @@ export function ChatPanel({
                 </button>
                 {menu === "mode" && (
                   <div className="popover mode-popover">
-                    <div className="popover-label">EXECUTION MODE</div>
+                    <div className="popover-label">EXECUTION MODE <kbd>⇧ Tab</kbd></div>
                     {(modes.includes("plan") || modes.includes("build") ? [
                       { id: "plan", label: "Plan", description: "Think it through before building" },
                       { id: "build", label: "Build", description: "Make changes to project files" },

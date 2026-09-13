@@ -28,7 +28,7 @@ test("send a message and watch the streamed reply complete", async ({ page }) =>
   // live-run evidence appears (working dots or activity), then the echoed answer
   await expect(page.locator(".working-message, .agent-message").first()).toBeVisible({ timeout: 8000 });
   await expect(page.locator(".agent-message")).toContainText("echo:browser integration hello", { timeout: 20000 });
-  await expect(page.locator(".message-footer, .activity")).toContainText(/Task completed|succeeded|done|completed/, { timeout: 10000 });
+  await expect(page.locator(".message-footer, .activity")).toContainText(/Task completed|Plan ready|succeeded|done|completed/, { timeout: 10000 });
   // a fresh chat adopts its session: the URL gains /s/<sessionId> while the
   // stream keeps rendering
   await expect(page).toHaveURL(/\/s\/sess_[A-Za-z0-9-]+/, { timeout: 10_000 });
