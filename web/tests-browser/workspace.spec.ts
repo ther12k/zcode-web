@@ -1,5 +1,6 @@
 // ZWUI-024: browser integration tests against the reference-style UI.
 import { test, expect } from "@playwright/test";
+import assert from "node:assert/strict";
 
 const TOKEN = "e2e-token";
 
@@ -299,4 +300,26 @@ test("deep-linked session shows its real title in the topbar", async ({ page }) 
   await page.waitForLoadState("domcontentloaded");
   await expect(page.locator(".chat-loader")).toBeHidden({ timeout: 5000 });
   await expect(page.getByRole("heading", { name: "Probe: gate-out combo" })).toBeVisible();
+});
+
+test("Sessions view scopes to the selected project, like the desktop", async ({ page }) => {
+  const wsRoot = new URL("../../.e2e-ws", import.meta.url).pathname.replace(/\/$/, "");
+  const roots: string[] = [];
+  await page.route(/\/api\/sessions\/recent\?.*/, async (route) => {
+    const url = new URL(route.request().url());
+    roots.push(url.searchParams.get("root") || "");
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ sessions: [{ id: "sess_proj1", title: "project session", directory: wsRoot + "/proj", updatedAt: 1, createdAt: 1 }] }),
+    });
+  });
+  // a nested workspace route — the query must target that folder, not the parent root
+  roots.length = 0;
+  await page.goto("/w/" + encodeURIComponent(wsRoot + "/proj"));
+  await page.waitForLoadState("domcontentloaded");
+  await page.getByRole("tab", { name: /Sessions/ }).click();
+  await expect(page.getByText("project session")).toBeVisible();
+  assert.ok(roots.length > 0, "sessions view queried the recent endpoint");
+  for (const r of roots) assert.equal(r, wsRoot + "/proj", "query scoped to the project subtree, not the parent root");
 });
