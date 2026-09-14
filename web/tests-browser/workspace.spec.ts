@@ -26,6 +26,8 @@ test("send a message and watch the streamed reply complete", async ({ page }) =>
   const input = page.getByLabel("Message Zcode");
   await input.fill("browser integration hello");
   await input.press("Enter");
+  // the prompt echoes instantly — it must not vanish while the run is in flight
+  await expect(page.locator(".user-message-block.echo")).toContainText("browser integration hello", { timeout: 3000 });
   // live-run evidence appears (working dots or activity), then the echoed answer
   await expect(page.locator(".working-message, .agent-message").first()).toBeVisible({ timeout: 8000 });
   await expect(page.locator(".agent-message")).toContainText("echo:browser integration hello", { timeout: 20000 });
@@ -442,4 +444,151 @@ test.describe("mobile shell (390px)", () => {
     await expect(page.getByLabel("Message Zcode")).toBeVisible();
     await expect(page.locator(".preview-panel")).toBeHidden();
   });
+});
+
+// Telemetry surfaces ported from the clone: token audit dialog and the
+// read-only agent terminal, both driven by the (mocked) real transcript.
+test.describe("telemetry surfaces", () => {
+  const mkTurn = (i: number, over: Record<string, unknown> = {}) => ({
+    id: `tm${i}`,
+    role: i % 2 ? "assistant" : "user",
+    text: i % 2 ? `answer ${i}` : `question ${i}`,
+    tokens: i % 2 ? 1500 + i * 100 : 0,
+    durationMs: i % 2 ? 4000 + i * 500 : null,
+    createdAt: 1_700_000_000_000 + i * 60_000,
+    tools: i === 1 ? [{ name: "Bash", status: "completed", detail: "npm test" }] : [],
+    ...over,
+  });
+  const teleSession = {
+    session: { id: "sess_tele0001", title: "telemetry probe" },
+    runActive: false,
+    transcript: [mkTurn(0), mkTurn(1), mkTurn(3)],
+    total: 3,
+    hasMore: false,
+  };
+
+  test.beforeEach(async ({ page }) => {
+    await page.route(/\/api\/sessions\/sess_.+\?limit=/, (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(teleSession) })
+    );
+    await page.goto("/w/default/s/sess_tele0001");
+    await page.waitForLoadState("domcontentloaded");
+    await expect(page.getByText("answer 1")).toBeVisible({ timeout: 5000 });
+  });
+
+  test("token telemetry dialog shows per-turn audit from real fields", async ({ page }) => {
+    await page.locator(".chat-context .token-chip").click();
+    const dialog = page.getByRole("dialog", { name: /Token telemetry/i });
+    await expect(dialog).toBeVisible();
+    // only assistant turns carry tokens/duration in the mock — 2 measured rows
+    await expect(dialog.getByText(/Turns measured/)).toBeVisible();
+    await expect(dialog.locator(".token-table tbody tr")).toHaveCount(2);
+    // speed cells render (one per measured turn)
+    await expect(dialog.locator(".token-table td.num").filter({ hasText: /\/s$/ })).toHaveCount(2);
+    await expect(dialog.getByRole("button", { name: /Export JSON/ })).toBeEnabled();
+    await expect(dialog.getByRole("button", { name: /Copy summary/ })).toBeVisible();
+    // Escape closes (shared dialog a11y)
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+  });
+
+  test("agent terminal drawer lists bash evidence and is read-only", async ({ page }) => {
+    await page.locator(".chat-context .details-toggle", { hasText: "Terminal" }).click();
+    const term = page.locator(".workspace-terminal");
+    await expect(term).toBeVisible();
+    await expect(term.getByText("read-only")).toBeVisible();
+    await expect(term.locator(".terminal-command")).toContainText("npm test");
+    await expect(term.locator(".terminal-command").first()).toContainText("$");
+    // no shell input exists: it is evidence, not a terminal emulator
+    assert.equal(await term.locator("input").count(), 0);
+    // clear empties the view, Escape closes
+    await term.getByLabel("Clear terminal view").click();
+    await expect(term.locator(".terminal-command")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(term).toBeHidden();
+  });
+
+  test("byline times render and toggle between relative and exact", async ({ page }) => {
+    const bar = page.locator(".chat-context");
+    await bar.locator(".details-toggle").first().click();
+    await expect(bar).toContainText("HH:MM");
+    await expect(page.locator(".message-byline time").first()).toHaveText(/\d{2}:\d{2}/);
+    await bar.locator(".details-toggle").first().click();
+    await expect(page.locator(".message-byline time").first()).toHaveText(/^\d+[mhd]$/);
+  });
+});
+
+// Clone v2 surfaces: rich code blocks, diff viewer, analytics dialog.
+test("code blocks render with header, copy, and line numbers; code HTML stays inert", async ({ page }) => {
+  // the fake CLI echoes a fenced block when asked
+  const input = page.getByLabel("Message Zcode");
+  await input.fill("show me code");
+  await input.press("Enter");
+  await expect(page.locator(".code-block").first()).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator(".code-block-lang").first()).toBeVisible();
+  await expect(page.locator(".code-line-no").first()).toBeVisible();
+  // <script> inside code must not execute / no real script node appears
+  assert.equal(await page.locator(".code-block script").count(), 0);
+  // copy button reacts (headless may deny clipboard; assert no crash + still labeled)
+  await page.locator(".code-block-copy").first().click();
+  await expect(page.locator(".code-block-copy").first()).toContainText(/Copy/);
+});
+
+test("changes tab opens the diff viewer modal with unified/split and stats", async ({ page }) => {
+  // one modified file with a stable unified diff
+  await page.route(/\/api\/git\/status.*/, (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ branch: "main", entries: [{ path: "src/app.ts", status: "modified" }] }) })
+  );
+  await page.route(/\/api\/git\/diff.*/, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ diff: "diff --git a/src/app.ts b/src/app.ts\nindex 111..222 100644\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n const a = 1;\n-const b = 2;\n+const b = 3;\n+const c = 4;\n console.log(a);" }),
+    })
+  );
+  await page.getByLabel("Show preview panel").last().click();
+  await page.getByRole("tab", { name: "Changes" }).click();
+  await page.locator(".diff-file-header").first().click();
+  const dialog = page.getByRole("dialog", { name: /Diff of src\/app.ts/ });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator(".diff-stat").first()).toHaveText("+2");
+  await expect(dialog.locator(".diff-stat").nth(1)).toHaveText("−1");
+  // unified: hunk header + 5 content rows (same, del, add, add, same)
+  await expect(dialog.locator(".diff-hunk-row")).toHaveCount(1);
+  await expect(dialog.locator(".diff-row")).toHaveCount(5);
+  // split view halves the code columns
+  await dialog.getByLabel("Split view").click();
+  await expect(dialog.locator(".diff-table.split")).toBeVisible();
+  // copy patch (headless may deny clipboard; assert the control exists and click is safe)
+  await expect(dialog.getByRole("button", { name: /Copy patch/ })).toBeVisible();
+  await dialog.getByRole("button", { name: /Copy patch/ }).click();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+});
+
+test("analytics dialog shows honest aggregates from /api/analytics", async ({ page }) => {
+  await page.route(/\/api\/analytics.*/, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: 12, tokens: 250_000, steps: 90, turns: 33, agentTimeMs: 7_200_000,
+        failedTurns: 2, activeSessions: 1,
+        daily: [{ day: "2026-09-13", sessions: 4 }, { day: "2026-09-14", sessions: 8 }],
+        topSessions: [{ id: "sess_top1", title: "Top worker", directory: "/ws/proj", updatedAt: 1, tokens: 120_000 }],
+        generatedAt: 1,
+      }),
+    })
+  );
+  await page.locator(".statusbar").getByRole("button", { name: "Analytics" }).click();
+  const dialog = page.getByRole("dialog", { name: /Workspace analytics/i });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("12", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("250.0k")).toBeVisible();
+  await expect(dialog.locator(".analytics-bar")).toHaveCount(2);
+  await expect(dialog.locator(".analytics-row")).toHaveCount(1);
+  // clicking the top session navigates and closes
+  await dialog.locator(".analytics-row").click();
+  await expect(page).toHaveURL(/.*sess_top1/);
+  await expect(dialog).toBeHidden();
 });

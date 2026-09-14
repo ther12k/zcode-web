@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "provider": {
+    "zai": {
+      "apiKey": "e2e-fixture-key",
+      "models": {
+        "glm-5.3": {},
+        "glm-5.3-flash": {}
+      }
+    }
+  },
+  "model": {
+    "main": "zai/glm-5.3"
+  }
+}

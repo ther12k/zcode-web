@@ -10,7 +10,7 @@
   },
   "scripts": {
     "start": "node server/index.js",
-    "serve:test": "ZCODE_WEB_TOKEN=e2e-token ZCODE_CLI_ENTRY=$PWD/scripts/fake-cli.mjs ZCODE_WORKSPACE_ROOT=$PWD/.e2e-ws ZCODE_HOME=$PWD/.e2e-home PORT=3472 HOST=127.0.0.1 node server/index.js"
+    "serve:test": "mkdir -p .e2e-home/cli && cp tests/fixtures/cli-config.json .e2e-home/cli/config.json && ZCODE_WEB_TOKEN=e2e-token ZCODE_CLI_ENTRY=$PWD/scripts/fake-cli.mjs ZCODE_WORKSPACE_ROOT=$PWD/.e2e-ws ZCODE_HOME=$PWD/.e2e-home PORT=3472 HOST=127.0.0.1 node server/index.js"
   },
   "dependencies": {}
 }

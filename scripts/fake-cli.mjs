@@ -77,6 +77,24 @@ const timer = (ms) => new Promise((r) => setTimeout(r, ms));
   emit("model.streaming", { assistantMessageId: "m1", delta: "", done: false, kind: "start" });
   emit("model.streaming", { assistantMessageId: "m1", delta: "", done: false, kind: "reasoning_delta" });
   if (delay) await timer(delay);
+  // "show me code" exercises the rich code-block renderer end-to-end
+  if (/^show me code/.test(prompt)) {
+    const fence = [
+      "Here is a sample:",
+      "```ts",
+      "const greeting = \"hi\"; // comment",
+      "if (greeting) {",
+      "  console.log(greeting, 42);",
+      "}",
+      "```",
+      "<script>alert('must stay inert')</script>",
+    ].join("\n");
+    emit("model.streaming", { assistantMessageId: "m1", delta: fence, done: false, kind: "text_delta" });
+    emit("model.streaming", { assistantMessageId: "m1", delta: "", done: true, kind: "finish" });
+    emit("turn.completed", { response: fence, usage: { totalTokens: 64 }, toolCallCount: 0 });
+    emit("done", { exitCode: 0 });
+    process.exit(0);
+  }
   emit("model.streaming", { assistantMessageId: "m1", delta: `echo:${prompt}`, done: false, kind: "text_delta" });
   if (mode === "fail") {
     emit("session.updated", { type: "model_request_failed" });
