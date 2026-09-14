@@ -456,7 +456,7 @@ async function handleApi(req, res, url) {
     }
   }
 
-  const sessionMatch = route.match(/^\/api\/sessions\/(sess_[A-Za-z0-9-]+)$/);
+  const sessionMatch = route.match(/^\/api\/sessions\/(sess_[A-Za-z0-9_-]+)$/);
   if (sessionMatch && req.method === "GET") {
     let session;
     let page;
@@ -464,6 +464,10 @@ async function handleApi(req, res, url) {
     try {
       session = store.get(sessionMatch[1]);
       if (!session) return sendJson(res, 404, { error: "session not found" });
+      const sessionDir = resolve(session.directory);
+      if (!ALLOWED_ROOTS.some((r) => sessionDir === r || sessionDir.startsWith(r + sep))) {
+        return sendJson(res, 403, { error: "session outside allowed roots" });
+      }
       session.goal = store.goal(session.id);
       const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 5, 1), 400);
       const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0);
@@ -565,10 +569,19 @@ async function handleApi(req, res, url) {
   // is resolved inside the session's artifact dir only. Content type is
   // sniffed from magic bytes — artifact filenames are .txt regardless of
   // their true payload.
-  const artifactMatch = route.match(/^\/api\/artifacts\/(sess_[A-Za-z0-9-]+)\/([A-Za-z0-9-]+)$/);
+  const artifactMatch = route.match(/^\/api\/artifacts\/(sess_[A-Za-z0-9_-]+)\/([A-Za-z0-9-]+)$/);
   if (artifactMatch && (req.method === "GET" || req.method === "HEAD")) {
     const [, artifactSess, artifactUuid] = artifactMatch;
     if (artifactSess.length > 80 || artifactUuid.length > 80) return sendJson(res, 404, { error: "not found" });
+    try {
+      const sess = store.get(artifactSess);
+      if (sess) {
+        const sessionDir = resolve(sess.directory);
+        if (!ALLOWED_ROOTS.some((r) => sessionDir === r || sessionDir.startsWith(r + sep))) {
+          return sendJson(res, 403, { error: "session outside allowed roots" });
+        }
+      }
+    } catch {}
     const dir = normalize(join(config.zcodeHome, "cli", "artifacts", artifactSess));
     if (!dir.startsWith(join(config.zcodeHome, "cli", "artifacts") + sep)) return sendJson(res, 404, { error: "not found" });
     let file = null;
@@ -595,13 +608,20 @@ async function handleApi(req, res, url) {
 
   // Session rename — writes only the session row's title (same fields the
   // CLI's own rename sets: title + title_source='user').
-  const renameMatch = route.match(/^\/api\/sessions\/(sess_[A-Za-z0-9-]+)\/rename$/);
+  const renameMatch = route.match(/^\/api\/sessions\/(sess_[A-Za-z0-9_-]+)\/rename$/);
   if (renameMatch && req.method === "POST") {
     const body = JSON.parse(await readBody(req, 8192));
     const title = String(body.title || "").trim();
     if (!title) return sendJson(res, 400, { error: "title is required" });
     if (!cliStatus().dbPresent) return sendJson(res, 503, { error: "session database not found", code: "DB_MISSING" });
     try {
+      const sess = store.get(renameMatch[1]);
+      if (sess) {
+        const sessionDir = resolve(sess.directory);
+        if (!ALLOWED_ROOTS.some((r) => sessionDir === r || sessionDir.startsWith(r + sep))) {
+          return sendJson(res, 403, { error: "session outside allowed roots" });
+        }
+      }
       const ok = renameSession(cliStatus().dbPath, renameMatch[1], title);
       if (!ok) return sendJson(res, 404, { error: "session not found" });
       return sendJson(res, 200, { ok: true, title: title.slice(0, 200) });
@@ -623,21 +643,32 @@ async function handleApi(req, res, url) {
     } catch (e) {
       return sendJson(res, e.status || 400, { error: e.message });
     }
-    const sessionId = body.sessionId && /^sess_[A-Za-z0-9-]+$/.test(body.sessionId) ? body.sessionId : null;
-    const mode = config.allowedModes.includes(body.mode) ? body.mode : "plan";
-    // ZWUI-007: idempotent submission — same X-Request-Id returns the same job
-    const requestId =
-      (typeof req.headers["x-request-id"] === "string" && req.headers["x-request-id"].slice(0, 100)) ||
-      (typeof body.requestId === "string" && body.requestId.slice(0, 100)) ||
-      null;
-    const existing = jobs.findByIdempotencyKey(requestId);
-    if (existing) {
-      return sendJson(res, 200, {
-        jobId: existing.id, sessionId: existing.sessionId, cwd: existing.cwd,
-        mode: existing.mode, model: existing.modelRef || null, replayed: true,
-      });
+    const sessionId = body.sessionId && /^sess_[A-Za-z0-9_-]+$/.test(body.sessionId) ? body.sessionId : null;
+    if (sessionId) {
+      let session = null;
+      try {
+        session = store.get(sessionId);
+      } catch (e) {
+        if (e.code === "DB_MISSING") {
+          // session DB not present; proceed if allowed by environment
+        }
+      }
+      if (session) {
+        const canonical = resolve(session.directory);
+        if (!ALLOWED_ROOTS.some((r) => canonical === r || canonical.startsWith(r + sep))) {
+          return sendJson(res, 403, { error: "session directory outside allowed roots", code: "SESSION_ROOT_FORBIDDEN" });
+        }
+        if (canonical !== resolve(cwd)) {
+          return sendJson(res, 409, {
+            error: "session directory mismatch",
+            code: "SESSION_CONTEXT_MISMATCH",
+            canonicalDirectory: session.directory,
+          });
+        }
+      }
     }
-    // model must be a configured provider/model pair — never a free string
+
+    const mode = config.allowedModes.includes(body.mode) ? body.mode : "plan";
     const modelEntry = listModels({ withKeys: true }).find((m) => m.ref === body.model) || null;
     // attachments must be files previously uploaded to the uploads dir
     const upDir = uploadsDir();
@@ -648,6 +679,31 @@ async function handleApi(req, res, url) {
       return sendJson(res, 400, { error: "attachments must be uploaded via /api/upload first", rejected: bad });
     }
     const attachments = requested.slice(0, 5);
+
+    // ZWUI-007: idempotent submission — same X-Request-Id returns the same job
+    const requestId =
+      (typeof req.headers["x-request-id"] === "string" && req.headers["x-request-id"].slice(0, 100)) ||
+      (typeof body.requestId === "string" && body.requestId.slice(0, 100)) ||
+      null;
+    try {
+      const existing = jobs.findByIdempotencyKey(requestId, {
+        text,
+        sessionId,
+        cwd,
+        mode,
+        model: modelEntry?.ref || null,
+        attachments,
+      });
+      if (existing) {
+        return sendJson(res, 200, {
+          jobId: existing.id, sessionId: existing.sessionId, cwd: existing.cwd,
+          mode: existing.mode, model: existing.modelRef || null, replayed: true,
+        });
+      }
+    } catch (e) {
+      return sendJson(res, e.status || 409, { error: e.message, code: e.code });
+    }
+
     try {
       const { job, replayed } = jobs.start({
         text,
@@ -665,7 +721,7 @@ async function handleApi(req, res, url) {
         jobId: job.id, sessionId: job.sessionId, cwd, mode, model: modelEntry?.ref || null, replayed,
       });
     } catch (e) {
-      return sendJson(res, e.status || 500, { error: e.message });
+      return sendJson(res, e.status || 500, { error: e.message, code: e.code });
     }
   }
 
@@ -980,6 +1036,12 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   try {
     if (url.pathname.startsWith("/api/")) {
+      if (url.pathname === "/api/bootstrap" && req.method === "GET") {
+        return sendJson(res, 200, {
+          authRequired: Boolean(TOKEN),
+          serverVersion: "0.1.0",
+        });
+      }
       // SSE authenticates inside handleApi (bearer OR short-lived ticket)
       const isSse = /^\/api\/events\/[0-9a-f-]+$/.test(url.pathname) && req.method === "GET";
       if (!isSse && !isAuthorized(req)) return sendJson(res, 401, { error: "unauthorized" });

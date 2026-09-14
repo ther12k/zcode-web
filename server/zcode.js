@@ -65,9 +65,10 @@ class Job {
     this.lines = [];
     this.subscribers = new Set();
     // ZWUI-007: immutable status state machine
-    // queued -> running -> (succeeded | failed | cancelled | timeout)
+    // queued -> running -> stopping -> (succeeded | failed | cancelled | timeout)
     this.status = "queued";
     this.timedOut = false;
+    this.hasTurnFailed = false;
     this.createdAt = Date.now();
     this.startedAt = null;
     this.finishedAt = null;
@@ -80,7 +81,7 @@ class Job {
     // once terminal, status is immutable
     if (TERMINAL.has(this.status)) return;
     this.status = next;
-    if (next === "running") this.startedAt = Date.now();
+    if (next === "running" && !this.startedAt) this.startedAt = Date.now();
     if (TERMINAL.has(next)) this.finishedAt = Date.now();
   }
 
@@ -97,11 +98,24 @@ class Job {
 
 const TERMINAL = new Set(["succeeded", "failed", "cancelled", "timeout"]);
 
+function requestFingerprint({ text, sessionId, cwd, mode, model, attachments }) {
+  return JSON.stringify({
+    text: String(text || "").trim(),
+    sessionId: sessionId || null,
+    cwd: cwd || null,
+    mode: mode || null,
+    model: model || null,
+    attachments: (attachments || []).map(String).sort(),
+  });
+}
+
 export class JobManager {
   constructor() {
     this.jobs = new Map();
-    // ZWUI-007: requestId -> jobId for idempotent submission
+    // ZWUI-007: requestId -> { job, fingerprint } for idempotent submission
     this.byRequest = new Map();
+    // Same-session active concurrency lock: sessionId -> job
+    this.bySession = new Map();
     // ZWUI-008: bounded replay buffers per job (SSE v2 Last-Event-ID)
     this.replayMax = Number(process.env.ZCODE_SSE_REPLAY_MAX || 4000);
   }
@@ -116,29 +130,60 @@ export class JobManager {
     return this.jobs.get(jobId) || null;
   }
 
-  findByIdempotencyKey(requestId) {
+  findByIdempotencyKey(requestId, payload) {
     if (!requestId) return null;
-    return this.byRequest.get(requestId) || null;
+    const entry = this.byRequest.get(requestId);
+    if (!entry) return null;
+    if (payload) {
+      const fp = requestFingerprint(payload);
+      if (entry.fingerprint && entry.fingerprint !== fp) {
+        const err = new Error("Idempotency conflict: same request id with different payload");
+        err.status = 409;
+        err.code = "IDEMPOTENCY_CONFLICT";
+        throw err;
+      }
+    }
+    return entry.job;
   }
 
   start({ text, sessionId, cwd, mode, model, modelApiKey, modelBaseUrl, attachments, requestId }) {
-    // idempotent resubmission returns the original job
+    // idempotent resubmission returns the original job (or rejects on conflict)
+    const fp = requestId ? requestFingerprint({ text, sessionId, cwd, mode, model, attachments }) : null;
     if (requestId) {
       const existing = this.byRequest.get(requestId);
-      if (existing) return { job: existing, replayed: true };
+      if (existing) {
+        if (existing.fingerprint && existing.fingerprint !== fp) {
+          const err = new Error("Idempotency conflict: same request id with different payload");
+          err.status = 409;
+          err.code = "IDEMPOTENCY_CONFLICT";
+          throw err;
+        }
+        return { job: existing.job, replayed: true };
+      }
     }
     if (!existsSync(config.cliEntry)) {
       throw Object.assign(new Error("ZCode CLI bundle not found at " + config.cliEntry), { status: 503 });
     }
-    if (this.activeCount >= config.maxJobs) {
-      throw Object.assign(new Error("Too many running jobs, try again shortly"), { status: 429 });
-    }
     if (!config.allowedModes.includes(mode)) {
       throw Object.assign(new Error(`Mode "${mode}" not allowed`), { status: 400 });
     }
+    if (sessionId) {
+      const activeSessionJob = this.bySession.get(sessionId);
+      if (activeSessionJob && !TERMINAL.has(activeSessionJob.status)) {
+        const err = new Error(`Session ${sessionId} is busy with an active run`);
+        err.status = 409;
+        err.code = "SESSION_BUSY";
+        err.jobId = activeSessionJob.id;
+        throw err;
+      }
+    }
+    if (this.activeCount >= config.maxJobs) {
+      throw Object.assign(new Error("Too many running jobs, try again shortly"), { status: 429 });
+    }
 
     const job = new Job({ text, sessionId, cwd, mode, requestId });
-    if (requestId) this.byRequest.set(requestId, job);
+    if (requestId) this.byRequest.set(requestId, { job, fingerprint: fp });
+    if (sessionId) this.bySession.set(sessionId, job);
     const args = [
       config.cliEntry,
       "--prompt", text,
@@ -170,11 +215,14 @@ export class JobManager {
     });
     job.proc = proc;
 
-    // ZWUI-008: numbered event stream for Last-Event-ID replay
+    // ZWUI-008: numbered event stream for Last-Event-ID replay (bounded)
     let lastEventId = 0;
     const record = (event) => {
       event.id = ++lastEventId;
       job.lines.push(event);
+      if (job.lines.length > this.replayMax) {
+        job.lines.shift();
+      }
       job.publish(event);
       return event;
     };
@@ -193,7 +241,15 @@ export class JobManager {
         } catch {
           parsed = { raw: line };
         }
-        if (parsed.sessionId && !job.sessionId) job.sessionId = parsed.sessionId;
+        if (parsed.sessionId && !job.sessionId) {
+          job.sessionId = parsed.sessionId;
+          this.bySession.set(job.sessionId, job);
+        }
+        if (parsed.type === "turn.failed") {
+          job.hasTurnFailed = true;
+          if (parsed.payload?.error?.message) job.error = String(parsed.payload.error.message);
+          else if (parsed.payload?.error) job.error = String(parsed.payload.error);
+        }
         record({ kind: "line", line: parsed });
       }
     });
@@ -206,10 +262,23 @@ export class JobManager {
 
     const finish = (exitCode, error) => {
       if (TERMINAL.has(job.status)) return;
+      if (job.sessionId && this.bySession.get(job.sessionId) === job) {
+        this.bySession.delete(job.sessionId);
+      }
+      if (job.resumeSessionId && this.bySession.get(job.resumeSessionId) === job) {
+        this.bySession.delete(job.resumeSessionId);
+      }
       job.exitCode = exitCode;
-      job.error = error ? String(error) : null;
-      job.setStatus(error ? "failed" : job.timedOut ? "timeout" : exitCode === 0 ? "succeeded" : "failed");
-      if (job.timedOut) job.status = "timeout";
+      job.error = error ? String(error) : (job.hasTurnFailed && !job.error ? "turn failed" : job.error);
+      if (job.status === "stopping") {
+        job.setStatus("cancelled");
+      } else if (job.timedOut) {
+        job.setStatus("timeout");
+      } else if (error || job.hasTurnFailed || exitCode !== 0) {
+        job.setStatus("failed");
+      } else {
+        job.setStatus("succeeded");
+      }
       record({ kind: "done", exitCode, error: job.error, sessionId: job.sessionId, stderrTail: job.stderrTail });
       clearTimeout(timer);
       // terminal jobs stay addressable (status + replay) for a window
@@ -243,9 +312,18 @@ export class JobManager {
   cancel(jobId) {
     const job = this.jobs.get(jobId);
     if (!job || TERMINAL.has(job.status)) return false;
-    job.setStatus("cancelled");
-    job.proc.kill("SIGTERM");
-    setTimeout(() => !TERMINAL.has(job.status) && job.proc.kill("SIGKILL"), 5000).unref();
+    if (job.status === "stopping") return true;
+    job.setStatus("stopping");
+    try {
+      job.proc.kill("SIGTERM");
+    } catch {}
+    setTimeout(() => {
+      if (!TERMINAL.has(job.status) && job.proc) {
+        try {
+          job.proc.kill("SIGKILL");
+        } catch {}
+      }
+    }, 5000).unref();
     return true;
   }
 

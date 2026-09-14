@@ -625,3 +625,115 @@ describe("SessionStore.recent across roots", async () => {
     assert.equal(capped[0].id, "sess_b1");
   });
 });
+
+describe("ZPAR-001 & ZPAR-002: Canonical session directory & auth bootstrap", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+
+  it("GET /api/bootstrap is accessible without credentials and reports authRequired", async () => {
+    const r = await fetch(`${BASE}/api/bootstrap`);
+    assert.equal(r.status, 200);
+    const j = await r.json();
+    assert.equal(j.authRequired, true);
+    assert.ok(typeof j.serverVersion === "string");
+  });
+
+  it("enforces canonical session directory and rejects mismatch with 409", async () => {
+    const dbDir = join(home, "cli", "db");
+    mkdirSync(dbDir, { recursive: true });
+    const dbPath = join(dbDir, "db.sqlite");
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT);
+      CREATE TABLE IF NOT EXISTS message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, sequence INTEGER);
+      CREATE TABLE IF NOT EXISTS part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT, sequence INTEGER);
+      CREATE TABLE IF NOT EXISTS session_target (session_id TEXT PRIMARY KEY, objective TEXT, status TEXT, tokens_used INTEGER, time_used_seconds INTEGER, time_created INTEGER, time_updated INTEGER);
+    `);
+    const otherProj = join(ws, "other-proj");
+    mkdirSync(otherProj, { recursive: true });
+    db.prepare("INSERT OR REPLACE INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)")
+      .run("sess_other", "other project session", otherProj, 1, 100);
+    db.prepare("INSERT OR REPLACE INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)")
+      .run("sess_outside_root", "outside session", "/etc/secret", 1, 100);
+    db.close();
+
+    // 1. Mismatched directory: session belongs to otherProj, but cwd is proj -> 409 SESSION_CONTEXT_MISMATCH
+    const rMismatch = await chat({ text: "mismatch test", sessionId: "sess_other", cwd: join(ws, "proj") });
+    assert.equal(rMismatch.status, 409);
+    const jMismatch = await rMismatch.json();
+    assert.equal(jMismatch.code, "SESSION_CONTEXT_MISMATCH");
+    assert.equal(jMismatch.canonicalDirectory, otherProj);
+
+    // 2. Session directory outside allowed roots -> 403
+    const rOutside = await chat({ text: "outside test", sessionId: "sess_outside_root", cwd: join(ws, "proj") });
+    assert.equal(rOutside.status, 403);
+    const jOutside = await rOutside.json();
+    assert.equal(jOutside.code, "SESSION_ROOT_FORBIDDEN");
+
+    // 3. Detail route rejects session outside allowed roots with 403
+    const rDetail = await fetch(`${BASE}/api/sessions/sess_outside_root`, { headers: auth });
+    assert.equal(rDetail.status, 403);
+
+    // 4. Rename route rejects session outside allowed roots with 403
+    const rRename = await fetch(`${BASE}/api/sessions/sess_outside_root/rename`, {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ title: "renamed" }),
+    });
+    assert.equal(rRename.status, 403);
+
+    // 5. Matching directory succeeds
+    const rMatch = await chat({ text: "matching test", sessionId: "sess_other", cwd: otherProj });
+    assert.equal(rMatch.status, 202);
+  });
+});
+
+describe("ZPAR-005 & ZPAR-008: Concurrency, idempotency conflict, and job cancellation", () => {
+  it("rejects idempotency conflict (same key, different payload) with 409 IDEMPOTENCY_CONFLICT", async () => {
+    const reqId = "idem-conflict-test";
+    const r1 = await chat({ text: "payload 1" }, { "x-request-id": reqId });
+    assert.equal(r1.status, 202);
+    const r2 = await chat({ text: "payload 2 DIFFERENT" }, { "x-request-id": reqId });
+    assert.equal(r2.status, 409);
+    const j2 = await r2.json();
+    assert.equal(j2.code, "IDEMPOTENCY_CONFLICT");
+  });
+
+  it("guards same-session concurrency with 409 SESSION_BUSY", async () => {
+    // Start a slow run on a dedicated session ID
+    const r1 = await chat({ text: "slowfirst run 1", sessionId: "sess_busy_test" });
+    assert.equal(r1.status, 202);
+    const { jobId } = await r1.json();
+
+    // Concurrently try to start a second run on the same session
+    const r2 = await chat({ text: "run 2 while busy", sessionId: "sess_busy_test" });
+    assert.equal(r2.status, 409);
+    const j2 = await r2.json();
+    assert.equal(j2.code, "SESSION_BUSY");
+
+    // Clean up active run
+    await fetch(`${BASE}/api/jobs/${jobId}/cancel`, { method: "POST", headers: auth });
+    await new Promise((res) => setTimeout(res, 200));
+  });
+
+  it("job cancellation transitions to stopping then process close finalizes cancelled and done event", async () => {
+    const r = await chat({ text: "slowfirst to be cancelled" });
+    assert.equal(r.status, 202);
+    const { jobId } = await r.json();
+
+    const rCancel = await fetch(`${BASE}/api/jobs/${jobId}/cancel`, { method: "POST", headers: auth });
+    assert.equal(rCancel.status, 200);
+    const jCancel = await rCancel.json();
+    assert.equal(jCancel.canceled, true);
+
+    // Collect SSE or poll until terminal cancelled
+    let status = "";
+    for (let i = 0; i < 20; i++) {
+      const s = await fetch(`${BASE}/api/jobs/${jobId}`, { headers: auth });
+      const js = await s.json();
+      status = js.status;
+      if (status === "cancelled") break;
+      await new Promise((res) => setTimeout(res, 100));
+    }
+    assert.equal(status, "cancelled");
+  });
+});

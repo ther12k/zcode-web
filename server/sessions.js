@@ -135,14 +135,14 @@ export class SessionStore {
 
   // ZWUI-029: bounded title search scoped to directories under the roots.
   searchSessions(q, roots, limit = 20) {
+    if (!roots.length) return [];
     const like = `%${q.replace(/[%_]/g, "!$&").replace(/'/g, "''")}%`;
-    const placeholders = roots.map(() => "?").join(", ");
     const rows = this.query(
       `SELECT id, title, directory, time_updated FROM session
-        WHERE title LIKE ? ESCAPE '!' AND (${roots.map(() => "directory LIKE ? || '%'").join(" OR ")})
+        WHERE title LIKE ? ESCAPE '!' AND (${roots.map(() => "(directory = ? OR directory LIKE ? || '/%')").join(" OR ")})
           AND id NOT LIKE 'sess_subagent_%'
         ORDER BY time_updated DESC LIMIT ?`,
-      [like, ...roots, limit]
+      [like, ...roots.flatMap((r) => [r, r]), limit]
     );
     return rows.map((r) => ({
       id: r.id, title: r.title, directory: r.directory,
@@ -153,9 +153,9 @@ export class SessionStore {
   recentUnder(root, limit = 30) {
     return this.query(
       `SELECT id, title, directory, time_updated FROM session
-        WHERE directory LIKE ? || '%' AND id NOT LIKE 'sess_subagent_%'
+        WHERE (directory = ? OR directory LIKE ? || '/%') AND id NOT LIKE 'sess_subagent_%'
         ORDER BY time_updated DESC LIMIT ?`,
-      [root, limit]
+      [root, root, limit]
     ).map((r) => ({ id: r.id, title: r.title, directory: r.directory, updatedAt: Number(r.time_updated) }));
   }
 
@@ -165,9 +165,9 @@ export class SessionStore {
     if (!roots.length) return [];
     return this.query(
       `SELECT id, title, directory, time_updated FROM session
-        WHERE id NOT LIKE 'sess_subagent_%' AND (${roots.map(() => "directory LIKE ? || '%'").join(" OR ")})
+        WHERE id NOT LIKE 'sess_subagent_%' AND (${roots.map(() => "(directory = ? OR directory LIKE ? || '/%')").join(" OR ")})
         ORDER BY time_updated DESC LIMIT ?`,
-      [...roots, limit]
+      [...roots.flatMap((r) => [r, r]), limit]
     ).map((r) => ({ id: r.id, title: r.title, directory: r.directory, updatedAt: Number(r.time_updated) }));
   }
 
