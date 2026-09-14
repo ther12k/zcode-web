@@ -449,6 +449,49 @@ test.describe("mobile shell (390px)", () => {
   });
 });
 
+// ZWUI-052: desktop width/resizer layers must never leak columns into phone
+// viewports, and a collapsed inspector must never reserve its full column.
+test.describe("phone widths (360px)", () => {
+  test.use({ viewport: { width: 360, height: 740 } });
+
+  test("chat owns the full viewport; a collapsed inspector reserves nothing", async ({ page }) => {
+    const geo = await page.evaluate(() => ({
+      overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      chatW: Math.round((document.querySelector(".chat-panel") as HTMLElement).getBoundingClientRect().width),
+      railShown: (() => { const r = document.querySelector(".pane-rail") as HTMLElement | null; return !!r && getComputedStyle(r).display !== "none"; })(),
+    }));
+    expect(geo.overflowX).toBe(0);
+    expect(geo.chatW).toBeGreaterThanOrEqual(358);
+    expect(geo.railShown).toBe(false);
+  });
+
+  test("pane switch: the inspector opens full-width and returns to chat", async ({ page }) => {
+    await page.locator(".mobile-preview-button").click();
+    await expect(page.locator(".preview-panel")).toBeVisible();
+    const panelW = await page.evaluate(() => Math.round((document.querySelector(".preview-panel") as HTMLElement).getBoundingClientRect().width));
+    expect(panelW).toBeGreaterThanOrEqual(358);
+    await expect(page.getByLabel("Message Zcode")).toBeHidden();
+    await page.getByLabel("Close panel").click();
+    await expect(page.getByLabel("Message Zcode")).toBeVisible();
+  });
+});
+
+test.describe("small tablet band (850px)", () => {
+  test.use({ viewport: { width: 850, height: 390 } });
+
+  test("a collapsed inspector reserves only its 44px rail, never the panel column", async ({ page }) => {
+    const railW = async () => page.evaluate(() => Math.round((document.querySelector(".pane-rail") as HTMLElement | null)?.getBoundingClientRect().width || 0));
+    const chatW = async () => page.evaluate(() => Math.round((document.querySelector(".chat-panel") as HTMLElement).getBoundingClientRect().width));
+    expect(await railW()).toBeLessThanOrEqual(48);
+    expect(await chatW()).toBeGreaterThanOrEqual(700);
+    await page.getByLabel("Show preview panel").last().click();
+    await expect(page.locator(".preview-panel")).toBeVisible();
+    await page.getByLabel("Close panel").click();
+    expect(await railW()).toBeLessThanOrEqual(48);
+    expect(await chatW()).toBeGreaterThanOrEqual(700);
+  });
+});
+
 // Telemetry surfaces ported from the clone: token audit dialog and the
 // read-only agent terminal, both driven by the (mocked) real transcript.
 test.describe("telemetry surfaces", () => {
