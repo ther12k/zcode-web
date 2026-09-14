@@ -289,7 +289,7 @@ export function App() {
         <div className="breadcrumbs">
           <button onClick={() => navigateToCwd(cwd)}><FolderClosed size={13} /><span>{projectLabel}</span></button>
           <span className="breadcrumb-divider">/</span>
-          <h1>{activeSession?.title || "New chat"}</h1>
+          <h1 className="topbar-title" title={activeSession?.title || "New chat"}>{activeSession?.title || "New chat"}</h1>
           {activeSessionId && prefs.pinnedSessions.includes(activeSessionId) && <span className="mini-badge pinned-badge"><Pin size={8} />Pinned</span>}
         </div>
         <div className="topbar-actions">

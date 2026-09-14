@@ -276,6 +276,9 @@ export function ChatPanel({
   // stick to the newest message while streaming, like the desktop — unless
   // the reader has scrolled up (then leave their reading position alone)
   const stickToBottom = useRef(true);
+  // "↓ latest" pill when the reader is away from the bottom — the standard
+  // chat affordance for getting back after reading history
+  const [showJumpLatest, setShowJumpLatest] = useState(false);
   const [externalTick, setExternalTick] = useState(0);
   useEffect(() => {
     requestAnimationFrame(() => {
@@ -454,16 +457,35 @@ export function ChatPanel({
     }
   }, [onNotify]);
 
-  // scrollback: prepend the next older page, keeping the reading position
+  // scrollback: prepend the next older page, keeping the reading position.
+  // The restore must run AFTER React commits the prepended nodes — a single
+  // rAF can beat the commit and leave the viewport at the top of the newly
+  // loaded history. Anchor on the previously-first node's offset instead of
+  // raw scrollHeight diffs.
   const loadOlder = useCallback(async () => {
     if (!sessionId || loadingOlder) return;
     setLoadingOlder(true);
     const el = scroll.current;
-    const before = el?.scrollHeight ?? 0;
+    // anchor the first TURN node (not the load-older button — it unmounts
+    // while loading). Id-stable keys keep this exact node mounted as the
+    // prepend shifts it down.
+    const anchor = (el?.querySelector(".messages-scroll > article, .messages-scroll > .timeline-stack") ??
+      (el?.firstElementChild && el.firstElementChild.tagName !== "BUTTON" ? el.firstElementChild : null)) as HTMLElement | null;
+    const anchorTop = anchor?.offsetTop ?? 0;
+    const anchorDelta = el && anchor ? el.scrollTop - anchorTop : 0;
+    const settle = (tries = 0) => {
+      requestAnimationFrame(() => {
+        // re-apply for a few frames — idempotent, absorbs image-load and
+        // layout shifts after the prepend commits
+        if (!el || !anchor || !anchor.isConnected) return;
+        el.scrollTop = anchor.offsetTop + anchorDelta;
+        if (tries < 8) settle(tries + 1);
+      });
+    };
     try {
       const d = await client.session(sessionId, 10, history.turns.length);
       setHistory((h) => ({ turns: [...d.transcript, ...h.turns], total: d.total, hasMore: d.hasMore }));
-      requestAnimationFrame(() => { if (el) el.scrollTop = el.scrollHeight - before; });
+      settle();
     } catch (e) {
       onNotify(e instanceof ApiError ? e.message : String(e), "error");
     } finally {
@@ -576,7 +598,12 @@ export function ChatPanel({
           {detailsHidden ? <Eye size={12} /> : <EyeOff size={12} />}<span>{detailsHidden ? "Show details" : "Hide details"}</span>
         </button>
       </div>
-      <div className="messages-scroll" ref={scroll} onScroll={(e) => { const el = e.currentTarget; stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120; }}>
+      <div className="messages-scroll" ref={scroll} onScroll={(e) => {
+        const el = e.currentTarget;
+        const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+        stickToBottom.current = atBottom;
+        setShowJumpLatest(!atBottom && el.scrollHeight > el.clientHeight + 200);
+      }}>
         {empty && (
           <div className="empty-conversation">
             <div className="empty-logo"><ZLogo size={35} /></div>
@@ -736,6 +763,21 @@ export function ChatPanel({
         )}
       </div>
 
+      <div className="composer-zone">
+        {showJumpLatest && (
+          <button
+            className="jump-latest"
+            aria-label="Jump to latest messages"
+            onClick={() => {
+              const el = scroll.current;
+              if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+              stickToBottom.current = true;
+              setShowJumpLatest(false);
+            }}
+          >
+            <ChevronDown size={13} />Latest
+          </button>
+        )}
       <div
         className="composer-shell"
         onDragOver={(e) => { e.preventDefault(); }}
@@ -864,9 +906,10 @@ export function ChatPanel({
           </div>
         </div>
         <div className="composer-hint">
-          <span><kbd>↵</kbd> to send <span className="hint-dot">·</span> <kbd>shift ↵</kbd> for a new line</span>
-          <span><span className={`tiny-dot ${run.streamAttached ? "green" : ""}`} />{run.streamAttached ? "stream live" : externalActive && !localBusy ? "streaming in the Zcode app" : localBusy ? "reconnecting" : "idle"}</span>
+          <span><kbd>↵</kbd> send <span className="hint-dot">·</span> <kbd>shift ↵</kbd> new line <span className="hint-dot">·</span> <kbd>/</kbd> commands</span>
+          <span className="composer-status"><span className={`tiny-dot ${run.streamAttached ? "green" : ""}`} />{run.streamAttached ? "stream live" : externalActive && !localBusy ? "streaming in the Zcode app" : localBusy ? "reconnecting" : "idle"}</span>
         </div>
+      </div>
       </div>
       <input
         ref={fileInput}

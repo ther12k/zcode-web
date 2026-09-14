@@ -231,3 +231,11 @@
 .command-desc{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:9px;color:#879084}
 .command-kbd{font-size:7.5px;color:#6f7a6c;border:1px solid #3d413c;border-radius:3px;padding:1px 4px;letter-spacing:.2px;white-space:nowrap}
 .working-elapsed{margin-left:7px;font-variant-numeric:tabular-nums;color:#96a195;font-size:10px}
+/* chat UX pass: jump-to-latest pill, legible composer hints */
+.composer-zone{position:relative}
+.jump-latest{position:absolute;right:26px;top:-38px;display:inline-flex;align-items:center;gap:5px;padding:6px 11px;background:#2f322e;border:1px solid #565b54;border-radius:999px;color:#cfd4cd;font-size:10.5px;box-shadow:0 4px 14px #0006;z-index:5}
+.jump-latest:hover{background:#3a3e39;border-color:#78827a;color:#e8eae7}
+.composer-hint{font-size:10px!important;color:#8d9689!important;gap:10px}
+.composer-hint kbd{font-size:9px;color:#9aa396;border:1px solid #43473f;border-radius:3px;padding:0 3px;background:#26282498}
+.composer-status{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.topbar-title{min-width:0;flex-shrink:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:52ch}

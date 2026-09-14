@@ -355,3 +355,44 @@ test("desktop updates append without reloading the open view", async ({ page }) 
   await expect(page.locator(".chat-loader")).toHaveCount(0);
   await expect(page.getByText("Worked for 4s")).toBeVisible();
 });
+
+test("chat affordances: jump-to-latest pill and stable load-older position", async ({ page }) => {
+  // 40 turns so there is scrollback to load
+  const mk = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `m${i}`, role: i % 2 ? "assistant" : "user", text: `turn ${i} — ${"content ".repeat(8)}` }));
+  let calls = 0;
+  await page.route(/\/api\/sessions\/sess_.+\?limit=/, async (route) => {
+    calls += 1;
+    const all = mk(40);
+    const offset = Number(new URL(route.request().url()).searchParams.get("offset") || 0);
+    const page40 = all.slice(Math.max(0, all.length - 10 - offset), all.length - offset);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ session: { id: "sess_scrl00000000000000000000000000", title: "scroll" }, runActive: false, transcript: page40, total: 40, hasMore: offset + 10 < 40 }),
+    });
+  });
+  await page.goto("/w/default/s/sess_scrl00000000000000000000000000");
+  await page.waitForLoadState("domcontentloaded");
+  await expect(page.getByText("turn 39", { exact: false })).toBeVisible({ timeout: 5000 });
+  await page.waitForTimeout(400); // let the initial scroll-to-bottom settle
+  // scroll up: the pill appears and takes you back to the bottom
+  await page.evaluate(() => { const el = document.querySelector(".messages-scroll") as HTMLElement; el.scrollTop = 0; });
+  await expect(page.locator(".jump-latest")).toBeVisible();
+  await page.locator(".jump-latest").click();
+  await page.waitForTimeout(700); // smooth scroll settles
+  const atBottom = await page.evaluate(() => {
+    const el = document.querySelector(".messages-scroll") as HTMLElement;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+  });
+  assert.ok(atBottom, "jump pill returns to the bottom");
+  await expect(page.locator(".jump-latest")).toBeHidden();
+  // load older keeps the reading position: same first-visible text after prepend
+  await page.evaluate(() => { const el = document.querySelector(".messages-scroll") as HTMLElement; el.scrollTop = el.scrollHeight - 300; });
+  await page.locator("button.load-older").click();
+  await page.waitForTimeout(900);
+  const pos = await page.evaluate(() => {
+    const el = document.querySelector(".messages-scroll") as HTMLElement;
+    return { scrollTop: el.scrollTop, atTop: el.scrollTop < 10 };
+  });
+  assert.ok(!pos.atTop, "load-older must not yank the viewport to the top");
+});
