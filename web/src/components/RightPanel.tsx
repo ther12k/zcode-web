@@ -7,6 +7,7 @@ import {
   Globe, LoaderCircle, Maximize2, Minimize2, Monitor, PanelBottom, Play, RefreshCw, Smartphone, Target,
 } from "lucide-react";
 import { IconButton } from "../ui";
+import { DiffViewerModal, parseUnifiedDiff, type ParsedDiff } from "./DiffViewer";
 
 type Tab = "preview" | "code" | "changes";
 
@@ -16,10 +17,12 @@ function authHeaders() {
 
 type Goal = { objective: string; status: string; tokensUsed: number; timeUsedSeconds: number } | null | undefined;
 
-export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleExpanded }: {
+export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleExpanded, refreshKey = 0 }: {
   cwd: string;
   onCollapse: () => void;
   goal?: Goal;
+  /** bumped when a run finishes — inspectors refetch (the tree may have changed) */
+  refreshKey?: number;
   /** full-width layout (`.preview-expanded` on the workspace grid) */
   expanded?: boolean;
   onToggleExpanded?: () => void;
@@ -45,8 +48,8 @@ export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleEx
         </div>
       </div>
       {tab === "preview" && <PreviewTab cwd={cwd} mobile={mobile} onMobile={setMobile} />}
-      {tab === "code" && <CodeTab cwd={cwd} />}
-      {tab === "changes" && <ChangesTab cwd={cwd} />}
+      {tab === "code" && <CodeTab cwd={cwd} refreshKey={refreshKey} />}
+      {tab === "changes" && <ChangesTab cwd={cwd} refreshKey={refreshKey} />}
       <GoalPanel goal={goal} />
     </section>
   );
@@ -136,7 +139,7 @@ function PreviewTab({ cwd, mobile, onMobile }: { cwd: string; mobile: boolean; o
 
 // ---------- Code ----------
 
-function CodeTab({ cwd }: { cwd: string }) {
+function CodeTab({ cwd, refreshKey = 0 }: { cwd: string; refreshKey?: number }) {
   const [state, setState] = useState<{ enabled: boolean } | null>(null);
   const [entries, setEntries] = useState<{ name: string; dir: boolean }[] | null>(null);
   const [openFile, setOpenFile] = useState<{ name: string; content: string } | null>(null);
@@ -160,7 +163,7 @@ function CodeTab({ cwd }: { cwd: string }) {
       })
       .catch(() => alive && setError("listing failed"));
     return () => { alive = false; };
-  }, [state, cwd]);
+  }, [state, cwd, refreshKey]);
 
   async function open(name: string) {
     setError(null);
@@ -213,11 +216,11 @@ function CodeTab({ cwd }: { cwd: string }) {
 
 // ---------- Changes ----------
 
-function ChangesTab({ cwd }: { cwd: string }) {
+function ChangesTab({ cwd, refreshKey = 0 }: { cwd: string; refreshKey?: number }) {
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [entries, setEntries] = useState<{ status: string; path: string }[] | null>(null);
   const [branch, setBranch] = useState<string | null>(null);
-  const [diff, setDiff] = useState<{ path: string; text: string } | null>(null);
+  const [diffTarget, setDiffTarget] = useState<ParsedDiff | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -237,12 +240,14 @@ function ChangesTab({ cwd }: { cwd: string }) {
       }
     })();
     return () => { alive = false; };
-  }, [cwd]);
+  }, [cwd, refreshKey]);
 
   async function showDiff(path: string) {
     const r = await fetch(`/api/git/diff?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(path)}`, { headers: authHeaders() });
     const j = await r.json();
-    setDiff({ path, text: j.diff || j.error || "" });
+    const parsed = j.diff ? parseUnifiedDiff(j.diff) : null;
+    if (parsed) setDiffTarget(parsed);
+    else setError(j.error || "No diff available for this file.");
   }
 
   if (enabled === null) return <div className="empty-history"><LoaderCircle size={16} className="spin" /><p>Checking git…</p></div>;
@@ -280,17 +285,8 @@ function ChangesTab({ cwd }: { cwd: string }) {
             <ChevronDown size={12} />
           </button>
         ))}
-        {diff && (
-          <div className="diff-file">
-            <div className="diff-file-header"><FileCode2 size={12} /><span>{diff.path}</span></div>
-            <pre className="diff-content">
-              {diff.text.split("\n").map((line, i) => (
-                <span key={i} className={`diff-line ${line.startsWith("+") ? "addition" : line.startsWith("-") ? "deletion" : ""}`}>{line || " "}</span>
-              ))}
-            </pre>
-          </div>
-        )}
       </div>
+      <DiffViewerModal target={diffTarget} onClose={() => setDiffTarget(null)} />
     </div>
   );
 }

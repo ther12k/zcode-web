@@ -1,7 +1,7 @@
 // UI primitives ported from the reference design (user-provided sample).
 import { useEffect, useRef, useState, type ReactNode, type ButtonHTMLAttributes } from "react";
 import { X, Check, LoaderCircle } from "lucide-react";
-import { safeMarkdown } from "./lib/markdown";
+import { RichMarkdown } from "./lib/richmarkdown";
 
 // Reactive CSS media query. Drives the shell's responsive behavior — the
 // navigation drawer exists below 1100px, the chat/inspector pane switch
@@ -68,10 +68,10 @@ export function Dialog({ title, subtitle, children, onClose, wide = false }: { t
   return <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}><div className={`dialog ${wide ? "dialog-wide" : ""}`} role="dialog" aria-modal="true" aria-label={title} ref={ref}><header className="dialog-header"><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div><IconButton label="Close dialog" onClick={onClose}><X size={18} /></IconButton></header>{children}</div></div>;
 }
 
-// ZWUI-015: fail-closed markdown — sanitized, plain-text fallback.
+// ZWUI-015: fail-closed markdown — sanitized, plain-text fallback; fenced
+// code renders as rich React blocks (header/copy/line numbers).
 export function Markdown({ text }: { text: string }) {
-  const { html, degraded } = safeMarkdown(text);
-  return <div className={`markdown ${degraded ? "is-degraded" : ""}`} dangerouslySetInnerHTML={{ __html: html }} />;
+  return <RichMarkdown text={text} />;
 }
 
 export function CheckMark({ className = "" }: { className?: string }) {
