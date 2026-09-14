@@ -17,6 +17,8 @@ type Analytics = {
   daily: { day: string; sessions: number }[];
   topSessions: { id: string; title: string; directory: string; updatedAt: number; tokens: number }[];
   generatedAt: number;
+  /** true when the snapshot is past its TTL and a rebuild is running */
+  stale?: boolean;
 };
 
 function fmt(n: number): string {
@@ -37,21 +39,32 @@ export function AnalyticsDialog({ open, onClose, onSelectSession, token }: {
 }) {
   const [data, setData] = useState<Analytics | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [pending, setPending] = useState(false);
 
+  // ZWUI-043 contract: 202 while the first snapshot builds on the server's
+  // worker thread (retry until ready), 503 on build failure, 200 otherwise —
+  // possibly a stale snapshot with a fresh rebuild in flight.
   useEffect(() => {
     if (!open) return;
-    setLoading(true);
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     setError(null);
-    fetch("/api/analytics?days=14", { headers: { authorization: `Bearer ${token}` } })
-      .then(async (r) => {
+    setPending(true);
+    const load = async () => {
+      try {
+        const r = await fetch("/api/analytics?days=14", { headers: { authorization: `Bearer ${token}` } });
+        if (!alive) return;
+        if (r.status === 202) { timer = setTimeout(load, 2500); return; }
         const j = await r.json();
         if (!r.ok) throw new Error(j.error || `analytics failed (${r.status})`);
-        return j as Analytics;
-      })
-      .then(setData)
-      .catch((e) => setError((e as Error).message))
-      .finally(() => setLoading(false));
+        setData(j as Analytics);
+        setPending(false);
+      } catch (e) {
+        if (alive) { setError((e as Error).message); setPending(false); }
+      }
+    };
+    void load();
+    return () => { alive = false; if (timer) clearTimeout(timer); };
   }, [open, token]);
 
   if (!open) return null;
@@ -62,10 +75,15 @@ export function AnalyticsDialog({ open, onClose, onSelectSession, token }: {
   return (
     <Dialog title="Workspace analytics." subtitle="Every number below is read from your sessions — nothing estimated." onClose={onClose} wide>
       <div className="dialog-body analytics-body">
-        {loading && <div className="analytics-loading"><Activity size={15} className="spin" />Aggregating telemetry…</div>}
+        {pending && <div className="analytics-loading"><Activity size={15} className="spin" />Building the first snapshot — this scan runs once, off the server's request path…</div>}
         {error && <div className="danger-text">{error}</div>}
-        {!loading && data && (
+        {!pending && data && (
           <>
+            {data.stale && (
+              <div className="analytics-stale" role="status">
+                Snapshot as of {new Date(data.generatedAt).toLocaleTimeString()} — refreshing in the background; numbers below are the last complete scan.
+              </div>
+            )}
             <div className="token-metrics analytics-grid">
               <div className="token-metric">
                 <span><Database size={13} className="cyan-text" />Sessions<b className="right">{data.sessions.toLocaleString()}</b></span>

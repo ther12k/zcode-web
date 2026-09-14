@@ -773,10 +773,18 @@ async function handleApi(req, res, url) {
   // additionally search message CONTENT through the sidecar FTS index, which
   // is built incrementally (bounded chunk per call) — results merge.
   // Workspace analytics from the CLI's own records (read-only aggregates).
+  // ZWUI-043 contract: 202 while the first build for this root set runs on
+  // the analytics worker; 503 when a build failed and no snapshot exists;
+  // 200 otherwise with `stale` + `generatedAt` (as-of) honesty flags.
   if (route === "/api/analytics" && req.method === "GET") {
     try {
       const days = Math.max(1, Math.min(Number(url.searchParams.get("days")) || 14, 60));
-      return sendJson(res, 200, store.analytics(ALLOWED_ROOTS, days));
+      const snap = store.requestAnalytics(ALLOWED_ROOTS, days);
+      if (!snap.data) {
+        if (snap.error) return sendJson(res, 503, { error: snap.error });
+        return sendJson(res, 202, { pending: true });
+      }
+      return sendJson(res, 200, { ...snap.data, generatedAt: snap.generatedAt, stale: snap.stale });
     } catch (e) {
       return sendJson(res, e.code === "DB_MISSING" ? 503 : 500, { error: e.message });
     }

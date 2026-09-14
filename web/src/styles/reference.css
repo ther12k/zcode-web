@@ -558,6 +558,7 @@ body.is-col-resizing .workspace-main{pointer-events:none}
 /* analytics dialog */
 .analytics-body{display:flex;flex-direction:column;gap:16px}
 .analytics-loading{display:flex;align-items:center;gap:8px;padding:30px 0;color:#8b8b94;font-size:11px;justify-content:center}
+.analytics-stale{border:1px solid #3a3323;background:#221f16;color:#c9b98a;font-size:11px;border-radius:8px;padding:7px 10px}
 .analytics-grid{grid-template-columns:repeat(4,1fr)}
 .analytics-section{border:1px solid #26272f;border-radius:8px;overflow:hidden}
 .analytics-bars{display:flex;align-items:flex-end;gap:6px;padding:12px 14px 8px;min-height:110px}

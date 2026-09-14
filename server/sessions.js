@@ -9,10 +9,16 @@ import { DatabaseSync } from "node:sqlite";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
+import { Worker } from "node:worker_threads";
+import { directoryScope } from "./directory-scope.js";
+import { sliceDaily } from "./analytics.js";
 
 // Analytics snapshots rebuild in the background at most this often — the
 // full token scan is far too heavy to run per request on a large store.
 const ANALYTICS_TTL_MS = 10 * 60_000;
+// after a FAILED build, wait this long before letting a request trigger
+// another one (a missing/broken DB would otherwise be re-scanned per request)
+const ANALYTICS_ERROR_RETRY_MS = 30_000;
 
 // Compact artifact summary for a tool part (shape: CLI 0.16.5
 // {type:"tool", tool, callID, state:{status, input, output…}}).
@@ -82,7 +88,12 @@ function timelineSummary(part) {
 export class SessionStore {
   constructor(dbPath) {
     this.dbPath = dbPath;
+    // analytics snapshot cache: { key, value | null, builtAt, error? }
+    // value === null means the last build failed and there is no data yet.
     this.analyticsCache = null;
+    this.analyticsInflight = new Set(); // keys with a build queued/running
+    this.analyticsWorker = null;
+    this.analyticsSeq = 0;
   }
 
   // ZWUI-018: query errors are surfaced, not swallowed. Missing DB is a
@@ -142,12 +153,13 @@ export class SessionStore {
   searchSessions(q, roots, limit = 20) {
     if (!roots.length) return [];
     const like = `%${q.replace(/[%_]/g, "!$&").replace(/'/g, "''")}%`;
+    const scope = directoryScope("directory", roots);
     const rows = this.query(
       `SELECT id, title, directory, time_updated FROM session
-        WHERE title LIKE ? ESCAPE '!' AND (${roots.map(() => "(directory = ? OR directory LIKE ? || '/%')").join(" OR ")})
+        WHERE title LIKE ? ESCAPE '!' AND ${scope.sql}
           AND id NOT LIKE 'sess_subagent_%'
         ORDER BY time_updated DESC LIMIT ?`,
-      [like, ...roots.flatMap((r) => [r, r]), limit]
+      [like, ...scope.params, limit]
     );
     return rows.map((r) => ({
       id: r.id, title: r.title, directory: r.directory,
@@ -156,11 +168,12 @@ export class SessionStore {
   }
 
   recentUnder(root, limit = 30) {
+    const scope = directoryScope("directory", [root]);
     return this.query(
       `SELECT id, title, directory, time_updated FROM session
-        WHERE (directory = ? OR directory LIKE ? || '/%') AND id NOT LIKE 'sess_subagent_%'
+        WHERE ${scope.sql} AND id NOT LIKE 'sess_subagent_%'
         ORDER BY time_updated DESC LIMIT ?`,
-      [root, root, limit]
+      [...scope.params, limit]
     ).map((r) => ({ id: r.id, title: r.title, directory: r.directory, updatedAt: Number(r.time_updated) }));
   }
 
@@ -168,11 +181,12 @@ export class SessionStore {
   // dialog's empty-state list ("show me my 50 most recent sessions").
   recent(roots, limit = 50) {
     if (!roots.length) return [];
+    const scope = directoryScope("directory", roots);
     return this.query(
       `SELECT id, title, directory, time_updated FROM session
-        WHERE id NOT LIKE 'sess_subagent_%' AND (${roots.map(() => "(directory = ? OR directory LIKE ? || '/%')").join(" OR ")})
+        WHERE id NOT LIKE 'sess_subagent_%' AND ${scope.sql}
         ORDER BY time_updated DESC LIMIT ?`,
-      [...roots.flatMap((r) => [r, r]), limit]
+      [...scope.params, limit]
     ).map((r) => ({ id: r.id, title: r.title, directory: r.directory, updatedAt: Number(r.time_updated) }));
   }
 
@@ -365,116 +379,81 @@ export class SessionStore {
 
   // Workspace-wide analytics from the CLI's own records: token sums from
   // step-finish parts, durations/status from turn_usage — no estimates.
-  analytics(roots, days = 14) {
-    const scoped = roots.length
-      ? `AND (${roots.map(() => "(s.directory = ? OR s.directory LIKE ? || '/%')").join(" OR ")})`
-      : "";
-    const params = roots.flatMap((r) => [r, r]);
-    // Performance: on a large store (hundreds of sessions, ~500k parts) full
-    // json_extract scans take minutes. This runs against a CACHED snapshot
-    // (see analyticsCache below) rebuilt in the background at most once per
-    // ANALYTICS_TTL_MS; callers always get the last good snapshot instantly.
-    const cached = this.getAnalyticsSnapshot(roots);
-    if (cached) return { ...cached.value, generatedAt: cached.builtAt, stale: false };
-    // no snapshot yet: build one synchronously (first call on this root set)
-    const snapshot = this.buildAnalyticsSnapshot(roots, days);
-    this.analyticsCache = { key: roots.join("|"), value: snapshot, builtAt: Date.now() };
-    return { ...snapshot, generatedAt: Date.now(), stale: true };
-  }
-
-  // Shared per-instance cache — a 94s cold query must never run per request.
-  getAnalyticsSnapshot(roots) {
+  //
+  // ZWUI-043: never blocks the API. The aggregation runs on a worker thread
+  // (server/analytics-worker.js) with its own read-only connection; this
+  // method returns the last good snapshot instantly — flagged stale when
+  // past its TTL — or { data: null } while the FIRST build for a root set
+  // is still running (the caller answers 202 and the client retries).
+  requestAnalytics(roots, days = 14) {
     const key = roots.join("|");
     const c = this.analyticsCache;
-    if (c && c.key === key && Date.now() - c.builtAt < ANALYTICS_TTL_MS) return c;
-    if (c && c.key === key) {
-      // expired: refresh in the background, serve stale meanwhile
-      if (!c.rebuilding) {
-        c.rebuilding = true;
-        setImmediate(() => {
-          try {
-            const value = this.buildAnalyticsSnapshot(roots, 14);
-            this.analyticsCache = { key, value, builtAt: Date.now() };
-          } catch { /* keep stale snapshot */ }
-        });
-      }
-      return c;
-    }
-    return null;
+    const now = Date.now();
+    const fresh = Boolean(c && c.key === key && c.value && !c.error && now - c.builtAt < ANALYTICS_TTL_MS);
+    const retryOk = !c || !c.error || now - c.builtAt > ANALYTICS_ERROR_RETRY_MS;
+    if (!fresh && retryOk) this.ensureAnalyticsBuild(key, roots);
+    if (!c || c.key !== key || !c.value) return { data: null, pending: true, error: c?.error || null };
+    const { dailyRaw, ...value } = c.value;
+    return {
+      data: { ...value, daily: sliceDaily(dailyRaw, days, now) },
+      generatedAt: c.builtAt,
+      stale: !fresh,
+    };
   }
 
-  buildAnalyticsSnapshot(roots, days = 14) {
-    const scoped = roots.length
-      ? `AND (${roots.map(() => "(s.directory = ? OR s.directory LIKE ? || '/%')").join(" OR ")})`
-      : "";
-    const params = roots.flatMap((r) => [r, r]);
-    const sessions = this.query(
-      `SELECT COUNT(*) AS n FROM session s WHERE 1=1 ${scoped}`,
-      params
-    )[0];
-    const totals = this.query(
-      `SELECT
-         COALESCE(SUM(json_extract(p.data, '$.tokens.total')), 0) AS tokens,
-         COUNT(*) AS steps
-       FROM part p JOIN session s ON s.id = p.session_id
-       WHERE json_extract(p.data, '$.type') = 'step-finish' ${scoped}`,
-      params
-    )[0];
-    const usage = this.query(
-      `SELECT
-         COUNT(*) AS turns,
-         COALESCE(SUM(u.duration_ms), 0) AS duration_ms,
-         COALESCE(SUM(CASE WHEN u.status = 'error' THEN 1 ELSE 0 END), 0) AS errors
-       FROM turn_usage u JOIN session s ON s.id = u.session_id ${scoped}`,
-      params
-    )[0];
-    // daily activity (sessions updated per day, last N days)
-    const daily = this.query(
-      `SELECT date(s.time_updated / 1000, 'unixepoch') AS day, COUNT(*) AS n
-         FROM session s WHERE 1=1 ${scoped}
-        GROUP BY day ORDER BY day DESC LIMIT ?`,
-      [...params, Math.max(1, Math.min(days, 60))]
-    );
-    // top sessions by committed tokens — computed from ONE grouped scan of
-    // the parts table (per-session correlated SUMs would rescan per session)
-    const top = this.query(
-      `SELECT s.id, s.title, s.directory, s.time_updated, t.tokens
-         FROM session s
-         JOIN (SELECT session_id, SUM(json_extract(data, '$.tokens.total')) AS tokens
-                 FROM part WHERE json_extract(data, '$.type') = 'step-finish'
-                GROUP BY session_id) t ON t.session_id = s.id
-       WHERE 1=1 ${scoped}
-       ORDER BY t.tokens DESC LIMIT 5`,
-      params
-    ).map((r) => ({
-      id: r.id,
-      title: r.title,
-      directory: r.directory,
-      updatedAt: Number(r.time_updated) || 0,
-      tokens: Number(r.tokens) || 0,
-    }));
-    // active sessions: reuse runInfo only over RECENT sessions (last 24h) —
-    // the correlated newest-message scan is O(sessions × messages) otherwise
-    const recentActive = this.query(
-      `SELECT s.id FROM session s
-        WHERE s.time_updated >= ${Date.now() - 24 * 3600_000} ${scoped}`,
-      params
-    ).map((r) => r.id);
-    let activeSessions = 0;
-    for (const id of recentActive) {
-      try { if (this.runInfo(id).active) activeSessions++; } catch { /* skip */ }
+  // One build at a time per root set; failures clear the in-flight marker
+  // (message AND worker error/exit paths) so later requests can retry.
+  ensureAnalyticsBuild(key, roots) {
+    if (this.analyticsInflight.has(key)) return;
+    this.analyticsInflight.add(key);
+    try {
+      this.analyticsWorker ||= this.spawnAnalyticsWorker();
+    } catch (e) {
+      this.analyticsInflight.delete(key);
+      console.error("[analytics] worker spawn failed:", e?.message || e);
+      return;
     }
-    return {
-      sessions: Number(sessions?.n) || 0,
-      tokens: Number(totals?.tokens) || 0,
-      steps: Number(totals?.steps) || 0,
-      turns: Number(usage?.turns) || 0,
-      agentTimeMs: Number(usage?.duration_ms) || 0,
-      failedTurns: Number(usage?.errors) || 0,
-      activeSessions,
-      daily: daily.map((r) => ({ day: r.day, sessions: Number(r.n) || 0 })),
-      topSessions: top,
+    const id = ++this.analyticsSeq;
+    const onMessage = (msg) => {
+      if (msg.id !== id) return;
+      this.analyticsWorker?.off("message", onMessage);
+      this.analyticsInflight.delete(key);
+      if (msg.error) {
+        // keep any stale snapshot visible; record the failure so the route
+        // can answer honestly and a retry happens after the backoff
+        if (this.analyticsCache?.key === key) this.analyticsCache.error = msg.error;
+        else this.analyticsCache = { key, value: null, builtAt: Date.now(), error: msg.error };
+        console.error("[analytics] rebuild failed:", msg.error);
+        return;
+      }
+      this.analyticsCache = { key, value: msg.value, builtAt: Date.now() };
     };
+    this.analyticsWorker.on("message", onMessage);
+    this.analyticsWorker.postMessage({ id, roots });
+  }
+
+  spawnAnalyticsWorker() {
+    const w = new Worker(new URL("./analytics-worker.js", import.meta.url), {
+      workerData: { dbPath: this.dbPath },
+    });
+    // never hold the process open for a background refresher: the HTTP
+    // server keeps the event loop alive in production, and a CLI/test run
+    // must be able to exit with the worker still idle
+    w.unref();
+    const down = (reason) => {
+      if (this.analyticsWorker !== w) return;
+      this.analyticsWorker = null;
+      // every pending build just died: release the keys, keep stale data
+      for (const k of this.analyticsInflight) {
+        if (this.analyticsCache?.key === k) this.analyticsCache.error = reason;
+        else this.analyticsCache = { key: k, value: null, builtAt: Date.now(), error: reason };
+      }
+      this.analyticsInflight.clear();
+      console.error("[analytics] worker down:", reason);
+    };
+    w.on("error", (err) => down(String(err?.message || err)));
+    w.on("exit", (code) => { if (code !== 0) down(`worker exited with code ${code}`); });
+    return w;
   }
 }
 
@@ -527,7 +506,7 @@ export class ContentSearchIndex {
       let through = this.#indexedThrough();
       const t0 = Date.now();
       if (through < total) {
-        const rootClauses = roots.map(() => "s.directory LIKE ? || '%'").join(" OR ");
+        const scope = directoryScope("s.directory", roots);
         const rows = source
           .prepare(
             `SELECT p.rowid AS rid, p.session_id AS sid, p.message_id AS mid,
@@ -535,10 +514,10 @@ export class ContentSearchIndex {
                FROM part p JOIN session s ON s.id = p.session_id
               WHERE p.rowid > ? AND p.rowid <= ?
                 AND json_extract(p.data, '$.type') = 'text'
-                AND (${rootClauses})
+                AND (${scope.sql})
               ORDER BY p.rowid LIMIT ?`
           )
-          .all(through, through + chunk, roots, chunk);
+          .all(through, through + chunk, scope.params, chunk);
         const ins = this.db.prepare("INSERT INTO parts_fts (text, session_id, message_id) VALUES (?, ?, ?)");
         this.db.exec("BEGIN");
         for (const r of rows) {
@@ -561,16 +540,16 @@ export class ContentSearchIndex {
     if (!this.#open()) return [];
     const phrase = q.replace(/"/g, '""').split(/\s+/).filter(Boolean).map((t) => `"${t}"`).join(" ");
     if (!phrase) return [];
-    const rootClauses = roots.map(() => "s.directory LIKE ? || '%'").join(" OR ");
+    const scope = directoryScope("s.directory", roots);
     return this.db
       .prepare(
         `SELECT DISTINCT s.id, s.title, s.directory, s.time_updated
            FROM parts_fts f JOIN session s ON s.id = f.session_id
           WHERE parts_fts MATCH ?
-            AND (${rootClauses})
+            AND ${scope.sql}
           ORDER BY s.time_updated DESC LIMIT ?`
       )
-      .all(phrase, ...roots, limit)
+      .all(phrase, ...scope.params, limit)
       .map((r) => ({ id: r.id, title: r.title, directory: r.directory, updatedAt: Number(r.time_updated) }));
   }
 

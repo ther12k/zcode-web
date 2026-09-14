@@ -790,3 +790,170 @@ async function collectDoneEvent(jobId) {
   assert.ok(done, "terminal stream must contain a done event");
   return done;
 }
+
+// ---- ZWUI-043/044: literal directory scope + non-blocking analytics ----
+describe("directory scope + analytics integrity", async () => {
+  const { SessionStore } = await import("../server/sessions.js");
+  const { DatabaseSync } = await import("node:sqlite");
+  const { computeAnalytics, sliceDaily } = await import("../server/analytics.js");
+
+  // synthetic store with tricky directory names: '_' looks like a LIKE
+  // wildcard, /ws/projXa/private is a sibling-prefix trap
+  const dir = mkdtempSync(join(tmpdir(), "zc-scope-"));
+  const dbPath = join(dir, "db.sqlite");
+  const now = Date.now();
+  {
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT);
+      CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, sequence INTEGER);
+      CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT, sequence INTEGER);
+      CREATE TABLE turn_usage (user_message_id TEXT, session_id TEXT, status TEXT, duration_ms INTEGER);
+    `);
+    const insSess = db.prepare("INSERT INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)");
+    const ROOTS = ["/ws/proj_a", "/ws/other"];
+    const sessDirs = {
+      "sess_in1": "/ws/proj_a",           // in root
+      "sess_in2": "/ws/proj_a/sub/deep",  // in root (nested)
+      "sib": "/ws/projXa/private",        // '_' wildcard trap — OUT
+      "pct": "/ws/projAb",                // would not match, but proves prefix exactness
+      "other1": "/ws/other",              // second root
+      "outside": "/ws/elsewhere/deep",    // genuinely outside every declared root
+    };
+    let i = 0;
+    for (const [id, directory] of Object.entries(sessDirs)) {
+      insSess.run(id, `title ${id}`, directory, now - i, now - i);
+      i++;
+    }
+    // a step-finish part + turn_usage row for token/duration aggregates
+    const insPart = db.prepare("INSERT INTO part (id, message_id, session_id, data, sequence) VALUES (?,?,?,?,?)");
+    insPart.run("p1", "m1", "sess_in1", JSON.stringify({ type: "step-finish", tokens: { total: 1500 } }), 0);
+    insPart.run("p2", "m2", "other1", JSON.stringify({ type: "step-finish", tokens: { total: 250 } }), 0);
+    db.prepare("INSERT INTO turn_usage (user_message_id, session_id, status, duration_ms) VALUES (?,?,?,?)")
+      .run("mu1", "sess_in1", "ok", 4000);
+    db.close();
+  }
+
+  it("ZWUI-044: scope predicates match roots literally (no LIKE wildcard or sibling leakage)", () => {
+    const store = new SessionStore(dbPath);
+    const underA = store.recentUnder("/ws/proj_a", 30);
+    assert.deepEqual(underA.map((s) => s.id).sort(), ["sess_in1", "sess_in2"],
+      "'_' in the root name must not widen the match to /ws/projXa/private");
+    const across = store.recent(["/ws/proj_a", "/ws/other"], 50);
+    assert.deepEqual(across.map((s) => s.id).sort(), ["other1", "sess_in1", "sess_in2"]);
+    const hits = store.searchSessions("title", ["/ws/proj_a"], 20);
+    assert.deepEqual(hits.map((s) => s.id).sort(), ["sess_in1", "sess_in2"]);
+  });
+
+  it("computeAnalytics scopes every aggregate and reports sessions/durations only inside roots", () => {
+    const store = new SessionStore(dbPath);
+    const snap = computeAnalytics((sql, params) => store.query(sql, params), ["/ws/proj_a"]);
+    assert.equal(snap.sessions, 2);
+    assert.equal(snap.tokens, 1500);
+    assert.equal(snap.turns, 1);
+    assert.equal(snap.agentTimeMs, 4000);
+    assert.equal(snap.topSessions.length, 1);
+    assert.equal(snap.topSessions[0].tokens, 1500);
+  });
+
+  it("sliceDaily fills the last N CALENDAR days with zeros (not the N most recent active days)", () => {
+    const q = (sql) => { void sql; return []; };
+    void q;
+    const today = new Date().toISOString().slice(0, 10);
+    const tenDaysAgo = new Date(Date.now() - 10 * 24 * 3600_000).toISOString().slice(0, 10);
+    const daily = sliceDaily([{ day: today, sessions: 3 }, { day: tenDaysAgo, sessions: 9 }], 7);
+    assert.equal(daily.length, 7);
+    assert.equal(daily[6].day, today);
+    assert.equal(daily[6].sessions, 3);
+    // the 10-day-old activity falls OUTSIDE the 7-day window entirely
+    assert.ok(!daily.some((d) => d.day === tenDaysAgo));
+    assert.ok(daily.slice(0, 6).every((d) => d.sessions === 0), "inactive days are zero-filled");
+  });
+
+  // Cache semantics with the real worker on a real (synthetic) DB.
+  const store = new SessionStore(dbPath);
+  const ROOTS = ["/ws/proj_a", "/ws/other"];
+
+  it("ZWUI-043: cold request returns pending without blocking, then the worker delivers", async () => {
+    const t0 = Date.now();
+    const first = store.requestAnalytics(ROOTS, 14);
+    const coldMs = Date.now() - t0;
+    assert.equal(first.data, null, "cold request must not block on the build");
+    assert.ok(coldMs < 250, `cold request took ${coldMs}ms — aggregation leaked onto the event loop`);
+    // the API event loop stays responsive WHILE the worker crunches: the
+    // live test server answers health mid-build
+    const h0 = Date.now();
+    const hr = await fetch(`${BASE}/api/health`, { headers: auth });
+    assert.equal(hr.status, 200);
+    assert.ok(Date.now() - h0 < 500, "health check blocked during background aggregation");
+    // the build completes on the worker and the same request path serves it
+    let result = null;
+    for (let i = 0; i < 300 && !result; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      const r2 = store.requestAnalytics(ROOTS, 14);
+      if (r2.data) result = r2;
+    }
+    assert.ok(result, "worker build never completed");
+    assert.equal(result.data.sessions, 3); // sess_in1, sess_in2, other1
+    assert.equal(result.data.tokens, 1750);
+    assert.equal(result.stale, false);
+    assert.ok(result.generatedAt > 0, "as-of time is reported");
+    assert.equal(result.data.daily.length, 14);
+  });
+
+  it("ZWUI-043: cached snapshot serves fresh; past TTL serves stale and retriggers the build", async () => {
+    const c = store.analyticsCache;
+    assert.ok(c && c.value);
+    const first = store.requestAnalytics(ROOTS, 7);
+    assert.equal(first.stale, false);
+    assert.equal(first.data.daily.length, 7, "days is a serve-time slice, not a rebuild key");
+    // age the snapshot past its TTL
+    c.builtAt = Date.now() - 11 * 60_000;
+    const second = store.requestAnalytics(ROOTS, 14);
+    assert.equal(second.stale, true, "expired snapshot must be flagged stale, not silently fresh");
+    assert.equal(second.generatedAt, c.builtAt, "as-of time is the build time");
+    // the rebuild was triggered (in-flight) and completes cleanly
+    assert.ok(store.analyticsInflight.has(c.key));
+    let rebuilt = false;
+    for (let i = 0; i < 300 && !rebuilt; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      rebuilt = store.requestAnalytics(ROOTS, 14).stale === false;
+    }
+    assert.ok(rebuilt, "expired snapshot was not refreshed");
+  });
+
+  it("ZWUI-043: a failed build with existing data keeps serving it; recovery retries and clears the error", async () => {
+    const c = store.analyticsCache;
+    c.builtAt = Date.now() - 11 * 60_000; // expire
+    // first expired request schedules a rebuild; fail it by killing the worker
+    store.requestAnalytics(ROOTS, 14);
+    const w = store.analyticsWorker;
+    await w.terminate();
+    w.emit("exit", 1);
+    assert.equal(store.analyticsInflight.size, 0, "worker death must release the in-flight build");
+    // the stale snapshot still serves (flagged), and a new request may retry
+    const served = store.requestAnalytics(ROOTS, 14);
+    assert.equal(served.data === null, false, "stale data must survive a failed rebuild");
+    // recovery: a fresh worker rebuilds and the snapshot goes back to fresh
+    let recovered = false;
+    for (let i = 0; i < 300 && !recovered; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      recovered = store.requestAnalytics(ROOTS, 14).stale === false;
+    }
+    assert.ok(recovered, "store never recovered after worker death");
+    assert.equal(store.requestAnalytics(ROOTS, 14).data.sessions, 3);
+  });
+
+  it("ZWUI-043: build failure with NO prior data answers pending+error, never fake empties", async () => {
+    const broken = new SessionStore(join(dir, "does-not-exist.sqlite"));
+    const r = broken.requestAnalytics(ROOTS, 14);
+    assert.equal(r.data, null);
+    let err = null;
+    for (let i = 0; i < 100 && !err; i++) {
+      await new Promise((res) => setTimeout(res, 100));
+      err = broken.requestAnalytics(ROOTS, 14).error;
+    }
+    assert.ok(err, "the build failure must surface");
+    assert.match(err, /not found/i);
+  });
+});
