@@ -1,6 +1,9 @@
 // ZWUI-024: browser integration tests against the reference-style UI.
 import { test, expect } from "@playwright/test";
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const TOKEN = "e2e-token";
 
@@ -591,4 +594,147 @@ test("analytics dialog shows honest aggregates from /api/analytics", async ({ pa
   await dialog.locator(".analytics-row").click();
   await expect(page).toHaveURL(/.*sess_top1/);
   await expect(dialog).toBeHidden();
+});
+
+// ---- ZWUI-040/041/042: run-identity correctness ----
+
+test("ZWUI-040: Stop shows cancelled in the browser AND /api/jobs agrees", async ({ page }) => {
+  const input = page.getByLabel("Message Zcode");
+  const chatRespPromise = page.waitForResponse(
+    (r) => r.url().endsWith("/api/chat") && r.request().method() === "POST" && r.status() === 202
+  );
+  await input.fill("wait a while before finishing");
+  await input.press("Enter");
+  const { jobId } = await (await chatRespPromise).json();
+  // the run is busy: the composer shows the stop affordance
+  await expect(page.getByLabel("Stop run")).toBeVisible({ timeout: 8000 });
+  await page.getByLabel("Stop run").click();
+  // the browser reaches cancelled (the authoritative done event, not an
+  // exitCode-derived "failed" — the fake CLI dies by signal, exitCode null)
+  await expect(page.locator(".message-duration")).toHaveText(/cancelled/, { timeout: 15_000 });
+  // …and the authoritative job record agrees
+  const st = await page.request.get(`/api/jobs/${jobId}`, {
+    headers: { authorization: `Bearer ${TOKEN}` },
+  });
+  assert.equal(st.status(), 200);
+  assert.equal((await st.json()).status, "cancelled");
+});
+
+test("ZWUI-042: a held job-status response for run A cannot finalize run B", async ({ page }) => {
+  const input = page.getByLabel("Message Zcode");
+  // A: completes fast — its status poll at +5s will report succeeded
+  const respAPromise = page.waitForResponse(
+    (r) => r.url().endsWith("/api/chat") && r.request().method() === "POST" && r.status() === 202
+  );
+  await input.fill("race probe A");
+  await input.press("Enter");
+  const { jobId: jobIdA } = await (await respAPromise).json();
+  await expect(page.locator(".agent-message")).toContainText("echo:race probe A", { timeout: 20_000 });
+
+  // hold A's /api/jobs status response after it has been fetched
+  let held = 0;
+  let releaseA: () => void = () => {};
+  const gate = new Promise<void>((res) => { releaseA = res; });
+  await page.route(new RegExp(`/api/jobs/${jobIdA}$`), async (route) => {
+    held += 1;
+    const resp = await route.fetch();
+    await gate;
+    await route.fulfill({ response: resp });
+  });
+  // A's reconciliation poll ticks at +5s — wait until its request is held
+  await expect.poll(() => held, { timeout: 12_000 }).toBeGreaterThan(0);
+
+  // switch to B while A's response is frozen in flight
+  await page.locator(".new-task-button").click();
+  const respBPromise = page.waitForResponse(
+    (r) => r.url().endsWith("/api/chat") && r.request().method() === "POST" && r.status() === 202
+  );
+  await input.fill("B wait a while before finishing");
+  await input.press("Enter");
+  const { jobId: jobIdB } = await (await respBPromise).json();
+  assert.notEqual(jobIdA, jobIdB);
+  await expect(page.locator(".working-message").first()).toBeVisible({ timeout: 8000 });
+
+  // release A's succeeded status on top of B's active run
+  releaseA();
+  await page.waitForTimeout(1500);
+  // B must STILL be running — A's terminal status never applied to it
+  await expect(page.locator(".working-message").first()).toBeVisible();
+  await expect(page.getByLabel("Send message")).toBeDisabled();
+  // cleanup: free the slow B job so other tests keep their job slots
+  await page.request.post(`/api/jobs/${jobIdB}/cancel`, { headers: { authorization: `Bearer ${TOKEN}` } });
+  await expect(page.locator(".message-duration")).toHaveText(/cancelled/, { timeout: 15_000 });
+});
+
+test("ZWUI-041: retry after an ambiguous send reuses the request id and adopts the same job", async ({ page }) => {
+  const requestIds: string[] = [];
+  let poisoned = false;
+  await page.route(/\/api\/chat$/, async (route) => {
+    requestIds.push((route.request().postDataJSON() as { requestId?: string }).requestId || "");
+    if (!poisoned) {
+      // the request DOES reach the server (job accepted) but the browser
+      // sees a gateway failure — the classic ambiguous delivery
+      poisoned = true;
+      await route.fetch();
+      await route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ error: "simulated bad gateway" }) });
+      return;
+    }
+    const resp = await route.fetch();
+    await route.fulfill({ response: resp });
+  });
+  const input = page.getByLabel("Message Zcode");
+  await input.fill("retry identity probe");
+  await input.press("Enter");
+  // submit-failed is honest: delivery failed, the run may exist server-side
+  await expect(page.getByRole("button", { name: /Retry sending/ })).toBeVisible({ timeout: 8000 });
+  await page.getByRole("button", { name: /Retry sending/ }).click();
+  // the retry adopts the ORIGINAL job (replayed idempotent acceptance) —
+  // exactly one CLI run happened, and its answer streams into this view
+  await expect(page.locator(".agent-message")).toContainText("echo:retry identity probe", { timeout: 20_000 });
+  assert.equal(requestIds.length, 2);
+  assert.equal(requestIds[0], requestIds[1], "retry must reuse the same idempotency key");
+});
+
+test("ZWUI-041: run-again on an old prompt leaves the current draft and its attachment alone", async ({ page }) => {
+  // a committed user turn in history (transcript mocked — the fake CLI does
+  // not write the session store)
+  await page.route(/\/api\/sessions\/sess_.+\?limit=/, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        session: { id: "sess_rerun000000000000000000000000", title: "rerun probe" },
+        runActive: false,
+        transcript: [{ id: "msg_rerun_u1", role: "user", text: "rerun original prompt", createdAt: Date.now() - 60_000 }],
+        total: 1,
+        hasMore: false,
+      }),
+    })
+  );
+  await page.goto("/w/default/s/sess_rerun000000000000000000000000");
+  await page.waitForLoadState("domcontentloaded");
+  const originalBlock = page.locator(".user-message-block", { hasText: "rerun original prompt" }).first();
+  await expect(originalBlock.getByLabel("Run this prompt again")).toBeVisible({ timeout: 8000 });
+
+  // a NEW draft with an attachment — the rerun must not consume either
+  const input = page.getByLabel("Message Zcode");
+  await input.fill("follow-up draft that must survive");
+  const tmpFile = join(tmpdir(), `e2e-attach-${Date.now()}.txt`);
+  writeFileSync(tmpFile, "attachment payload");
+  await page.setInputFiles("input[type=file]", tmpFile);
+  await expect(page.locator(".attached-file")).toHaveCount(1);
+
+  const bodies: any[] = [];
+  await page.route(/\/api\/chat$/, async (route) => {
+    bodies.push(route.request().postDataJSON());
+    await route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ error: "no need to run" }) });
+  });
+  await originalBlock.getByLabel("Run this prompt again").click();
+  await page.waitForTimeout(600);
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0].text, "rerun original prompt");
+  assert.ok(!bodies[0].attachments, "a historical rerun carries no composer attachments");
+  // draft text + attachment chip are exactly where the user left them
+  await expect(input).toHaveValue("follow-up draft that must survive");
+  await expect(page.locator(".attached-file")).toHaveCount(1);
 });

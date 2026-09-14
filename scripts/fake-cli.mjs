@@ -96,6 +96,11 @@ const timer = (ms) => new Promise((r) => setTimeout(r, ms));
     process.exit(0);
   }
   emit("model.streaming", { assistantMessageId: "m1", delta: `echo:${prompt}`, done: false, kind: "text_delta" });
+  // "wait a while" keeps the process alive so tests can exercise Stop:
+  // SIGTERM (node's default disposition ends it) → close(null, SIGTERM)
+  if (/\bwait a while\b/i.test(prompt)) {
+    await timer(30_000);
+  }
   if (mode === "fail") {
     emit("session.updated", { type: "model_request_failed" });
     emit("turn.failed", { error: { type: "unknown_error", message: "fake failure" }, turnPhase: "processing_input" });

@@ -16,6 +16,20 @@ import { AgentTerminalDrawer, TokenTelemetryDialog, type TerminalEntry } from ".
 // One pending attachment: uploaded path for --attach plus the local File for
 // in-composer preview (object URL created lazily, revoked on removal)
 type Attachment = { name: string; path: string; file?: File; previewUrl?: string };
+
+// ZWUI-041: the exact request this panel last tried to submit. Retry reuses
+// it verbatim (same idempotency key, same payload); rerun deliberately makes
+// a NEW execution from it; neither ever borrows the live composer state.
+type SubmittedRequest = {
+  requestId: string;
+  text: string;
+  attachments: string[];
+  sessionId: string | null;
+  cwd: string;
+  mode: string;
+  model: string;
+};
+
 type PreviewState =
   | { kind: "image"; title: string; src: string }
   | { kind: "pdf"; title: string; src: string }
@@ -174,6 +188,7 @@ export function ChatPanel({
   // re-select reload) changes
   useEffect(() => {
     let alive = true;
+    sessionEpochRef.current += 1;
     if (!sessionId) { setHistory({ turns: [], total: 0, hasMore: false }); setHistoryLoading(false); setExternalActive(false); return; }
     // selecting a session: clear the previous view, show a loader until the
     // transcript arrives, and re-arm follow-mode (the reader may have scrolled
@@ -258,6 +273,12 @@ export function ChatPanel({
   // itself keeps running server-side) — except when the run just created the
   // session we are navigating to, so a fresh chat keeps its live stream
   const activeJob = useRef<string | null>(null);
+  // the last submission attempt (ZWUI-041) — retry/rerun derive from THIS
+  // record, never from whatever currently sits in the composer
+  const lastRequestRef = useRef<SubmittedRequest | null>(null);
+  // bumped on every session change; async history reads validate their epoch
+  // after each await so a slow page can never land in the wrong conversation
+  const sessionEpochRef = useRef(0);
   // the view identity a run was submitted under ("new" for a fresh chat);
   // adoption re-points it at the created session so the URL catching up is
   // not mistaken for a switch. undefined = no run attached to this view.
@@ -536,8 +557,12 @@ export function ChatPanel({
         if (performance.now() < deadline) settle(deadline);
       });
     };
+    const epoch = sessionEpochRef.current;
     try {
       const d = await client.session(sessionId, 10, history.turns.length);
+      // the reader may have switched conversations while the page was in
+      // flight — a stale prepend must never land in the new view
+      if (sessionEpochRef.current !== epoch) return;
       setHistory((h) => ({ turns: [...d.transcript, ...h.turns], total: d.total, hasMore: d.hasMore }));
       settle();
     } catch (e) {
@@ -553,28 +578,37 @@ export function ChatPanel({
   }, [run.jobId, client, onNotify]);
   stopRunRef.current = stopRun;
 
-  const send = useCallback(async (overrideText?: string) => {
+  // Core submission (ZWUI-041): always from an immutable SubmittedRequest —
+  // never read the composer here, so a rerun/retry cannot mix old text with
+  // the current draft's attachments. `clearDraft` is true ONLY when the
+  // payload IS the composer's content.
+  const execute = useCallback(async (req: SubmittedRequest, opts: { clearDraft: boolean }) => {
     if (busy || uploading > 0 || !providerLive) return;
-    const text = (overrideText ?? input).trim();
-    if (!text && !attachments.length) return;
-    const requestId = randomUUID();
-    const submitView = sessionId ?? "new";
+    lastRequestRef.current = req;
+    const submitView = req.sessionId ?? "new";
     runViewKey.current = submitView;
-    dispatch({ type: "submit", requestId, text: overrideText ?? input });
+    dispatch({ type: "submit", requestId: req.requestId, text: req.text });
     try {
       const accepted = await client.chat({
-        text: text || "Analyze the attached file(s).",
-        sessionId, cwd, mode, model: model || undefined,
-        attachments: attachments.length ? attachments.map((a) => a.path) : undefined,
-        requestId,
+        text: req.text || "Analyze the attached file(s).",
+        sessionId: req.sessionId, cwd: req.cwd, mode: req.mode, model: req.model || undefined,
+        attachments: req.attachments.length ? req.attachments : undefined,
+        requestId: req.requestId,
       });
       // the user may have switched views (or hit New chat) while the POST
       // was in flight — a detached panel must not adopt this job
       if (runViewKey.current !== submitView) return;
-      dispatch({ type: "accepted", jobId: accepted.jobId, sessionId: accepted.sessionId ?? sessionId });
+      dispatch({ type: "accepted", jobId: accepted.jobId, sessionId: accepted.sessionId ?? req.sessionId });
       activeJob.current = accepted.jobId;
-      setInput(""); setAttachments([]);
-      if (accepted.sessionId && accepted.sessionId !== sessionId) onSessionCreated?.(accepted.sessionId);
+      if (opts.clearDraft) { setInput(""); setAttachments([]); }
+      if (accepted.sessionId && accepted.sessionId !== req.sessionId) {
+        // the accepted job already knows its session (e.g. a replayed
+        // idempotent adoption) — re-point this view BEFORE surfacing the
+        // navigation, or the URL catching up reads as a view switch and
+        // detaches the run that just landed
+        runViewKey.current = accepted.sessionId;
+        onSessionCreated?.(accepted.sessionId);
+      }
       const controller = new StreamController(client, accepted.jobId, {
         onEvents: (events: StoredEvent[]) => { if (activeJob.current === accepted.jobId) dispatch({ type: "events", events }); },
         onAttached: () => { if (activeJob.current === accepted.jobId) dispatch({ type: "stream-attached" }); },
@@ -590,7 +624,11 @@ export function ChatPanel({
         if (activeJob.current !== accepted.jobId) { clearInterval(poll); pollRef.current = null; return; }
         try {
           const st = await client.job(accepted.jobId);
-          dispatch({ type: "job-status", status: st.status as never });
+          // the view may have switched WHILE the request was in flight —
+          // identity is re-checked after every await, and the action still
+          // carries the job id so the reducer rejects stale applications
+          if (activeJob.current !== accepted.jobId) return;
+          dispatch({ type: "job-status", jobId: accepted.jobId, status: st.status as never });
           if (["succeeded", "failed", "cancelled", "timeout"].includes(st.status)) { clearInterval(poll); pollRef.current = null; }
         } catch { /* transient */ }
       }, 5000);
@@ -600,7 +638,65 @@ export function ChatPanel({
         dispatch({ type: "submit-failed", error: e instanceof ApiError ? e.message : String(e) });
       }
     }
-  }, [busy, uploading, input, attachments, client, sessionId, cwd, mode, model, providerLive, onSessionCreated]);
+  }, [busy, uploading, providerLive, client, onSessionCreated]);
+
+  // composer send: the submitted record IS the draft
+  const send = useCallback(() => {
+    const text = input.trim();
+    if (!text && !attachments.length) return;
+    void execute({
+      requestId: randomUUID(),
+      text,
+      attachments: attachments.map((a) => a.path),
+      sessionId, cwd, mode, model: model || "",
+    }, { clearDraft: true });
+  }, [input, attachments, sessionId, cwd, mode, model, execute]);
+
+  // ambiguous delivery: the POST threw, so the server may have already
+  // accepted the request. Reuse the SAME request id and exact payload — the
+  // server's idempotency key adopts the accepted job (or starts it once).
+  const retryDelivery = useCallback(() => {
+    const req = lastRequestRef.current;
+    if (!req || req.requestId !== run.requestId) return;
+    void execute(req, { clearDraft: false });
+  }, [run.requestId, execute]);
+
+  // deliberate new execution after a terminal failure: NEW request identity,
+  // exact original payload — the server replaying the dead job would be
+  // useless, so a fresh id starts a fresh run
+  const retryFailedRun = useCallback(() => {
+    const req = lastRequestRef.current;
+    const same = req && req.requestId === run.requestId;
+    void execute({
+      requestId: randomUUID(),
+      text: same ? req.text : run.submittedText,
+      attachments: same ? req.attachments : [],
+      sessionId: same ? req.sessionId : sessionId,
+      cwd: same ? req.cwd : cwd,
+      mode: same ? req.mode : mode,
+      model: same ? req.model : (model || ""),
+    }, { clearDraft: false });
+  }, [run.requestId, run.submittedText, sessionId, cwd, mode, model, execute]);
+
+  // "Run again" on a historical prompt: a new execution of THAT text — no
+  // borrow of the composer's attachments, and the draft stays untouched
+  const runAgain = useCallback((text: string) => {
+    void execute({
+      requestId: randomUUID(),
+      text,
+      attachments: [],
+      sessionId, cwd, mode, model: model || "",
+    }, { clearDraft: false });
+  }, [sessionId, cwd, mode, model, execute]);
+
+  // "Edit and resend" loads a historical prompt into the composer — an
+  // explicit replace of the draft, surfaced to the user when one existed
+  const editResend = useCallback((text: string) => {
+    const hadDraft = input.trim().length > 0 && input.trim() !== text.trim();
+    setInput(text);
+    textarea.current?.focus();
+    if (hadDraft) onNotify("Loaded this prompt into the composer — your draft was replaced.");
+  }, [input, onNotify]);
 
   // models grouped by provider in server order (same-provider models are adjacent)
   const modelGroups = useMemo(() => {
@@ -801,10 +897,10 @@ export function ChatPanel({
                   <IconButton label="Copy prompt" onClick={() => void copyText(`u${i}`, t.text)}>
                     {copied === `u${i}` ? <Check size={12} /> : <Copy size={12} />}
                   </IconButton>
-                  <IconButton label="Edit and resend this prompt" onClick={() => { setInput(t.text); textarea.current?.focus(); }}>
+                  <IconButton label="Edit and resend this prompt" onClick={() => editResend(t.text)}>
                     <SquarePen size={12} />
                   </IconButton>
-                  <IconButton label="Run this prompt again" disabled={busy} onClick={() => void send(t.text)}>
+                  <IconButton label="Run this prompt again" disabled={busy} onClick={() => runAgain(t.text)}>
                     <RotateCcw size={12} />
                   </IconButton>
                 </span>
@@ -935,8 +1031,14 @@ export function ChatPanel({
             {run.error && <div className="danger-text">{run.error}</div>}
             {run.error && isTerminal(run.phase) && run.submittedText && !busy && (
               <div className="message-footer">
-                <button className="retry-button" onClick={() => void send(run.submittedText)}>
-                  <RotateCcw size={12} />Retry this prompt
+                <button
+                  className="retry-button"
+                  onClick={run.submitFailed ? retryDelivery : retryFailedRun}
+                  title={run.submitFailed
+                    ? "The send never confirmed — retry reuses the same request so the server cannot run it twice"
+                    : "Run this prompt again"}
+                >
+                  <RotateCcw size={12} />{run.submitFailed ? "Retry sending" : "Retry this prompt"}
                 </button>
               </div>
             )}
@@ -1062,7 +1164,7 @@ export function ChatPanel({
                 if (e.key === "Escape") { e.preventDefault(); setCmdDismissed(true); return; }
               }
               // Shift+Tab stays native (reverse focus navigation); IME-safe Enter
-              if (e.key === "Enter" && !e.shiftKey && !(e.nativeEvent as KeyboardEvent).isComposing) { e.preventDefault(); void send(); }
+              if (e.key === "Enter" && !e.shiftKey && !(e.nativeEvent as KeyboardEvent).isComposing) { e.preventDefault(); send(); }
             }}
           />
           <div className="composer-toolbar">
@@ -1126,7 +1228,7 @@ export function ChatPanel({
                 disabled={busy || uploading > 0 || !providerLive || (!input.trim() && !attachments.length)}
                 aria-label="Send message"
                 title={!providerLive ? "No model provider is configured on this host" : "Send message (Enter)"}
-                onClick={() => void send()}
+                onClick={() => send()}
               >
                 {busy ? <LoaderCircle size={16} className="spin" /> : <ArrowUp size={17} strokeWidth={2.2} />}
               </button>

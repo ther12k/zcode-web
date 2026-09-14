@@ -68,6 +68,8 @@ class Job {
     // queued -> running -> stopping -> (succeeded | failed | cancelled | timeout)
     this.status = "queued";
     this.timedOut = false;
+    this.cancelRequested = false;
+    this.killSignal = null;
     this.hasTurnFailed = false;
     this.createdAt = Date.now();
     this.startedAt = null;
@@ -279,7 +281,21 @@ export class JobManager {
       } else {
         job.setStatus("succeeded");
       }
-      record({ kind: "done", exitCode, error: job.error, sessionId: job.sessionId, stderrTail: job.stderrTail });
+      // ZWUI-040: the terminal event carries the AUTHORITATIVE job status —
+      // the browser must not re-derive cancelled/failed/succeeded from
+      // exitCode and error (a cancelled run closes with exitCode null and
+      // a graceful post-cancel exit can be 0; both are still cancelled)
+      record({
+        kind: "done",
+        exitCode,
+        error: job.error,
+        sessionId: job.sessionId,
+        stderrTail: job.stderrTail,
+        status: job.status,
+        timedOut: job.timedOut,
+        cancelRequested: job.cancelRequested,
+        killSignal: job.killSignal,
+      });
       clearTimeout(timer);
       // terminal jobs stay addressable (status + replay) for a window
       setTimeout(() => {
@@ -298,7 +314,8 @@ export class JobManager {
     timer.unref();
 
     proc.on("error", (err) => finish(null, err));
-    proc.on("close", (code) => {
+    proc.on("close", (code, signal) => {
+      if (signal) job.killSignal = signal;
       if (job.timedOut) finish(code, null);
       else finish(code);
     });
@@ -313,6 +330,7 @@ export class JobManager {
     const job = this.jobs.get(jobId);
     if (!job || TERMINAL.has(job.status)) return false;
     if (job.status === "stopping") return true;
+    job.cancelRequested = true;
     job.setStatus("stopping");
     try {
       job.proc.kill("SIGTERM");

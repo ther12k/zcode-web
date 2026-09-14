@@ -6,6 +6,12 @@
 //  - Events are append-only (immutable event store); render state is derived.
 //  - Losing the stream must NOT imply completion — only `done`/`timeout`
 //    events (or /api/jobs/:id confirming a terminal status) finalize a run.
+//  - The terminal `done` event carries the server's AUTHORITATIVE status
+//    (ZWUI-040). exitCode/error are only a fallback for pre-contract servers:
+//    a cancelled run exits with code null (looks "failed") and a graceful
+//    post-cancel exit can be 0 (looks "succeeded") — neither may be derived.
+//  - Reconciliation actions carry the job id; a late response for another
+//    job never applies to the run currently attached to the view.
 
 export type RunPhase =
   | "idle"          // no job for this session
@@ -24,6 +30,11 @@ export type StoredEvent = {
   exitCode?: number | null;
   error?: string | null;
   sessionId?: string | null;
+  /** authoritative terminal job status (ZWUI-040 done contract) */
+  status?: string;
+  timedOut?: boolean;
+  cancelRequested?: boolean;
+  killSignal?: string | null;
 };
 
 export type RunState = {
@@ -38,6 +49,8 @@ export type RunState = {
   /** the prompt as typed — echoed instantly until the transcript commits it */
   submittedText: string;
   submittedAt: number;
+  /** the POST itself failed — delivery is ambiguous; retry must reuse the request id */
+  submitFailed: boolean;
   error: string | null;
   activity: string;
   reasoning: string;
@@ -48,7 +61,7 @@ export function initialRun(): RunState {
   return {
     jobId: null, phase: "idle", requestId: null, sessionId: null,
     events: [], lastEventId: 0, streamAttached: false, transportLost: false,
-    submittedText: "", submittedAt: 0,
+    submittedText: "", submittedAt: 0, submitFailed: false,
     error: null, activity: "", reasoning: "", answer: "",
   };
 }
@@ -67,7 +80,7 @@ type Action =
   | { type: "stream-detached" }                // transport lost — run continues
   | { type: "stream-lost"; error: string }     // transport reconnect exhausted — run continues, awaits job reconciliation
   | { type: "events"; events: StoredEvent[] }  // batch (replay or live)
-  | { type: "job-status"; status: RunPhase; timedOut?: boolean } // from /api/jobs
+  | { type: "job-status"; jobId: string; status: RunPhase } // from /api/jobs — identity-checked
   | { type: "reset" };
 
 function applyEvent(run: RunState, ev: StoredEvent): RunState {
@@ -104,9 +117,14 @@ function applyEvent(run: RunState, ev: StoredEvent): RunState {
       return next;
     }
     case "done": {
-      next.phase = ev.exitCode === 0 && !ev.error ? "succeeded" : "failed";
-      if (ev.error) next.error = ev.error;
-      if (!next.answer && !ev.error && next.activity === "") next.activity = "done";
+      // authoritative status wins; exitCode derivation is a legacy fallback
+      const authoritative = ev.status && (TERMINAL as string[]).includes(ev.status)
+        ? ev.status as RunPhase
+        : null;
+      next.phase = authoritative ?? (ev.exitCode === 0 && !ev.error ? "succeeded" : "failed");
+      if (ev.error && (next.phase === "failed" || next.phase === "timeout")) next.error = ev.error;
+      if (next.phase === "cancelled") next.activity = next.activity || "stopped";
+      else if (!next.answer && !ev.error && next.activity === "") next.activity = "done";
       return next;
     }
     case "timeout":
@@ -138,9 +156,12 @@ export function runReducer(run: RunState, action: Action): RunState {
         phase: "queued",
         jobId: action.jobId,
         sessionId: action.sessionId ?? run.sessionId,
+        submitFailed: false,
       };
     case "submit-failed":
-      return { ...run, phase: "failed", error: action.error, activity: "error: " + action.error };
+      // the POST never confirmed — the server may or may not have accepted
+      // the request; retry keeps the SAME request id (ZWUI-041)
+      return { ...run, phase: "failed", submitFailed: true, error: action.error, activity: "error: " + action.error };
     case "stream-attached":
       return { ...run, streamAttached: true, transportLost: false };
     case "stream-detached":
@@ -156,6 +177,9 @@ export function runReducer(run: RunState, action: Action): RunState {
       return next;
     }
     case "job-status": {
+      // identity: a late /api/jobs response for ANOTHER job (the view was
+      // switched mid-request) must never touch this run
+      if (!run.jobId || action.jobId !== run.jobId) return run;
       // authoritative reconciliation: only move a non-terminal run, and only
       // onto the server's terminal state
       if (isTerminal(run.phase)) return run;

@@ -1020,9 +1020,13 @@ async function handleApi(req, res, url) {
 
     const terminal = job.status && TERMINAL_STATUS.has(job.status);
     if (terminal) {
-      // ensure `done` is always the last event on a completed stream
+      // ensure `done` is always the last event on a completed stream — with
+      // the same authoritative contract as the live terminal event
       if (!job.lines.some((e) => e.kind === "done")) {
-        write({ kind: "done", exitCode: job.exitCode, error: job.error, sessionId: job.sessionId });
+        write({
+          kind: "done", exitCode: job.exitCode, error: job.error, sessionId: job.sessionId,
+          status: job.status, timedOut: job.timedOut, cancelRequested: job.cancelRequested, killSignal: job.killSignal,
+        });
       }
       return res.end();
     }

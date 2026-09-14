@@ -740,5 +740,53 @@ describe("ZPAR-005 & ZPAR-008: Concurrency, idempotency conflict, and job cancel
       await new Promise((res) => setTimeout(res, 100));
     }
     assert.equal(status, "cancelled");
+
+    // ZWUI-040: the SSE `done` event carries the AUTHORITATIVE status —
+    // /api/jobs and the stream must agree (exitCode is null here; the legacy
+    // derivation read that as "failed")
+    const done = await collectDoneEvent(jobId);
+    assert.equal(done.status, "cancelled");
+    assert.equal(done.cancelRequested, true);
+  });
+
+  it("ZWUI-040: a graceful exit(0) AFTER cancellation still terminates cancelled (done carries status)", async () => {
+    // In-process JobManager with a fixture CLI that traps SIGTERM and exits 0.
+    process.env.ZCODE_CLI_ENTRY = join(SERVER_ROOT, "tests", "fixtures", "cli-graceful-cancel.mjs");
+    const { JobManager } = await import("../server/zcode.js");
+    const mgr = new JobManager();
+    const { job } = mgr.start({ text: "graceful", cwd: ws, mode: "plan", requestId: "graceful-cancel-1" });
+    assert.equal(job.status, "running");
+    // let the fixture boot and register its SIGTERM handler — cancelling
+    // during node's startup kills it by signal instead of the graceful path
+    await new Promise((res) => setTimeout(res, 300));
+    assert.equal(mgr.cancel(job.id), true);
+    await new Promise((res) => {
+      const t = setInterval(() => {
+        if (["succeeded", "failed", "cancelled", "timeout"].includes(job.status)) { clearInterval(t); res(); }
+      }, 50);
+    });
+    assert.equal(job.status, "cancelled", "exit code 0 after cancel must not become succeeded");
+    assert.equal(job.exitCode, 0);
+    const done = job.lines.find((e) => e.kind === "done");
+    assert.equal(done.status, "cancelled");
+    assert.equal(done.cancelRequested, true);
+    // the idempotency record survives: resubmitting the SAME request id
+    // returns the same (terminal) job rather than starting a second run
+    const again = mgr.start({ text: "graceful", cwd: ws, mode: "plan", requestId: "graceful-cancel-1" });
+    assert.equal(again.replayed, true);
+    assert.equal(again.job.id, job.id);
   });
 });
+
+// Replays a terminal job's event buffer and resolves with its `done` event.
+async function collectDoneEvent(jobId) {
+  const r = await fetch(`${BASE}/api/events/${jobId}`, { headers: { authorization: `Bearer ${TOKEN}` } });
+  const text = await r.text();
+  const events = text.split("\n\n").filter(Boolean).map((chunk) => {
+    const dataLine = chunk.split("\n").find((l) => l.startsWith("data: "));
+    return dataLine ? JSON.parse(dataLine.slice(6)) : null;
+  }).filter(Boolean);
+  const done = events.find((e) => e.kind === "done");
+  assert.ok(done, "terminal stream must contain a done event");
+  return done;
+}
