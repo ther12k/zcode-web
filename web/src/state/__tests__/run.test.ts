@@ -47,6 +47,47 @@ describe("run reducer", () => {
     expect(r.streamAttached).toBe(false);
   });
 
+  it("stream-lost keeps existing output and awaits job-status reconciliation", () => {
+    let r = runReducer(initialRun(), { type: "accepted", jobId: "j1", sessionId: null });
+    r = runReducer(r, {
+      type: "events",
+      events: [
+        line(1, "turn.started"),
+        line(2, "model.streaming", { kind: "text_delta", delta: "partial answer" }),
+      ],
+    });
+    r = runReducer(r, { type: "stream-attached" });
+    expect(r.streamAttached).toBe(true);
+    r = runReducer(r, { type: "stream-lost", error: "stream lost after repeated reconnects" });
+    expect(isTerminal(r.phase)).toBe(false);
+    expect(r.phase).toBe("running");
+    expect(r.answer).toBe("partial answer");
+    expect(r.streamAttached).toBe(false);
+    // the detached-transport flag drives the "work may still be running" UI
+    expect(r.transportLost).toBe(true);
+    // reconciliation sets the true terminal state
+    r = runReducer(r, { type: "job-status", status: "succeeded" });
+    expect(r.phase).toBe("succeeded");
+    expect(r.answer).toBe("partial answer");
+  });
+
+  it("a reconnect after transport loss clears transportLost", () => {
+    let r = runReducer(initialRun(), { type: "accepted", jobId: "j1", sessionId: null });
+    r = runReducer(r, { type: "stream-lost", error: "stream lost" });
+    expect(r.transportLost).toBe(true);
+    r = runReducer(r, { type: "stream-attached" });
+    expect(r.transportLost).toBe(false);
+    expect(r.streamAttached).toBe(true);
+  });
+
+  it("stream-detached (single reconnect) does not set transportLost", () => {
+    let r = runReducer(initialRun(), { type: "accepted", jobId: "j1", sessionId: null });
+    r = runReducer(r, { type: "stream-attached" });
+    r = runReducer(r, { type: "stream-detached" });
+    expect(r.streamAttached).toBe(false);
+    expect(r.transportLost).toBe(false);
+  });
+
   it("only done/timeout events or terminal job-status finalize", () => {
     let r = runReducer(initialRun(), { type: "accepted", jobId: "j1", sessionId: null });
     r = runReducer(r, {

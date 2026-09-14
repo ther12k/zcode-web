@@ -42,16 +42,49 @@ export type Capabilities = {
 };
 
 export async function discoverCapabilities(client: ApiClient): Promise<Capabilities> {
-  const [health, cfg] = await Promise.all([client.health(), client.config()]);
-  return {
-    authRequired: cfg.authRequired,
-    cliPresent: cfg.cliPresent,
-    providerConfigured: cfg.providerConfigured,
-    dbPresent: health.db.present,
-    modes: cfg.modes?.length ? cfg.modes : ["plan"],
-    allowedRoots: cfg.allowedRoots || [cfg.workspaceRoot],
-    workspaceRoot: cfg.workspaceRoot,
-    maxJobs: health.maxJobs,
-    runtime: (health as { runtime?: string }).runtime === "lugas/bun" ? "lugas/bun" : "node",
-  };
+  try {
+    const [health, cfg] = await Promise.all([client.health(), client.config()]);
+    return {
+      authRequired: cfg.authRequired,
+      cliPresent: cfg.cliPresent,
+      providerConfigured: cfg.providerConfigured,
+      dbPresent: health.db?.present ?? false,
+      modes: cfg.modes?.length ? cfg.modes : ["plan"],
+      allowedRoots: cfg.allowedRoots || [cfg.workspaceRoot],
+      workspaceRoot: cfg.workspaceRoot,
+      maxJobs: health.maxJobs || 3,
+      runtime: (health as { runtime?: string }).runtime === "lugas/bun" ? "lugas/bun" : "node",
+    };
+  } catch (err: unknown) {
+    if ((err as { status?: number })?.status === 401) {
+      return {
+        authRequired: true,
+        cliPresent: false,
+        providerConfigured: false,
+        dbPresent: false,
+        modes: ["plan"],
+        allowedRoots: [],
+        workspaceRoot: "",
+        maxJobs: 1,
+        runtime: "node",
+      };
+    }
+    try {
+      const b = await fetch("/api/bootstrap").then((r) => r.json());
+      if (b && typeof b.authRequired === "boolean") {
+        return {
+          authRequired: b.authRequired,
+          cliPresent: false,
+          providerConfigured: false,
+          dbPresent: false,
+          modes: ["plan"],
+          allowedRoots: [],
+          workspaceRoot: "",
+          maxJobs: 1,
+          runtime: "node",
+        };
+      }
+    } catch {}
+    throw err;
+  }
 }

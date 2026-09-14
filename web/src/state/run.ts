@@ -34,6 +34,7 @@ export type RunState = {
   events: StoredEvent[];          // append-only
   lastEventId: number;            // highest applied id (replay cursor)
   streamAttached: boolean;        // transport state — NOT run state
+  transportLost: boolean;         // reconnects exhausted; awaiting job reconciliation — run NOT failed
   error: string | null;
   activity: string;
   reasoning: string;
@@ -43,7 +44,7 @@ export type RunState = {
 export function initialRun(): RunState {
   return {
     jobId: null, phase: "idle", requestId: null, sessionId: null,
-    events: [], lastEventId: 0, streamAttached: false,
+    events: [], lastEventId: 0, streamAttached: false, transportLost: false,
     error: null, activity: "", reasoning: "", answer: "",
   };
 }
@@ -60,6 +61,7 @@ type Action =
   | { type: "submit-failed"; error: string }
   | { type: "stream-attached" }
   | { type: "stream-detached" }                // transport lost — run continues
+  | { type: "stream-lost"; error: string }     // transport reconnect exhausted — run continues, awaits job reconciliation
   | { type: "events"; events: StoredEvent[] }  // batch (replay or live)
   | { type: "job-status"; status: RunPhase; timedOut?: boolean } // from /api/jobs
   | { type: "reset" };
@@ -129,10 +131,13 @@ export function runReducer(run: RunState, action: Action): RunState {
     case "submit-failed":
       return { ...run, phase: "failed", error: action.error, activity: "error: " + action.error };
     case "stream-attached":
-      return { ...run, streamAttached: true };
+      return { ...run, streamAttached: true, transportLost: false };
     case "stream-detached":
       // transport state only: a detached stream never finalizes a run
       return { ...run, streamAttached: false };
+    case "stream-lost":
+      // stream transport exhausted: keep existing output, run is NOT failed, await reconciliation
+      return { ...run, streamAttached: false, transportLost: true, activity: "connection lost — work may still be running" };
     case "events": {
       let next = run;
       for (const ev of action.events) next = applyEvent(next, ev);
