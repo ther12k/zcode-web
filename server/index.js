@@ -772,6 +772,15 @@ async function handleApi(req, res, url) {
   // scoped to the allowed roots by directory prefix matching. Longer queries
   // additionally search message CONTENT through the sidecar FTS index, which
   // is built incrementally (bounded chunk per call) — results merge.
+  // Workspace analytics from the CLI's own records (read-only aggregates).
+  if (route === "/api/analytics" && req.method === "GET") {
+    try {
+      const days = Math.max(1, Math.min(Number(url.searchParams.get("days")) || 14, 60));
+      return sendJson(res, 200, store.analytics(ALLOWED_ROOTS, days));
+    } catch (e) {
+      return sendJson(res, e.code === "DB_MISSING" ? 503 : 500, { error: e.message });
+    }
+  }
   if (route === "/api/search" && req.method === "GET") {
     const q = (url.searchParams.get("q") || "").trim();
     if (q.length < 2) return sendJson(res, 200, { results: [] });

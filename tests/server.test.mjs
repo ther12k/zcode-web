@@ -511,6 +511,11 @@ describe("SessionStore turn durations + runActive", async () => {
     assert.equal(failed.durationMs, 5391);
     // turns carry their message id — the web merges incremental updates by it
     assert.ok(page.turns.every((t) => typeof t.id === "string" && t.id.length > 0), "turn ids present");
+    // byline timestamps: message time.created exposed as createdAt (epoch ms)
+    assert.equal(lastAssistant.createdAt, 4000, "assistant turn exposes its message creation time");
+    const userTurn = page.turns.find((t) => t.role === "user");
+    assert.equal(userTurn.createdAt, 1000, "user turn exposes its message creation time");
+    assert.ok(page.turns.every((t) => t.createdAt === null || typeof t.createdAt === "number"), "createdAt is number or null");
   });
 
   it("separator-only messages never take the turn footer", () => {

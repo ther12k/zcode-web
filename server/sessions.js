@@ -10,6 +10,10 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
 
+// Analytics snapshots rebuild in the background at most this often — the
+// full token scan is far too heavy to run per request on a large store.
+const ANALYTICS_TTL_MS = 10 * 60_000;
+
 // Compact artifact summary for a tool part (shape: CLI 0.16.5
 // {type:"tool", tool, callID, state:{status, input, output…}}).
 function toolSummary(part) {
@@ -78,6 +82,7 @@ function timelineSummary(part) {
 export class SessionStore {
   constructor(dbPath) {
     this.dbPath = dbPath;
+    this.analyticsCache = null;
   }
 
   // ZWUI-018: query errors are surfaced, not swallowed. Missing DB is a
@@ -315,6 +320,7 @@ export class SessionStore {
           role: t.role,
           text: t.texts.length ? t.texts.join("\n") : "",
           reasoning: t.reasonings.length ? t.reasonings.join("\n") : "",
+          createdAt: t.msgCreated || null,
           tokens: t.tokens,
           timeline: (t.timeline || []).map(({ op, ...e }) => e),
           tools: t.tools || [],
@@ -355,6 +361,120 @@ export class SessionStore {
       !!row && row.role === "assistant" && row.completed == null &&
       Date.now() - startedAt >= 0 && Date.now() - startedAt < 6 * 3600_000;
     return { active, startedAt: active ? startedAt : null };
+  }
+
+  // Workspace-wide analytics from the CLI's own records: token sums from
+  // step-finish parts, durations/status from turn_usage — no estimates.
+  analytics(roots, days = 14) {
+    const scoped = roots.length
+      ? `AND (${roots.map(() => "(s.directory = ? OR s.directory LIKE ? || '/%')").join(" OR ")})`
+      : "";
+    const params = roots.flatMap((r) => [r, r]);
+    // Performance: on a large store (hundreds of sessions, ~500k parts) full
+    // json_extract scans take minutes. This runs against a CACHED snapshot
+    // (see analyticsCache below) rebuilt in the background at most once per
+    // ANALYTICS_TTL_MS; callers always get the last good snapshot instantly.
+    const cached = this.getAnalyticsSnapshot(roots);
+    if (cached) return { ...cached.value, generatedAt: cached.builtAt, stale: false };
+    // no snapshot yet: build one synchronously (first call on this root set)
+    const snapshot = this.buildAnalyticsSnapshot(roots, days);
+    this.analyticsCache = { key: roots.join("|"), value: snapshot, builtAt: Date.now() };
+    return { ...snapshot, generatedAt: Date.now(), stale: true };
+  }
+
+  // Shared per-instance cache — a 94s cold query must never run per request.
+  getAnalyticsSnapshot(roots) {
+    const key = roots.join("|");
+    const c = this.analyticsCache;
+    if (c && c.key === key && Date.now() - c.builtAt < ANALYTICS_TTL_MS) return c;
+    if (c && c.key === key) {
+      // expired: refresh in the background, serve stale meanwhile
+      if (!c.rebuilding) {
+        c.rebuilding = true;
+        setImmediate(() => {
+          try {
+            const value = this.buildAnalyticsSnapshot(roots, 14);
+            this.analyticsCache = { key, value, builtAt: Date.now() };
+          } catch { /* keep stale snapshot */ }
+        });
+      }
+      return c;
+    }
+    return null;
+  }
+
+  buildAnalyticsSnapshot(roots, days = 14) {
+    const scoped = roots.length
+      ? `AND (${roots.map(() => "(s.directory = ? OR s.directory LIKE ? || '/%')").join(" OR ")})`
+      : "";
+    const params = roots.flatMap((r) => [r, r]);
+    const sessions = this.query(
+      `SELECT COUNT(*) AS n FROM session s WHERE 1=1 ${scoped}`,
+      params
+    )[0];
+    const totals = this.query(
+      `SELECT
+         COALESCE(SUM(json_extract(p.data, '$.tokens.total')), 0) AS tokens,
+         COUNT(*) AS steps
+       FROM part p JOIN session s ON s.id = p.session_id
+       WHERE json_extract(p.data, '$.type') = 'step-finish' ${scoped}`,
+      params
+    )[0];
+    const usage = this.query(
+      `SELECT
+         COUNT(*) AS turns,
+         COALESCE(SUM(u.duration_ms), 0) AS duration_ms,
+         COALESCE(SUM(CASE WHEN u.status = 'error' THEN 1 ELSE 0 END), 0) AS errors
+       FROM turn_usage u JOIN session s ON s.id = u.session_id ${scoped}`,
+      params
+    )[0];
+    // daily activity (sessions updated per day, last N days)
+    const daily = this.query(
+      `SELECT date(s.time_updated / 1000, 'unixepoch') AS day, COUNT(*) AS n
+         FROM session s WHERE 1=1 ${scoped}
+        GROUP BY day ORDER BY day DESC LIMIT ?`,
+      [...params, Math.max(1, Math.min(days, 60))]
+    );
+    // top sessions by committed tokens — computed from ONE grouped scan of
+    // the parts table (per-session correlated SUMs would rescan per session)
+    const top = this.query(
+      `SELECT s.id, s.title, s.directory, s.time_updated, t.tokens
+         FROM session s
+         JOIN (SELECT session_id, SUM(json_extract(data, '$.tokens.total')) AS tokens
+                 FROM part WHERE json_extract(data, '$.type') = 'step-finish'
+                GROUP BY session_id) t ON t.session_id = s.id
+       WHERE 1=1 ${scoped}
+       ORDER BY t.tokens DESC LIMIT 5`,
+      params
+    ).map((r) => ({
+      id: r.id,
+      title: r.title,
+      directory: r.directory,
+      updatedAt: Number(r.time_updated) || 0,
+      tokens: Number(r.tokens) || 0,
+    }));
+    // active sessions: reuse runInfo only over RECENT sessions (last 24h) —
+    // the correlated newest-message scan is O(sessions × messages) otherwise
+    const recentActive = this.query(
+      `SELECT s.id FROM session s
+        WHERE s.time_updated >= ${Date.now() - 24 * 3600_000} ${scoped}`,
+      params
+    ).map((r) => r.id);
+    let activeSessions = 0;
+    for (const id of recentActive) {
+      try { if (this.runInfo(id).active) activeSessions++; } catch { /* skip */ }
+    }
+    return {
+      sessions: Number(sessions?.n) || 0,
+      tokens: Number(totals?.tokens) || 0,
+      steps: Number(totals?.steps) || 0,
+      turns: Number(usage?.turns) || 0,
+      agentTimeMs: Number(usage?.duration_ms) || 0,
+      failedTurns: Number(usage?.errors) || 0,
+      activeSessions,
+      daily: daily.map((r) => ({ day: r.day, sessions: Number(r.n) || 0 })),
+      topSessions: top,
+    };
   }
 }
 
