@@ -121,6 +121,8 @@ const MIME = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
+  ".woff2": "font/woff2",
+  ".woff": "font/woff",
   ".svg": "image/svg+xml",
   ".png": "image/png",
   ".jpg": "image/jpeg",
@@ -154,6 +156,16 @@ function serveStatic(res, pathname) {
       const asset = normalize(join(assetsDir, pathname.slice("/assets/".length)));
       if (asset.startsWith(assetsDir + sep) && existsSync(asset)) {
         return serveFile(asset, "public, max-age=31536000, immutable");
+      }
+      return sendJson(res, 404, { error: "not found" });
+    }
+    // public/ files copied verbatim by Vite (fonts, icons) — served with a
+    // name-spaced denylist so nothing under WEB_DIST but outside public
+    // intent can be requested
+    if (pathname.startsWith("/fonts/")) {
+      const font = normalize(join(WEB_DIST, "fonts", pathname.slice("/fonts/".length)));
+      if (font.startsWith(join(WEB_DIST, "fonts") + sep) && existsSync(font)) {
+        return serveFile(font, "public, max-age=86400");
       }
       return sendJson(res, 404, { error: "not found" });
     }

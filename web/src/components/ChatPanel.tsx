@@ -473,13 +473,14 @@ export function ChatPanel({
       (el?.firstElementChild && el.firstElementChild.tagName !== "BUTTON" ? el.firstElementChild : null)) as HTMLElement | null;
     const anchorTop = anchor?.offsetTop ?? 0;
     const anchorDelta = el && anchor ? el.scrollTop - anchorTop : 0;
-    const settle = (tries = 0) => {
+    const settle = (deadline = performance.now() + 3000) => {
       requestAnimationFrame(() => {
-        // re-apply for a few frames — idempotent, absorbs image-load and
-        // layout shifts after the prepend commits
         if (!el || !anchor || !anchor.isConnected) return;
+        // keep the anchor at the same viewport offset while the prepend
+        // commits and layout settles (real-API fetches can land slower than
+        // a fixed frame budget)
         el.scrollTop = anchor.offsetTop + anchorDelta;
-        if (tries < 8) settle(tries + 1);
+        if (performance.now() < deadline) settle(deadline);
       });
     };
     try {
