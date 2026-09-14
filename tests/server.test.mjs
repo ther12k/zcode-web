@@ -509,6 +509,8 @@ describe("SessionStore turn durations + runActive", async () => {
     assert.equal(failed.text, "", "failed turn renders no inline text");
     assert.ok(failed.error.includes("Usage limit reached"), "raw error kept as data");
     assert.equal(failed.durationMs, 5391);
+    // turns carry their message id — the web merges incremental updates by it
+    assert.ok(page.turns.every((t) => typeof t.id === "string" && t.id.length > 0), "turn ids present");
   });
 
   it("separator-only messages never take the turn footer", () => {

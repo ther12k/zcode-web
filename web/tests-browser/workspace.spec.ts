@@ -323,3 +323,35 @@ test("Sessions view scopes to the selected project, like the desktop", async ({ 
   assert.ok(roots.length > 0, "sessions view queried the recent endpoint");
   for (const r of roots) assert.equal(r, wsRoot + "/proj", "query scoped to the project subtree, not the parent root");
 });
+
+test("desktop updates append without reloading the open view", async ({ page }) => {
+  // first fetch: one turn; later fetches: same turn (same id, text grew) + a new one
+  let calls = 0;
+  await page.route(/\/api\/sessions\/sess_.+\?limit=/, async (route) => {
+    calls += 1;
+    const turns = calls === 1
+      ? [{ id: "msg_a", role: "user", text: "first prompt" }]
+      : [
+          { id: "msg_a", role: "user", text: "first prompt" },
+          { id: "msg_b", role: "assistant", text: "answer that streamed in from the desktop", durationMs: 4000 },
+        ];
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ session: { id: "sess_live00000000000000000000000000", title: "live" }, runActive: false, transcript: turns, total: turns.length, hasMore: false }),
+    });
+  });
+  await page.goto("/w/default/s/sess_live00000000000000000000000000");
+  await page.waitForLoadState("domcontentloaded");
+  await expect(page.getByText("first prompt")).toBeVisible();
+  // trigger the visibility-refresh path (merge, not reload)
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  // the new turn appends; the old one stays mounted; no loader flash
+  await expect(page.getByText("answer that streamed in from the desktop")).toBeVisible({ timeout: 5000 });
+  await expect(page.getByText("first prompt")).toBeVisible();
+  await expect(page.locator(".chat-loader")).toHaveCount(0);
+  await expect(page.getByText("Worked for 4s")).toBeVisible();
+});

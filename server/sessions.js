@@ -311,6 +311,7 @@ export class SessionStore {
         const durationMs = t.durationMs
           || (!usage.size && t.msgCompleted && t.msgCreated ? t.msgCompleted - t.msgCreated : 0);
         return {
+          id: t.mid,
           role: t.role,
           text: t.texts.length ? t.texts.join("\n") : "",
           reasoning: t.reasonings.length ? t.reasonings.join("\n") : "",

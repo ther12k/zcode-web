@@ -112,6 +112,32 @@ export function ChatPanel({
     setExternalStartedAt(d.runStartedAt ?? null);
     if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title });
   }, [onSessionMeta]);
+  // incremental refresh: match turns by message id — known turns update in
+  // place (streaming text grows), new ones append. Older pages the reader
+  // paged in are preserved; no loader flash, no scroll jump.
+  const mergeSessionPage = useCallback((d: SessionDetail) => {
+    setHistory((cur) => {
+      const merged = [...cur.turns];
+      let changed = false;
+      for (const t of d.transcript) {
+        if (!t.id) continue;
+        const idx = merged.findIndex((x) => x.id === t.id);
+        if (idx >= 0) {
+          if (JSON.stringify(merged[idx]) !== JSON.stringify(t)) { merged[idx] = t; changed = true; }
+        } else {
+          merged.push(t);
+          changed = true;
+        }
+      }
+      if (!changed && cur.total === d.total && cur.hasMore === d.hasMore) return cur;
+      return { turns: merged, total: d.total, hasMore: d.hasMore };
+    });
+    setExternalActive(!!d.runActive);
+    setExternalStartedAt(d.runStartedAt ?? null);
+    if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title });
+  }, [onSessionMeta]);
+  // initial load — full replace only when the session (or an explicit
+  // re-select reload) changes
   useEffect(() => {
     let alive = true;
     if (!sessionId) { setHistory({ turns: [], total: 0, hasMore: false }); setHistoryLoading(false); setExternalActive(false); return; }
@@ -126,7 +152,17 @@ export function ChatPanel({
       .catch((e) => { if (alive) onNotify(e instanceof ApiError ? e.message : String(e), "error"); })
       .finally(() => { if (alive) setHistoryLoading(false); });
     return () => { alive = false; };
-  }, [sessionId, client, onNotify, syncTick, reloadKey, applySessionPage]);
+  }, [sessionId, client, onNotify, reloadKey, applySessionPage]);
+  // visibility refresh merges instead of reloading — coming back to the tab
+  // must not clear the view or drop paged-in history
+  useEffect(() => {
+    if (!syncTick || !sessionId) return;
+    let alive = true;
+    void client.session(sessionId, 10, 0)
+      .then((d) => { if (alive) mergeSessionPage(d); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [syncTick]);
   // desktop↔web sync: both apps write the same session store, so pull the
   // transcript fresh when the tab becomes visible again (e.g. the ZCode app
   // continued the session meanwhile). Skipped while a run is attached here —
@@ -142,8 +178,8 @@ export function ChatPanel({
   }, [sessionId, run.phase]);
   // and poll while you watch: the desktop's in-progress turns land in the
   // shared store as they commit, so an open web view follows along — faster
-  // while a turn is running elsewhere (progress + lock), 10s when idle. The
-  // view only updates when the transcript actually changed.
+  // while a turn is running elsewhere (progress + lock), 10s when idle.
+  // Updates MERGE by turn id: no reload flash, paged-in history preserved.
   useEffect(() => {
     if (!sessionId) return;
     if (run.phase !== "idle" && !isTerminal(run.phase)) return;
@@ -156,21 +192,14 @@ export function ChatPanel({
       fetching = true;
       try {
         const d = await client.session(sessionId, 10, 0);
-        if (!alive) return;
-        setHistory((cur) => {
-          const next = { turns: d.transcript, total: d.total, hasMore: d.hasMore };
-          return JSON.stringify(cur) === JSON.stringify(next) ? cur : next;
-        });
-        setExternalActive(!!d.runActive);
-        setExternalStartedAt(d.runStartedAt ?? null);
-        if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title });
+        if (alive) mergeSessionPage(d);
       } catch { /* transient */ }
       finally { fetching = false; }
       if (alive && !timer) timer = setTimeout(tick, externalActiveRef.current ? 4_000 : 10_000);
     };
     timer = setTimeout(tick, externalActiveRef.current ? 500 : 10_000);
     return () => { alive = false; if (timer) clearTimeout(timer); };
-  }, [sessionId, run.phase, client, applySessionPage, onSessionMeta]);
+  }, [sessionId, run.phase, client, mergeSessionPage]);
 
   useEffect(() => {
     if (lastKey.current !== draftKey) { setInput(loadDraft(draftKey)); setAttachments([]); setMenu(null); lastKey.current = draftKey; }
@@ -579,10 +608,10 @@ export function ChatPanel({
           const events = t.timeline || [];
           const timelineOnly = events.length > 0 && !t.text.trim() && !(t.tools || []).length && !(t.files || []).length && !t.reasoning;
           if (timelineOnly) {
-            return <div className="timeline-stack" key={`h${i}`}>{events.map((ev, j) => <TimelineRow key={j} event={ev} />)}</div>;
+            return <div className="timeline-stack" key={t.id || `h${i}`}>{events.map((ev, j) => <TimelineRow key={j} event={ev} />)}</div>;
           }
           return t.role === "user" ? (
-            <article className="user-message-block" key={`h${i}`}>
+            <article className="user-message-block" key={t.id || `h${i}`}>
               {events.length > 0 && <div className="timeline-stack">{events.map((ev, j) => <TimelineRow key={j} event={ev} />)}</div>}
               <div className="message-byline">
                 <span className="user-avatar">Y</span><strong>You</strong>
@@ -596,7 +625,7 @@ export function ChatPanel({
               )}
             </article>
           ) : (
-            <article className={`agent-message ${detailsHidden ? "details-hidden" : ""}`} key={`h${i}`}>
+            <article className={`agent-message ${detailsHidden ? "details-hidden" : ""}`} key={t.id || `h${i}`}>
               {events.length > 0 && <div className="timeline-stack">{events.map((ev, j) => <TimelineRow key={j} event={ev} />)}</div>}
               <div className="agent-byline">
                 <span className="agent-avatar"><ZLogo size={18} /></span><strong>Zcode</strong>

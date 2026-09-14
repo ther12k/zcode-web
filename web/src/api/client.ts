@@ -67,6 +67,8 @@ export type FileCard = { mime: string; url: string; size: number | null; storage
 export type TimelineEvent = { kind: string; label: string; detail: string };
 
 export type TranscriptTurn = {
+  /** message id — stable key for incremental appends */
+  id?: string;
   role: string;
   text: string;
   reasoning?: string;
