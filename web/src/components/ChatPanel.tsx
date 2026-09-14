@@ -697,7 +697,7 @@ export function ChatPanel({
           </article>
         )}
 
-        {busy && (
+        {localBusy && (
           <div className="working-message" role="status">
             <span className="agent-avatar"><ZLogo size={18} /></span>
             <span>Zcode is working<span className="thinking-dots"><i /><i /><i /></span></span>
@@ -834,7 +834,7 @@ export function ChatPanel({
         </div>
         <div className="composer-hint">
           <span><kbd>↵</kbd> to send <span className="hint-dot">·</span> <kbd>shift ↵</kbd> for a new line</span>
-          <span><span className={`tiny-dot ${run.streamAttached ? "green" : ""}`} />{run.streamAttached ? "stream live" : busy ? "reconnecting" : "idle"}</span>
+          <span><span className={`tiny-dot ${run.streamAttached ? "green" : ""}`} />{run.streamAttached ? "stream live" : externalActive && !localBusy ? "streaming in the Zcode app" : localBusy ? "reconnecting" : "idle"}</span>
         </div>
       </div>
       <input
