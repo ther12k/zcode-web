@@ -511,6 +511,38 @@ describe("SessionStore turn durations + runActive", async () => {
     assert.equal(failed.durationMs, 5391);
   });
 
+  it("separator-only messages never take the turn footer", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zc-store-"));
+    const dbPath = join(dir, "db.sqlite");
+    const db = makeDb(dbPath);
+    db.prepare("INSERT INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)")
+      .run("sess_sep", "sep", "/tmp", 1, 2);
+    const insMsg = db.prepare("INSERT INTO message (id, session_id, data, sequence) VALUES (?,?,?,?)");
+    const insPart = db.prepare("INSERT INTO part (id, message_id, session_id, data, sequence) VALUES (?,?,?,?,?)");
+    insMsg.run("mu", "sess_sep", JSON.stringify({ role: "user", time: { created: 1000 } }), 0);
+    insPart.run("mu_p", "mu", "sess_sep", JSON.stringify({ type: "text", text: "go" }), 0);
+    insMsg.run("ma", "sess_sep", JSON.stringify({ role: "assistant", time: { created: 2000, completed: 6000 } }), 1);
+    insPart.run("ma_t", "ma", "sess_sep", JSON.stringify({ type: "text", text: "done" }), 0);
+    // a model-change separator lands as its OWN assistant message after the answer
+    insMsg.run("mtl", "sess_sep", JSON.stringify({ role: "assistant", time: { created: 6100 } }), 2);
+    insPart.run("mtl_p", "mtl", "sess_sep", JSON.stringify({
+      type: "timeline", timelineType: "model_change",
+      fromModel: { providerID: "p1", modelID: "a" }, toModel: { providerID: "p1", modelID: "b" },
+    }), 0);
+    db.prepare("INSERT INTO turn_usage (session_id, turn_id, user_message_id, status, started_at, completed_at, duration_ms) VALUES (?,?,?,?,?,?,?)")
+      .run("sess_sep", "t1", "mu", "completed", 1000, 6000, 5000);
+    db.close();
+
+    const store = new SessionStore(dbPath);
+    const page = store.transcript("sess_sep", { limit: 50 });
+    const answer = page.turns.find((t) => t.text === "done");
+    const separator = page.turns.find((t) => (t.timeline || []).length > 0 && !t.text);
+    assert.ok(answer, "answer turn present");
+    assert.ok(separator, "separator turn present");
+    assert.equal(answer.durationMs, 5000, "footer stays on the substantive answer turn");
+    assert.ok(!separator.durationMs, "separator-only turn must not steal the footer");
+  });
+
   it("runActive is true only for a fresh uncompleted assistant tail message", () => {
     const dir = mkdtempSync(join(tmpdir(), "zc-store-"));
     const dbPath = join(dir, "db.sqlite");

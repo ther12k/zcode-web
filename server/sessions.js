@@ -279,8 +279,13 @@ export class SessionStore {
       }
       if (timelineEntry) timelineEntry.op = part.operationId || undefined;
     }
-    // Attach each agentic turn's usage to the LAST assistant message of its
-    // exchange (the desktop shows one footer per answer, after the final text)
+    // Attach each agentic turn's usage to the LAST substantive assistant
+    // message of its exchange (the desktop shows one footer per answer, after
+    // the final text). Separator-only messages (timeline/model-change rows)
+    // are assistant-role too — they must neither take the footer themselves
+    // nor displace it from the turn they annotate.
+    const substantive = (t) =>
+      !!(t.texts.length || t.reasonings.length || (t.tools && t.tools.length) || (t.files && t.files.length) || t.error);
     let lastUserMsgId = null;
     for (const t of turns) {
       if (t.role === "user") lastUserMsgId = t.mid;
@@ -288,9 +293,9 @@ export class SessionStore {
     }
     for (let i = 0; i < turns.length; i++) {
       const t = turns[i];
-      if (t.role === "user") continue;
+      if (t.role === "user" || !substantive(t)) continue;
       const next = turns[i + 1];
-      if (next && next.role !== "user") continue; // a later assistant message closes the exchange
+      if (next && next.role !== "user" && substantive(next)) continue; // a later substantive assistant message closes the exchange
       const u = usage.get(t.prevUserMsgId || "");
       if (u) {
         t.turnStatus = u.status;

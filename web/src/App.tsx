@@ -131,6 +131,17 @@ export function App() {
     navigateToCwd(cwd || safeDecode(params.workspace || ""));
   }, [cwd, params.workspace, navigateToCwd]);
 
+  // stable identities for ChatPanel effect deps — inline arrows here would
+  // retrigger its fetch/poll effects on every App render
+  const onSlashAction = useCallback((action: string) => {
+    if (action === "new") { navigateNewChat(); return true; }
+    if (action === "search" || action === "skills" || action === "tools" || action === "settings" || action === "shortcuts") { setModal(action); return true; }
+    return false;
+  }, [navigateNewChat]);
+  const onSessionMeta = useCallback((s: { id: string; title: string }) => {
+    setSessionTitles((m) => (m[s.id] === s.title ? m : { ...m, [s.id]: s.title }));
+  }, []);
+
   // sessions of the current cwd (task rows under the active "project")
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const refreshSessions = useCallback(() => {
@@ -412,12 +423,8 @@ export function App() {
           injectedDraft={draft}
           onNotify={notify}
           onBusyChange={setRunBusy}
-          onSlashAction={(action) => {
-            if (action === "new") { navigateNewChat(); return true; }
-            if (action === "search" || action === "skills" || action === "tools" || action === "settings" || action === "shortcuts") { setModal(action); return true; }
-            return false;
-          }}
-          onSessionMeta={(s) => setSessionTitles((m) => (m[s.id] === s.title ? m : { ...m, [s.id]: s.title }))}
+          onSlashAction={onSlashAction}
+          onSessionMeta={onSessionMeta}
           onSessionCreated={(id) => {
             refreshSessions();
             if (id !== activeSessionId) {

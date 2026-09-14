@@ -115,8 +115,10 @@ export function ChatPanel({
   useEffect(() => {
     let alive = true;
     if (!sessionId) { setHistory({ turns: [], total: 0, hasMore: false }); setHistoryLoading(false); setExternalActive(false); return; }
-    // selecting a session: clear the previous view and show a loader until
-    // the transcript arrives
+    // selecting a session: clear the previous view, show a loader until the
+    // transcript arrives, and re-arm follow-mode (the reader may have scrolled
+    // up in the previous session)
+    stickToBottom.current = true;
     setHistory({ turns: [], total: 0, hasMore: false });
     setHistoryLoading(true);
     void client.session(sessionId, 10, 0)
