@@ -1,6 +1,11 @@
 # Lugas migration gate evidence (#43)
 
 Run: 2026-09-12, lugas@0.1.0-beta.4 (npm) on Bun 1.4.0, server-lugas/ @ this commit.
+Re-verified: 2026-09-14 on lugas@0.1.0-beta.5 (npm) — boot smoke, auth/config/models/sessions
+endpoints, upload → chat → SSE ticket pipeline all green under the pre-transpiled dist/
+distribution (beta.5 ships dist/ instead of src/; root imports unaffected, verified under
+Bun 1.4.0 = the declared engines.bun floor; FRAMEWORK_VERSION now correctly reports
+0.1.0-beta.5, fixing the CF-1 "0.0.0" stamp).
 Env: `ZCODE_CLI_NODE` = nvm node v24.11.0, `ZCODE_CLI_ENTRY` = host zcode.cjs 0.16.5,
 `ZCODE_ALLOWED_ROOTS` = ~/.zcode/workspace:/tmp/zc-lugas-ws, token auth on.
 

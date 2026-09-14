@@ -7,6 +7,6 @@
     "start": "bun run app.ts"
   },
   "dependencies": {
-    "lugas": "^0.1.0-beta.4"
+    "lugas": "^0.1.0-beta.5"
   }
 }
