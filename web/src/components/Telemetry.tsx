@@ -23,10 +23,19 @@ function fmtDuration(ms: number): string {
 // run, a per-turn table (tokens · duration · tokens/s), copy summary and
 // JSON export. Everything shown is measured — prompt/completion splits and
 // cost estimates are deliberately absent (the store has totals only).
-export function TokenTelemetryDialog({ sessionId, title, turns, liveTokens, onClose }: {
+//
+// Scope honesty (ZWUI-047): the per-turn table can only ever describe the
+// LOADED transcript page. When the server provides a pagination-independent
+// session total it is shown as the headline number; otherwise the label says
+// exactly what the number covers.
+export function TokenTelemetryDialog({ sessionId, title, turns, totalTurns, sessionTotal, liveTokens, onClose }: {
   sessionId: string;
   title: string;
   turns: TranscriptTurn[];
+  /** turns available in the session (transcript `total`) */
+  totalTurns: number;
+  /** server-side token sum over ALL messages, independent of pagination */
+  sessionTotal: number | null;
   liveTokens: number | null;
   onClose: () => void;
 }) {
@@ -34,29 +43,37 @@ export function TokenTelemetryDialog({ sessionId, title, turns, liveTokens, onCl
 
   const stats = useMemo(() => {
     const measured = turns.filter((t) => (t.tokens || 0) > 0 || t.durationMs);
-    const totalTokens = measured.reduce((a, t) => a + (t.tokens || 0), 0);
-    const liveTotal = liveTokens ? totalTokens + liveTokens : totalTokens;
+    const loadedTotal = measured.reduce((a, t) => a + (t.tokens || 0), 0);
+    const liveTotal = liveTokens ? loadedTotal + liveTokens : loadedTotal;
     const totalTimeMs = measured.reduce((a, t) => a + (t.durationMs || 0), 0);
     const tokenTurns = measured.filter((t) => (t.tokens || 0) > 0);
     const timeTurns = measured.filter((t) => (t.durationMs || 0) > 0);
-    const avgTurn = tokenTurns.length ? Math.round(totalTokens / tokenTurns.length) : 0;
-    const speed = totalTimeMs > 0 ? Math.round(totalTokens / (totalTimeMs / 1000)) : 0;
+    const avgTurn = tokenTurns.length ? Math.round(loadedTotal / tokenTurns.length) : 0;
+    const speed = totalTimeMs > 0 && liveTotal > 0 ? Math.round(liveTotal / (totalTimeMs / 1000)) : 0;
     const slowest = timeTurns.reduce<TranscriptTurn | null>((acc, t) => (!acc || (t.durationMs || 0) > (acc.durationMs || 0) ? t : acc), null);
     const richest = tokenTurns.reduce<TranscriptTurn | null>((acc, t) => (!acc || (t.tokens || 0) > (acc.tokens || 0) ? t : acc), null);
     return {
-      measured, totalTokens: liveTotal, historyTokens: totalTokens, totalTimeMs,
+      measured, totalTokens: liveTotal, loadedTotal, totalTimeMs,
       avgTurn, speed, slowest, richest, liveIncluded: Boolean(liveTokens),
     };
   }, [turns, liveTokens]);
+
+  const headlineTotal = sessionTotal ?? stats.totalTokens;
+  const scopeLabel = sessionTotal != null
+    ? "all messages of this session"
+    : stats.liveIncluded
+      ? `loaded turns + live turn (${turns.length} loaded)`
+      : `loaded turns only (${turns.length} of ${totalTurns} loaded)`;
 
   async function copySummary() {
     const lines = [
       `Session token audit: ${title}`,
       `Session: ${sessionId}`,
-      `Total tokens: ${stats.totalTokens.toLocaleString()}${stats.liveIncluded ? ` (${stats.historyTokens.toLocaleString()} committed + live turn in flight)` : ""}`,
-      `Turns with telemetry: ${stats.measured.length}`,
+      `Total tokens: ${headlineTotal.toLocaleString()} (scope: ${scopeLabel})`,
+      `Loaded-turn tokens: ${stats.totalTokens.toLocaleString()}${stats.liveIncluded ? ` (${stats.loadedTotal.toLocaleString()} committed + live turn in flight)` : ""}`,
+      `Turns with telemetry: ${stats.measured.length} of ${totalTurns} in session`,
       `Total agent time: ${fmtDuration(stats.totalTimeMs)}`,
-      `Average per turn: ${stats.avgTurn.toLocaleString()} tokens`,
+      `Average per loaded turn: ${stats.avgTurn.toLocaleString()} tokens`,
       stats.speed ? `Aggregate speed: ~${stats.speed.toLocaleString()} tokens/s` : "",
     ].filter(Boolean);
     try {
@@ -71,12 +88,14 @@ export function TokenTelemetryDialog({ sessionId, title, turns, liveTokens, onCl
       sessionId,
       sessionTitle: title,
       exportedAt: new Date().toISOString(),
+      scope: { sessionTotal, loadedTurns: turns.length, totalTurns, note: "per-turn rows cover the loaded transcript page only" },
       totals: {
-        tokens: stats.totalTokens,
-        committedTokens: stats.historyTokens,
+        tokens: headlineTotal,
+        sessionTotal,
+        loadedTurnTokens: stats.totalTokens,
         liveTurnTokens: stats.liveIncluded ? liveTokens : null,
         totalTimeMs: stats.totalTimeMs,
-        averageTokensPerTurn: stats.avgTurn,
+        averageTokensPerLoadedTurn: stats.avgTurn,
       },
       turns: stats.measured.map((t, i) => ({
         index: i + 1,
@@ -97,20 +116,20 @@ export function TokenTelemetryDialog({ sessionId, title, turns, liveTokens, onCl
   }
 
   return (
-    <Dialog title="Token telemetry." subtitle="Measured usage for this session — per turn, from the CLI's own records." onClose={onClose} wide>
+    <Dialog title="Token telemetry." subtitle="Measured usage — per turn, from the CLI's own records." onClose={onClose} wide>
       <div className="dialog-body token-telemetry">
         <div className="token-metrics">
           <div className="token-metric">
-            <span><Coins size={13} className="amber-text" />Total tokens<b className="right">{fmtTokens(stats.totalTokens)}</b></span>
-            <small>{stats.liveIncluded ? "includes the live turn" : "all committed turns"}</small>
+            <span><Coins size={13} className="amber-text" />Total tokens<b className="right">{fmtTokens(headlineTotal)}</b></span>
+            <small>{scopeLabel}</small>
           </div>
           <div className="token-metric">
             <span><ArrowDownRight size={13} className="cyan-text" />Turns measured<b className="right">{stats.measured.length}</b></span>
-            <small>with tokens or duration</small>
+            <small>in {turns.length} loaded of {totalTurns} turns</small>
           </div>
           <div className="token-metric">
             <span><ArrowUpRight size={13} className="violet-text" />Agent time<b className="right">{fmtDuration(stats.totalTimeMs)}</b></span>
-            <small>sum of turn durations</small>
+            <small>sum of loaded turn durations</small>
           </div>
           <div className="token-metric">
             <span><Layers size={13} className="green-text" />Avg / turn<b className="right">{fmtTokens(stats.avgTurn)}</b></span>
@@ -119,7 +138,7 @@ export function TokenTelemetryDialog({ sessionId, title, turns, liveTokens, onCl
         </div>
         <div className="token-table-wrap">
           <div className="token-table-head">
-            <span>PER-TURN AUDIT</span>
+            <span>PER-TURN AUDIT — LOADED MESSAGES</span>
             <span>{stats.measured.length} rows</span>
           </div>
           <table className="token-table">
@@ -159,8 +178,10 @@ export function TokenTelemetryDialog({ sessionId, title, turns, liveTokens, onCl
 export type TerminalEntry = {
   key: string;
   command: string;
+  /** the call's own lifecycle status (started/running/completed/failed) */
   status: string;
-  live: boolean;
+  /** where the entry came from — never conflated with its status (ZWUI-046) */
+  source: "history" | "live";
 };
 
 // Read-only agent terminal: every Bash command the session actually ran
@@ -183,6 +204,7 @@ export function AgentTerminalDrawer({ open, entries, onClose, onClear }: {
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
   if (!open) return null;
+  const isRunning = (e: TerminalEntry) => e.source === "live" && /start|running|pending/i.test(e.status);
   return (
     <section className="workspace-terminal" aria-label="Agent terminal">
       <header>
@@ -198,17 +220,20 @@ export function AgentTerminalDrawer({ open, entries, onClose, onClear }: {
         {!entries.length && (
           <p className="terminal-welcome"><Terminal size={12} /> <span>Commands Zcode runs in this workspace appear here as they execute.</span></p>
         )}
-        {entries.map((e) => (
-          <div className="terminal-item" key={e.key}>
-            <p className="terminal-command">
-              <span>$</span>{e.command}
-              {e.live && <LoaderCircle size={10} className="spin terminal-live" />}
-              <small className={e.status === "failed" ? "deletions" : "success-text"}>
-                {e.live && e.status !== "failed" ? "running" : e.status}
-              </small>
-            </p>
-          </div>
-        ))}
+        {entries.map((e) => {
+          const running = isRunning(e);
+          return (
+            <div className="terminal-item" key={e.key}>
+              <p className="terminal-command">
+                <span>$</span>{e.command}
+                {running && <LoaderCircle size={10} className="spin terminal-live" />}
+                <small className={e.status === "failed" || e.status === "error" ? "deletions" : running ? "muted" : "success-text"}>
+                  {running ? "running" : e.status || "—"}
+                </small>
+              </p>
+            </div>
+          );
+        })}
       </div>
     </section>
   );

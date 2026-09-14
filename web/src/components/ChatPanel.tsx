@@ -156,6 +156,7 @@ export function ChatPanel({
   useEffect(() => { externalActiveRef.current = externalActive; }, [externalActive]);
   const applySessionPage = useCallback((d: SessionDetail) => {
     setHistory({ turns: d.transcript, total: d.total, hasMore: d.hasMore });
+    setSessionTokensTotal(d.tokensTotal ?? null);
     setExternalActive(!!d.runActive);
     setExternalStartedAt(d.runStartedAt ?? null);
     if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory });
@@ -182,6 +183,7 @@ export function ChatPanel({
     });
     setExternalActive(!!d.runActive);
     setExternalStartedAt(d.runStartedAt ?? null);
+    if (d.tokensTotal != null) setSessionTokensTotal(d.tokensTotal);
     if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory });
   }, [onSessionMeta]);
   // initial load — full replace only when the session (or an explicit
@@ -722,35 +724,46 @@ export function ChatPanel({
     return null;
   }, [run.events]);
 
-  // session-wide token count for the context-bar chip (committed turns + a
-  // live turn in flight)
+  // session-wide token count for the context-bar chip: the server's
+  // pagination-independent total when available, else the loaded turns
+  const [sessionTokensTotal, setSessionTokensTotal] = useState<number | null>(null);
   const sessionTokens = useMemo(
-    () => history.turns.reduce((a, t) => a + (t.tokens || 0), 0) + (liveTokens && !isTerminal(run.phase) ? liveTokens : 0),
-    [history.turns, liveTokens, run.phase]
+    () => (sessionTokensTotal ?? history.turns.reduce((a, t) => a + (t.tokens || 0), 0)) + (liveTokens && !isTerminal(run.phase) ? liveTokens : 0),
+    [sessionTokensTotal, history.turns, liveTokens, run.phase]
   );
 
-  // Bash evidence for the agent terminal: committed transcript tool parts
-  // plus the live stream (last lifecycle state per command wins)
+  // ZWUI-046: Bash evidence keyed by TOOL-CALL IDENTITY (callID) — repeated
+  // commands stay distinct entries, object inputs are never stringified into
+  // "[object Object]", and a completed live call is shown completed
+  const normalizeCommand = (input: unknown, toolName: string): string => {
+    if (typeof input === "string") return input.slice(0, 200);
+    if (input && typeof input === "object") {
+      const cmd = (input as Record<string, unknown>).command;
+      if (typeof cmd === "string" && cmd.trim()) return cmd.slice(0, 200);
+      try { return JSON.stringify(input).slice(0, 200); } catch { return toolName; }
+    }
+    return toolName;
+  };
   const terminalEntries = useMemo<TerminalEntry[]>(() => {
     const isBash = (name: string) => /bash|shell/i.test(name);
     const out: TerminalEntry[] = [];
     history.turns.forEach((t, ti) => {
       (t.tools || []).forEach((tool, oi) => {
-        if (isBash(tool.name)) out.push({ key: `h-${t.id || ti}-${oi}`, command: tool.detail || tool.name, status: tool.status, live: false });
+        if (isBash(tool.name)) out.push({ key: `h-${t.id || ti}-${oi}`, command: normalizeCommand(tool.detail, tool.name), status: tool.status || "completed", source: "history" });
       });
     });
-    const liveByCommand = new Map<string, { status: string; id: number }>();
-    run.events.forEach((e, i) => {
+    const live = new Map<string, TerminalEntry>();
+    run.events.forEach((e) => {
       if (e.kind !== "line") return;
-      const line = e.line as { type?: string; payload?: { toolName?: string; input?: unknown } } | undefined;
+      const line = e.line as { type?: string; payload?: { toolName?: string; callID?: string; input?: unknown } } | undefined;
       if (!line?.type?.startsWith("tool.call.") || !line.payload?.toolName || !isBash(String(line.payload.toolName))) return;
-      const command = String(line.payload.input || line.payload.toolName).slice(0, 200);
-      liveByCommand.set(command, { status: line.type.split(".").pop() || "", id: e.id || i });
+      const callId = String(line.payload.callID || `ev${e.id}`);
+      const status = line.type.split(".").pop() || "";
+      const existing = live.get(callId);
+      if (existing) existing.status = status;
+      else live.set(callId, { key: `l-${callId}`, command: normalizeCommand(line.payload.input, String(line.payload.toolName)), status, source: "live" });
     });
-    for (const [command, { status }] of liveByCommand) {
-      out.push({ key: `l-${command}`, command, status, live: true });
-    }
-    return out;
+    return [...out, ...live.values()];
   }, [history.turns, run.events]);
   const terminalSignature = terminalEntries.map((e) => e.key).join("|");
   const visibleTerminalEntries = terminalClearedSig === terminalSignature ? [] : terminalEntries;
@@ -840,7 +853,7 @@ export function ChatPanel({
         >
           {terminalOpen ? <SquareTerminal size={12} /> : <Terminal size={12} />}<span>Terminal</span>
         </button>
-        <button className="details-toggle token-chip" onClick={() => setTokenDialog(true)} title="Token telemetry for this session">
+        <button className="details-toggle token-chip" onClick={() => setTokenDialog(true)} title="Token telemetry — totals cover every message of this session">
           <Coins size={12} />
           <span>{sessionTokens ? `${sessionTokens >= 10_000 ? `${Math.round(sessionTokens / 1000)}k` : sessionTokens.toLocaleString()} tokens` : "Tokens"}</span>
         </button>
@@ -1258,6 +1271,8 @@ export function ChatPanel({
           sessionId={sessionId || "draft"}
           title={sessionTitle || "New chat"}
           turns={history.turns}
+          totalTurns={history.total}
+          sessionTotal={sessionTokensTotal}
           liveTokens={liveTokens && !isTerminal(run.phase) ? liveTokens : null}
           onClose={() => setTokenDialog(false)}
         />

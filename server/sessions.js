@@ -347,7 +347,17 @@ export class SessionStore {
     const total = all.length;
     const end = Math.max(0, total - offset);
     const start = Math.max(0, end - limit);
-    return { turns: all.slice(start, end), total, hasMore: start > 0 };
+    // pagination-independent token total for the WHOLE session — the web UI's
+    // telemetry must not redefine "session total" as the reader pages back
+    let tokensTotal = null;
+    try {
+      tokensTotal = Number(this.query(
+        `SELECT COALESCE(SUM(json_extract(data, '$.tokens.total')), 0) AS n
+           FROM part WHERE session_id = ? AND json_extract(data, '$.type') = 'step-finish'`,
+        [sessionId]
+      )[0]?.n) || 0;
+    } catch { /* older stores without step tokens: null */ }
+    return { turns: all.slice(start, end), total, hasMore: start > 0, tokensTotal };
   }
 
   // Is a turn currently running in this session from ANY writer (desktop,

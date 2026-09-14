@@ -738,3 +738,28 @@ test("ZWUI-041: run-again on an old prompt leaves the current draft and its atta
   await expect(input).toHaveValue("follow-up draft that must survive");
   await expect(page.locator(".attached-file")).toHaveCount(1);
 });
+
+test("ZWUI-049: splitters are keyboard-operable separators with live values", async ({ page }) => {
+  const sidebar = page.locator(".sidebar-resizer");
+  await expect(sidebar).toHaveAttribute("role", "separator");
+  await expect(sidebar).toHaveAttribute("aria-valuenow", "238");
+  await sidebar.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(sidebar).toHaveAttribute("aria-valuenow", "254");
+  await page.keyboard.press("Shift+ArrowLeft");
+  await expect(sidebar).toHaveAttribute("aria-valuenow", "206");
+  await page.keyboard.press("Home");
+  await expect(sidebar).toHaveAttribute("aria-valuenow", "238");
+  // the inspector splitter follows the same pattern; ArrowLeft widens it
+  // (the inspector starts collapsed — open it first)
+  await page.getByLabel("Show preview panel").last().click();
+  const panel = page.locator(".panel-resizer");
+  await panel.focus();
+  await page.keyboard.press("ArrowLeft");
+  await expect(panel).toHaveAttribute("aria-valuenow", "436");
+  await page.keyboard.press("End");
+  await expect(panel).toHaveAttribute("aria-valuenow", "420");
+  // and the width actually applies to the grid
+  const width = await page.evaluate(() => getComputedStyle(document.querySelector(".workspace-main")).gridTemplateColumns.split(" ").map((s) => parseFloat(s)));
+  assert.ok(width.some((w) => Math.abs(w - 420) < 2), `inspector column should be the 420px default, got ${width.join(",")}`);
+});

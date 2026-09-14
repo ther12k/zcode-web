@@ -152,6 +152,25 @@ describe("paste-attachment previews (desktop parity)", () => {
   });
 });
 
+describe("ZWUI-048: file API routes (exact list route before the read catch-all)", () => {
+  it("GET /api/files/list returns a directory listing, not a read of a file named 'list'", async () => {
+    const r = await fetch(`${BASE}/api/files/list?dir=${encodeURIComponent(join(ws, "proj"))}`, { headers: auth });
+    assert.equal(r.status, 200);
+    const j = await r.json();
+    assert.equal(j.dir, join(ws, "proj"));
+    assert.ok(Array.isArray(j.entries), "the exact /api/files/list route must win over /api/files/:path");
+  });
+
+  it("capability discovery requires the bearer token (401 without it, never a fake 'disabled')", async () => {
+    const r = await fetch(`${BASE}/api/files/capability`);
+    assert.equal(r.status, 401);
+    const ok = await fetch(`${BASE}/api/files/capability`, { headers: auth });
+    assert.equal(ok.status, 200);
+    const j = await ok.json();
+    assert.equal(j.enabled, true);
+  });
+});
+
 describe("T04 safe content path", () => {
   it("serves the SPA shell on deep links", async () => {
     const r = await fetch(`${BASE}/w/demo`);

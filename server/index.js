@@ -482,6 +482,8 @@ async function handleApi(req, res, url) {
       transcript: page.turns,
       total: page.total,
       hasMore: page.hasMore,
+      // session-wide token sum, independent of transcript pagination
+      tokensTotal: page.tokensTotal ?? null,
       // a turn is running from ANY writer (desktop/CLI/web) — the UI shows
       // progress and blocks sending while this is true
       runActive: runInfo.active,
@@ -821,6 +823,24 @@ async function handleApi(req, res, url) {
     });
   }
 
+  // Read-only directory listing for the Code inspector. EXACT route — it
+  // must be matched before the /api/files/:path catch-all below, or a
+  // listing request reads a file literally named "list".
+  if (route === "/api/files/list" && req.method === "GET") {
+    if (process.env.ZCODE_ENABLE_FILES !== "1") {
+      return sendJson(res, 403, { error: "file API disabled (set ZCODE_ENABLE_FILES=1)" });
+    }
+    let dir;
+    try { dir = safeCwd(url.searchParams.get("dir")); }
+    catch (e) { return sendJson(res, 400, { error: e.message }); }
+    if (!existsSync(dir) || !statSync(dir).isDirectory()) return sendJson(res, 404, { error: "not found" });
+    const entries = readdirSync(dir, { withFileTypes: true })
+      .filter((d) => !d.name.startsWith(".") && d.name !== "node_modules")
+      .map((d) => ({ name: d.name, dir: d.isDirectory() }))
+      .sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name));
+    return sendJson(res, 200, { dir, entries });
+  }
+
   const filesMatch = route.match(/^\/api\/files\/(.+)$/);
   if (filesMatch && req.method === "GET") {
     if (process.env.ZCODE_ENABLE_FILES !== "1") {
@@ -909,23 +929,6 @@ async function handleApi(req, res, url) {
 
   // Opt-in via ZCODE_ENABLE_GIT=1; executes `git status --porcelain` /
   // `git diff` in an allowed-root cwd. No staging, no checkout, no writes.
-  // ZWUI-030 companion: read-only directory listing for the Code inspector.
-  const filesListMatch = route.match(/^\/api\/files\/list$/);
-  if (filesListMatch && req.method === "GET") {
-    if (process.env.ZCODE_ENABLE_FILES !== "1") {
-      return sendJson(res, 403, { error: "file API disabled (set ZCODE_ENABLE_FILES=1)" });
-    }
-    let dir;
-    try { dir = safeCwd(url.searchParams.get("dir")); }
-    catch (e) { return sendJson(res, 400, { error: e.message }); }
-    if (!existsSync(dir) || !statSync(dir).isDirectory()) return sendJson(res, 404, { error: "not found" });
-    const entries = readdirSync(dir, { withFileTypes: true })
-      .filter((d) => !d.name.startsWith(".") && d.name !== "node_modules")
-      .map((d) => ({ name: d.name, dir: d.isDirectory() }))
-      .sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name));
-    return sendJson(res, 200, { dir, entries });
-  }
-
   if (route === "/api/git/status" && req.method === "GET") {
     if (process.env.ZCODE_ENABLE_GIT !== "1") {
       return sendJson(res, 403, { error: "git API disabled (set ZCODE_ENABLE_GIT=1)" });

@@ -22,5 +22,7 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  // tests run under vitest (node runtime) — keep them out of the DOM-typed app build
+  "exclude": ["src/**/__tests__/**"]
 }

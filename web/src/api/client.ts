@@ -91,6 +91,8 @@ export type SessionDetail = {
   transcript: TranscriptTurn[];
   total: number;
   hasMore: boolean;
+  /** token sum over ALL messages of the session — independent of pagination */
+  tokensTotal?: number | null;
   /** a turn is running in this session from any writer (desktop/CLI/web) */
   runActive?: boolean;
   /** when that externally-running turn started (ms epoch), for the live timer */

@@ -103,6 +103,23 @@ export function App() {
     (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
     document.body.classList.remove("is-col-resizing");
   }, []);
+  // keyboard resizing on the splitters (separator pattern): arrows move by
+  // 16px (48 with shift), Home/End restore the responsive default width
+  const sidebarKeyDown = useCallback((e: React.KeyboardEvent) => {
+    const step = e.shiftKey ? 48 : 16;
+    const cur = sidebarWidth ?? 238;
+    if (e.key === "ArrowLeft") { e.preventDefault(); setSidebarWidth(Math.max(190, cur - step)); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); setSidebarWidth(Math.min(460, cur + step)); }
+    else if (e.key === "Home" || e.key === "End") { e.preventDefault(); setSidebarWidth(null); }
+  }, [sidebarWidth]);
+  const panelKeyDown = useCallback((e: React.KeyboardEvent) => {
+    const step = e.shiftKey ? 48 : 16;
+    const cur = panelWidth ?? 420;
+    // ArrowLeft widens the panel — same direction as dragging it leftward
+    if (e.key === "ArrowLeft") { e.preventDefault(); setPanelWidth(Math.min(900, cur + step)); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); setPanelWidth(Math.max(280, cur - step)); }
+    else if (e.key === "Home" || e.key === "End") { e.preventDefault(); setPanelWidth(null); }
+  }, [panelWidth]);
   // inspector starts collapsed (chat owns the width); the user's choice persists
   const [rightCollapsed, setRightCollapsed] = useState(() => {
     try { return localStorage.getItem("zcode-right-collapsed") !== "0"; } catch { return true; }
@@ -537,9 +554,14 @@ export function App() {
           role="separator"
           aria-orientation="vertical"
           aria-label="Resize sidebar"
+          aria-valuemin={190}
+          aria-valuemax={460}
+          aria-valuenow={sidebarWidth ?? 238}
+          tabIndex={0}
           onPointerDown={startSidebarResize}
           onPointerMove={moveSidebarResize}
           onPointerUp={endSidebarResize}
+          onKeyDown={sidebarKeyDown}
           onDoubleClick={() => setSidebarWidth(null)}
         />
       )}
@@ -583,9 +605,14 @@ export function App() {
             role="separator"
             aria-orientation="vertical"
             aria-label="Resize inspector panel"
+            aria-valuemin={280}
+            aria-valuemax={900}
+            aria-valuenow={panelWidth ?? 420}
+            tabIndex={0}
             onPointerDown={startPanelResize}
             onPointerMove={movePanelResize}
             onPointerUp={endPanelResize}
+            onKeyDown={panelKeyDown}
             onDoubleClick={() => setPanelWidth(null)}
           />
         )}

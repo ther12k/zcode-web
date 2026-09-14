@@ -140,28 +140,43 @@ function PreviewTab({ cwd, mobile, onMobile }: { cwd: string; mobile: boolean; o
 // ---------- Code ----------
 
 function CodeTab({ cwd, refreshKey = 0 }: { cwd: string; refreshKey?: number }) {
-  const [state, setState] = useState<{ enabled: boolean } | null>(null);
+  const [state, setState] = useState<{ enabled: boolean; unauthorized?: boolean } | null>(null);
   const [entries, setEntries] = useState<{ name: string; dir: boolean }[] | null>(null);
   const [openFile, setOpenFile] = useState<{ name: string; content: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // capability discovery goes through the AUTHENTICATED path — under token
+  // protection a bare fetch 401s and the tab must not misread it as "disabled"
   useEffect(() => {
     let alive = true;
-    void fetch("/api/files/capability").then((r) => r.json()).then((c) => alive && setState(c)).catch(() => alive && setState({ enabled: false }));
+    void (async () => {
+      try {
+        const r = await fetch("/api/files/capability", { headers: authHeaders() });
+        if (!alive) return;
+        if (r.status === 401) { setState({ enabled: false, unauthorized: true }); return; }
+        const j = await r.json();
+        setState(alive ? j : null);
+      } catch {
+        if (alive) setState({ enabled: false });
+      }
+    })();
     return () => { alive = false; };
   }, []);
 
   useEffect(() => {
-    if (!state?.enabled || !cwd) return;
+    if (!state?.enabled || state.unauthorized || !cwd) return;
     let alive = true;
-    void fetch(`/api/files/list?dir=${encodeURIComponent(cwd)}`, { headers: authHeaders() })
-      .then((r) => r.json())
-      .then((j) => {
+    void (async () => {
+      try {
+        const r = await fetch(`/api/files/list?dir=${encodeURIComponent(cwd)}`, { headers: authHeaders() });
+        const j = await r.json().catch(() => ({}));
         if (!alive) return;
-        if (j.error) setError(j.error);
-        else { setEntries(j.entries); setError(null); }
-      })
-      .catch(() => alive && setError("listing failed"));
+        if (!r.ok) { setError(j.error || `listing failed (${r.status})`); setEntries(null); return; }
+        setEntries(j.entries); setError(null);
+      } catch {
+        if (alive) setError("listing failed");
+      }
+    })();
     return () => { alive = false; };
   }, [state, cwd, refreshKey]);
 
@@ -169,8 +184,8 @@ function CodeTab({ cwd, refreshKey = 0 }: { cwd: string; refreshKey?: number }) 
     setError(null);
     try {
       const r = await fetch(`/api/files/${encodeURIComponent(cwd.replace(/\/$/, "") + "/" + name)}`, { headers: authHeaders() });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j.error || "read failed");
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || `read failed (${r.status})`);
       setOpenFile({ name, content: j.content });
     } catch (e) {
       setError((e as Error).message);
@@ -178,6 +193,15 @@ function CodeTab({ cwd, refreshKey = 0 }: { cwd: string; refreshKey?: number }) 
   }
 
   if (state === null) return <div className="empty-history"><LoaderCircle size={16} className="spin" /><p>Checking capability…</p></div>;
+  if (state.unauthorized) {
+    return (
+      <div className="empty-history">
+        <Code2 size={22} />
+        <p>Not authorized.</p>
+        <small>Paste this deployment&apos;s access token to inspect files.</small>
+      </div>
+    );
+  }
   if (!state.enabled) {
     return (
       <div className="empty-history">
