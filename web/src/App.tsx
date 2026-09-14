@@ -6,7 +6,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Archive, ArrowDownWideNarrow, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, CloudCheck,
+  Archive, ArrowDownWideNarrow, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, CloudCheck, Eye, EyeOff, KeyRound,
   FolderClosed, FolderOpen, History, Keyboard, LoaderCircle, Menu, MoreHorizontal, PanelLeft, PanelRight, Pin, PinOff, Plus,
   Search, Settings2, SquarePen, Unplug, WandSparkles, X, GitBranch,
 } from "lucide-react";
@@ -20,6 +20,7 @@ import { RightPanel } from "./components/RightPanel";
 import { SearchDialog } from "./components/SearchDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { ShortcutsDialog, SkillsDialog, ToolsDialog } from "./components/InfoDialogs";
+import { AnalyticsDialog } from "./components/AnalyticsDialog";
 
 type SessionRow = {
   id: string; title: string; directory: string; updatedAt: number;
@@ -35,7 +36,80 @@ export function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     (() => { try { return localStorage.getItem("zcode-sidebar-collapsed") === "1"; } catch { return false; } })()
   );
-  const [rightCollapsed, setRightCollapsed] = useState(false);
+  // user-resizable sidebar width (drag the divider; persisted). The fixed
+  // per-breakpoint widths only apply while no custom width has been set.
+  const [sidebarWidth, setSidebarWidth] = useState<number | null>(() => {
+    try {
+      const v = Number(localStorage.getItem("zcode-sidebar-width"));
+      return v >= 190 && v <= 460 ? v : null;
+    } catch { return null; }
+  });
+  const resizing = useRef<{ startX: number; startW: number } | null>(null);
+  useEffect(() => {
+    try {
+      if (sidebarWidth === null) localStorage.removeItem("zcode-sidebar-width");
+      else localStorage.setItem("zcode-sidebar-width", String(sidebarWidth));
+    } catch {}
+  }, [sidebarWidth]);
+  const startSidebarResize = useCallback((e: React.PointerEvent) => {
+    if (sidebarCollapsed) return;
+    e.preventDefault();
+    const el = e.currentTarget as HTMLElement;
+    el.setPointerCapture(e.pointerId);
+    resizing.current = { startX: e.clientX, startW: sidebarWidth ?? 238 };
+    document.body.classList.add("is-col-resizing");
+  }, [sidebarCollapsed, sidebarWidth]);
+  const moveSidebarResize = useCallback((e: React.PointerEvent) => {
+    if (!resizing.current) return;
+    const next = Math.min(460, Math.max(190, resizing.current.startW + (e.clientX - resizing.current.startX)));
+    setSidebarWidth((w) => (w === next ? w : next));
+  }, []);
+  const endSidebarResize = useCallback((e: React.PointerEvent) => {
+    if (!resizing.current) return;
+    resizing.current = null;
+    (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    document.body.classList.remove("is-col-resizing");
+  }, []);
+  // user-resizable inspector width (drag the divider; persisted). The panel
+  // is a FIXED-width column — the chat owns everything else.
+  const [panelWidth, setPanelWidth] = useState<number | null>(() => {
+    try {
+      const v = Number(localStorage.getItem("zcode-panel-width"));
+      return v >= 280 && v <= 900 ? v : null;
+    } catch { return null; }
+  });
+  const resizingPanel = useRef<{ startX: number; startW: number } | null>(null);
+  useEffect(() => {
+    try {
+      if (panelWidth === null) localStorage.removeItem("zcode-panel-width");
+      else localStorage.setItem("zcode-panel-width", String(panelWidth));
+    } catch {}
+  }, [panelWidth]);
+  const startPanelResize = useCallback((e: React.PointerEvent) => {
+    e.preventDefault();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    resizingPanel.current = { startX: e.clientX, startW: panelWidth ?? 420 };
+    document.body.classList.add("is-col-resizing");
+  }, [panelWidth]);
+  const movePanelResize = useCallback((e: React.PointerEvent) => {
+    if (!resizingPanel.current) return;
+    // dragging LEFT widens the panel (it sits on the right edge)
+    const next = Math.min(900, Math.max(280, resizingPanel.current.startW - (e.clientX - resizingPanel.current.startX)));
+    setPanelWidth((w) => (w === next ? w : next));
+  }, []);
+  const endPanelResize = useCallback((e: React.PointerEvent) => {
+    if (!resizingPanel.current) return;
+    resizingPanel.current = null;
+    (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    document.body.classList.remove("is-col-resizing");
+  }, []);
+  // inspector starts collapsed (chat owns the width); the user's choice persists
+  const [rightCollapsed, setRightCollapsed] = useState(() => {
+    try { return localStorage.getItem("zcode-right-collapsed") !== "0"; } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("zcode-right-collapsed", rightCollapsed ? "1" : "0"); } catch {}
+  }, [rightCollapsed]);
   // Responsive shell state (ZPAR-016): below 1100px the sidebar is an icon
   // rail; `navOpen` turns it into the fixed overlay drawer the stylesheet
   // already styles (`.is-sidebar-open`). Below 821px chat and inspector are
@@ -64,7 +138,7 @@ export function App() {
   );
   const [sortMenu, setSortMenu] = useState(false);
   const [branch, setBranch] = useState<string | null>(null);
-  const [modal, setModal] = useState<null | "search" | "settings" | "shortcuts" | "tools" | "skills">(null);
+  const [modal, setModal] = useState<null | "search" | "settings" | "shortcuts" | "tools" | "skills" | "analytics">(null);
   const [taskMenu, setTaskMenu] = useState(false);
   const [runBusy, setRunBusy] = useState(false);
   const [transcriptReload, setTranscriptReload] = useState(0);
@@ -80,7 +154,8 @@ export function App() {
   const notify = useCallback((text: string, type: "success" | "error" = "success") => {
     setToast({ text, type, key: Date.now() });
     if (toastTimer.current) clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(null), 3500);
+    // errors need reading time; successes are confirmations
+    toastTimer.current = setTimeout(() => setToast(null), type === "error" ? 6000 : 3500);
   }, []);
 
   useEffect(() => {
@@ -274,6 +349,15 @@ export function App() {
     navigate({ to: "/w/$workspace/s/$sessionId", params: { workspace: targetDir, sessionId: id } });
   }
 
+  // refresh the inspector (Changes/Code) whenever a run finishes — the agent
+  // may have touched the working tree
+  const [panelRefreshKey, setPanelRefreshKey] = useState(0);
+  const prevBusy = useRef(false);
+  useEffect(() => {
+    if (prevBusy.current && !runBusy) setPanelRefreshKey((k) => k + 1);
+    prevBusy.current = runBusy;
+  }, [runBusy]);
+
   if (!caps) {
     return <main className="workspace-loading"><div className="loading-brand"><ZLogo size={35} /><span>zcode</span></div><span className="loading-line" /><p>Opening your workspace…</p></main>;
   }
@@ -283,7 +367,8 @@ export function App() {
 
   return (
     <main
-      className={`app-shell fs-${fontSize} ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${navOpen ? "is-sidebar-open" : ""}`}
+      className={`app-shell fs-${fontSize} ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${navOpen ? "is-sidebar-open" : ""} ${sidebarWidth ? "sidebar-resized" : ""}`}
+      style={sidebarWidth && !sidebarCollapsed ? ({ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties) : undefined}
       data-fs={fontSize}
     >
       <header className="brand-header">
@@ -306,6 +391,10 @@ export function App() {
           aria-expanded={navOpen}
           onClick={() => setNavOpen(true)}
         ><Menu size={17} /></IconButton>
+        <span className="history-nav">
+          <IconButton label="Back" onClick={() => window.history.back()}><ChevronLeft size={16} /></IconButton>
+          <IconButton label="Forward" onClick={() => window.history.forward()}><ChevronRight size={16} /></IconButton>
+        </span>
         <div className="breadcrumbs">
           <button onClick={() => navigateToCwd(cwd)}><FolderClosed size={13} /><span>{projectLabel}</span></button>
           <span className="breadcrumb-divider">/</span>
@@ -395,7 +484,7 @@ export function App() {
                     if (!row) return null;
                     return (
                       <button key={id} className={`pinned-row ${id === activeSessionId ? "active" : ""}`} onClick={() => selectSession(id, row.directory)} title={row.title}>
-                        <span className="task-dot" />
+                        <span className={`task-dot ${id === activeSessionId ? "current" : ""}`} />
                         <span>{prefs.displayAliases[id] || row.title || id}</span>
                         <span className="pinned-kind">{row.directory.split("/").filter(Boolean).pop()}</span>
                       </button>
@@ -442,19 +531,36 @@ export function App() {
           <IconButton label="Settings" onClick={() => setModal("settings")}><Settings2 size={15} /></IconButton>
         </div>
       </aside>
+      {!sidebarCollapsed && (
+        <div
+          className="sidebar-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize sidebar"
+          onPointerDown={startSidebarResize}
+          onPointerMove={moveSidebarResize}
+          onPointerUp={endSidebarResize}
+          onDoubleClick={() => setSidebarWidth(null)}
+        />
+      )}
       {navOpen && <div className="sidebar-scrim" onClick={() => setNavOpen(false)} aria-hidden="true" />}
 
       <div
         className={`workspace-main ${rightCollapsed ? "right-collapsed" : ""} ${mobilePreview ? "preview-active" : ""} ${panelExpanded ? "preview-expanded" : ""}`}
+        style={panelWidth && !rightCollapsed && !panelExpanded ? ({ "--panel-w": `${panelWidth}px` } as React.CSSProperties) : undefined}
       >
         <ChatPanel
           key={cwd}
           client={client}
           cwd={cwd}
           sessionId={activeSessionId}
+          sessionTitle={activeSession?.title}
           modes={caps.modes}
           defaultMode={caps.modes.includes(prefs.mode) ? prefs.mode : caps.modes[0] || "plan"}
           branch={branch}
+          roots={roots}
+          onNavigateCwd={navigateToCwd}
+          providerLive={caps.providerConfigured}
           newChatNonce={newChatNonce}
           reloadKey={transcriptReload}
           injectedDraft={draft}
@@ -471,9 +577,22 @@ export function App() {
             }
           }}
         />
+        {!rightCollapsed && !panelExpanded && (
+          <div
+            className="panel-resizer"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize inspector panel"
+            onPointerDown={startPanelResize}
+            onPointerMove={movePanelResize}
+            onPointerUp={endPanelResize}
+            onDoubleClick={() => setPanelWidth(null)}
+          />
+        )}
         {!rightCollapsed ? (
           <RightPanel
             cwd={cwd}
+            refreshKey={panelRefreshKey}
             expanded={panelExpanded}
             onToggleExpanded={() => setPanelExpanded((v) => !v)}
             onCollapse={() => {
@@ -501,6 +620,7 @@ export function App() {
         </div>
         <div>
           <button onClick={() => setModal("settings")}>{providerLive ? "Z.AI enabled" : "No provider"}</button>
+          <button onClick={() => setModal("analytics")} title="Workspace analytics">Analytics</button>
           <span>{runBusy ? "1 running" : "idle"}</span>
           <button className="shortcut-button" aria-label="Keyboard shortcuts" onClick={() => setModal("shortcuts")}><Keyboard size={12} /></button>
         </div>
@@ -530,6 +650,14 @@ export function App() {
         />
       )}
       {modal === "shortcuts" && <ShortcutsDialog onClose={() => setModal(null)} />}
+      {modal === "analytics" && (
+        <AnalyticsDialog
+          open
+          token={loadTokenSafe()}
+          onClose={() => setModal(null)}
+          onSelectSession={(id, directory) => selectSession(id, directory)}
+        />
+      )}
       {modal === "tools" && <ToolsDialog caps={caps} onClose={() => setModal(null)} />}
       {modal === "skills" && (
         <SkillsDialog
@@ -576,25 +704,51 @@ export function App() {
 
 function TokenPrompt({ onSubmit, isInvalid }: { onSubmit: (t: string) => void; isInvalid?: boolean }) {
   const [v, setV] = useState("");
+  const [reveal, setReveal] = useState(false);
   return (
     <div className="modal-backdrop">
       <div className="dialog" role="dialog" aria-modal="true" aria-label="Access token required">
         <header className="dialog-header">
-          <div>
-            <h2>{isInvalid ? "Invalid access token" : "Access token required"}</h2>
-            <p>{isInvalid ? "The provided token was rejected. Please paste the valid ZCODE_WEB_TOKEN." : "Paste the deployment's ZCODE_WEB_TOKEN to continue."}</p>
+          <div className="token-head">
+            <span className="token-glyph"><KeyRound size={19} /></span>
+            <div>
+              <h2>{isInvalid ? "That token didn't take." : "Unlock this workspace."}</h2>
+              <p>
+                {isInvalid
+                  ? "The token was rejected by the server. Check it against ZCODE_WEB_TOKEN in the deployment's .env and try again."
+                  : "This deployment is protected. Paste its ZCODE_WEB_TOKEN once — it stays in this browser."}
+              </p>
+            </div>
           </div>
         </header>
-        <input
-          type="password"
-          value={v}
-          onChange={(e) => setV(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && onSubmit(v.trim())}
-          placeholder="token"
-          style={{ width: "100%", marginBottom: 12 }}
-          autoFocus
-        />
-        <button className="primary-button" onClick={() => onSubmit(v.trim())}>Continue</button>
+        <form
+          className="dialog-body"
+          onSubmit={(e) => { e.preventDefault(); onSubmit(v.trim()); }}
+        >
+          <label className="field-label" htmlFor="token-input">Access token</label>
+          <div className="token-field">
+            <input
+              id="token-input"
+              type={reveal ? "text" : "password"}
+              className="text-field mono"
+              value={v}
+              onChange={(e) => setV(e.target.value)}
+              placeholder="zb…"
+              autoComplete="off"
+              spellCheck={false}
+              autoFocus
+            />
+            <IconButton label={reveal ? "Hide token" : "Show token"} onClick={() => setReveal((r) => !r)}>
+              {reveal ? <EyeOff size={14} /> : <Eye size={14} />}
+            </IconButton>
+          </div>
+          <div className="dialog-footer">
+            <span className="muted">Stored locally · never sent anywhere but this server</span>
+            <button className="primary-button" disabled={!v.trim()}>
+              <CheckCircle2 size={13} />{isInvalid ? "Try again" : "Unlock"}
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );
@@ -718,7 +872,7 @@ function ProjectGroups({ roots, activeSessionId, pinnedSessions, onSelectSession
                           {(rows || []).map((s) => (
                             <div className={`task-row ${activeSessionId === s.id ? "active" : ""}`} key={s.id}>
                               <button className="task-link" onClick={() => onSelectSession(s.id, s.directory || dir)} title={s.title}>
-                                <span className="task-dot" />
+                                <span className={`task-dot ${activeSessionId === s.id ? "current" : ""}`} />
                                 <span className="task-title-wrap"><span className="task-title">{s.title || s.id}</span></span>
                                 <time>{relativeTime(s.updatedAt)}</time>
                               </button>
@@ -751,7 +905,7 @@ function SessionRow({ row, active, prefs, onSelect, onPin, onHide }: {
   return (
     <div className={`task-row ${active ? "active" : ""} ${pinned ? "is-pinned" : ""}`}>
       <button className="task-link" onClick={onSelect} title={`${row.title}${row.directory ? ` — ${row.directory}` : ""}`}>
-        <span className="task-dot" />
+        <span className={`task-dot ${active ? "current" : ""}`} />
         <span className="task-title-wrap"><span className="task-title">{prefs.displayAliases[row.id] || row.title || row.id}</span></span>
         <span className="task-project" title={row.directory}>{baseName(row.directory)}</span>
         <time>{relativeTime(row.updatedAt)}</time>

@@ -4,13 +4,14 @@
 // ZWUI-016 reducer; transport from the ZWUI-017 controller.
 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { ArrowLeftRight, ArrowUp, ArrowUpRight, AtSign, BadgeCheck, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Copy, Eye, EyeOff, FileText, FoldVertical, GitBranch, LoaderCircle, MessageSquare, Plus, ShieldCheck, Sparkles, Square, SquarePen, Terminal, Unplug, Wrench, X } from "lucide-react";
-import { ZLogo, IconButton, Markdown, CheckMark, useDialogA11y } from "../ui";
+import { ArrowLeftRight, ArrowUp, ArrowUpRight, BadgeCheck, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Coins, Copy, Eye, EyeOff, FileText, FoldVertical, FolderClosed, GitBranch, LoaderCircle, MessageSquare, Plus, RotateCcw, ShieldCheck, Sparkles, Square, SquarePen, SquareTerminal, Terminal, Unplug, Wrench, X, Zap } from "lucide-react";
+import { ZLogo, IconButton, Markdown, CheckMark, useDialogA11y, relativeTime } from "../ui";
 import { randomUUID } from "../lib/uuid";
 import { ApiError, type ApiClient, type CommandInfo, type FileCard, type ModelInfo, type SessionDetail, type TimelineEvent, type TranscriptTurn } from "../api/client";
 import { runReducer, initialRun, isTerminal, type StoredEvent } from "../state/run";
 import { StreamController } from "../state/stream";
 import { loadDraft, saveDraft, loadPrefs, savePrefs } from "../state/prefs";
+import { AgentTerminalDrawer, TokenTelemetryDialog, type TerminalEntry } from "./Telemetry";
 
 // One pending attachment: uploaded path for --attach plus the local File for
 // in-composer preview (object URL created lazily, revoked on removal)
@@ -29,14 +30,21 @@ const artifactUrl = (a: { sessionId: string; uuid: string }) => `/api/artifacts/
 
 
 export function ChatPanel({
-  client, cwd, sessionId, modes, defaultMode, branch, newChatNonce = 0, reloadKey = 0, injectedDraft, onNotify, onSessionCreated, onBusyChange, onSlashAction, onSessionMeta,
+  client, cwd, sessionId, sessionTitle, modes, defaultMode, branch, roots, onNavigateCwd, providerLive = true, newChatNonce = 0, reloadKey = 0, injectedDraft, onNotify, onSessionCreated, onBusyChange, onSlashAction, onSessionMeta,
 }: {
   client: ApiClient;
   cwd: string;
   sessionId: string | null;
+  sessionTitle?: string;
   modes: string[];
   defaultMode: string;
   branch?: string | null;
+  /** allowed workspace roots — the project switcher */
+  roots?: string[];
+  /** navigate the shell to another project directory */
+  onNavigateCwd?: (dir: string) => void;
+  /** false → composer explains instead of failing on send */
+  providerLive?: boolean;
   newChatNonce?: number;
   reloadKey?: number;
   injectedDraft?: { text: string; key: number } | null;
@@ -54,7 +62,22 @@ export function ChatPanel({
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [mode, setMode] = useState(defaultMode);
   const [model, setModel] = useState("");
-  const [menu, setMenu] = useState<"mode" | "model" | null>(null);
+  const [menu, setMenu] = useState<"mode" | "model" | "project" | null>(null);
+  // project switcher data (roots → projects), fetched on first open
+  const [projectsByRoot, setProjectsByRoot] = useState<Record<string, string[]> | null>(null);
+  const openProjectMenu = useCallback(() => {
+    setMenu((m) => (m === "project" ? null : "project"));
+    if (projectsByRoot) return;
+    const token = localStorage.getItem("zcode-web-token") || "";
+    void fetch("/api/projects", { headers: { authorization: `Bearer ${token}` } })
+      .then((r) => r.json())
+      .then((j) => {
+        const map: Record<string, string[]> = {};
+        for (const r of j.roots || []) map[r.path] = r.projects || [];
+        setProjectsByRoot(map);
+      })
+      .catch(() => setProjectsByRoot({}));
+  }, [projectsByRoot]);
   // "/" palette: local actions run in the app; send-through commands go to
   // the CLI as the prompt (it expands them — verified for /compact and
   // custom .zcode/commands)
@@ -69,6 +92,17 @@ export function ChatPanel({
   }, [client, cwd]);
   const [detailsHidden, setDetailsHidden] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
+  // telemetry surfaces (ported from the clone, on real data): token audit
+  // dialog, agent terminal drawer, relative/exact byline timestamps
+  const [tokenDialog, setTokenDialog] = useState(false);
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  const [terminalClearedSig, setTerminalClearedSig] = useState<string | null>(null);
+  const [exactTimes, setExactTimes] = useState(() => {
+    try { return localStorage.getItem("zcode-exact-times") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("zcode-exact-times", exactTimes ? "1" : "0"); } catch {}
+  }, [exactTimes]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [uploading, setUploading] = useState(0);
   const [preview, setPreview] = useState<PreviewState | null>(null);
@@ -87,11 +121,11 @@ export function ChatPanel({
       .then((r) => {
         if (!alive) return;
         setModels(r.models);
-        // server default first: a persisted ref may point at a provider that
-        // is currently rate-limited or gone; the saved pick still wins over a
-        // plain first-model fallback
+        // Keep a valid user choice across reloads. Server default only wins
+        // when saved model no longer exists.
         const saved = loadPrefs().model;
-        setModel((cur) => cur || (r.models.find((m) => m.isDefault) || r.models.find((m) => m.ref === saved) || r.models[0])?.ref || "");
+        setModel((cur) => cur || (r.models.find((m) => m.ref === saved) || r.models.find((m) => m.isDefault) || r.models[0])?.ref || "");
+        if (saved && !r.models.some((m) => m.ref === saved)) savePrefs({ model: "" });
       })
       .catch(() => {});
     return () => { alive = false; };
@@ -285,7 +319,7 @@ export function ChatPanel({
       const el = scroll.current;
       if (el && stickToBottom.current) el.scrollTo({ top: el.scrollHeight });
     });
-  }, [run.answer, run.activity, history]);
+  }, [run.answer, run.activity, run.submittedText, history]);
   useEffect(() => {
     // the desktop's live timer on an in-progress turn
     if (!externalActive || !externalStartedAt) return;
@@ -296,7 +330,10 @@ export function ChatPanel({
   }, [externalActive, externalStartedAt]);
   useEffect(() => {
     if (!menu) return;
-    const close = (e: MouseEvent) => { if (!(e.target as HTMLElement).closest(".composer-menu-wrap")) setMenu(null); };
+    const close = (e: MouseEvent) => {
+      const el = e.target as HTMLElement;
+      if (!el.closest(".composer-menu-wrap") && !el.closest(".project-menu-wrap")) setMenu(null);
+    };
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMenu(null); };
     document.addEventListener("mousedown", close);
     window.addEventListener("keydown", onKey);
@@ -304,6 +341,12 @@ export function ChatPanel({
   }, [menu]);
 
   const localBusy = run.phase !== "idle" && !isTerminal(run.phase);
+  // the sent prompt echoes instantly; once the transcript commits the real
+  // user turn (createdAt at/after submit), the echo retires
+  const echoVisible = run.submittedText && run.phase !== "idle" && !(
+    isTerminal(run.phase) &&
+    history.turns.some((t) => t.role === "user" && t.text === run.submittedText && (t.createdAt || 0) >= run.submittedAt - 2000)
+  );
   // busy either because a run is attached here or because the desktop/CLI is
   // mid-turn on this session — both mean "can't send yet"
   const busy = localBusy || externalActive;
@@ -510,14 +553,14 @@ export function ChatPanel({
   }, [run.jobId, client, onNotify]);
   stopRunRef.current = stopRun;
 
-  const send = useCallback(async () => {
-    if (busy || uploading > 0) return;
-    const text = input.trim();
+  const send = useCallback(async (overrideText?: string) => {
+    if (busy || uploading > 0 || !providerLive) return;
+    const text = (overrideText ?? input).trim();
     if (!text && !attachments.length) return;
     const requestId = randomUUID();
     const submitView = sessionId ?? "new";
     runViewKey.current = submitView;
-    dispatch({ type: "submit", requestId });
+    dispatch({ type: "submit", requestId, text: overrideText ?? input });
     try {
       const accepted = await client.chat({
         text: text || "Analyze the attached file(s).",
@@ -557,7 +600,7 @@ export function ChatPanel({
         dispatch({ type: "submit-failed", error: e instanceof ApiError ? e.message : String(e) });
       }
     }
-  }, [busy, uploading, input, attachments, client, sessionId, cwd, mode, model, onSessionCreated]);
+  }, [busy, uploading, input, attachments, client, sessionId, cwd, mode, model, providerLive, onSessionCreated]);
 
   // models grouped by provider in server order (same-provider models are adjacent)
   const modelGroups = useMemo(() => {
@@ -582,6 +625,39 @@ export function ChatPanel({
     }
     return null;
   }, [run.events]);
+
+  // session-wide token count for the context-bar chip (committed turns + a
+  // live turn in flight)
+  const sessionTokens = useMemo(
+    () => history.turns.reduce((a, t) => a + (t.tokens || 0), 0) + (liveTokens && !isTerminal(run.phase) ? liveTokens : 0),
+    [history.turns, liveTokens, run.phase]
+  );
+
+  // Bash evidence for the agent terminal: committed transcript tool parts
+  // plus the live stream (last lifecycle state per command wins)
+  const terminalEntries = useMemo<TerminalEntry[]>(() => {
+    const isBash = (name: string) => /bash|shell/i.test(name);
+    const out: TerminalEntry[] = [];
+    history.turns.forEach((t, ti) => {
+      (t.tools || []).forEach((tool, oi) => {
+        if (isBash(tool.name)) out.push({ key: `h-${t.id || ti}-${oi}`, command: tool.detail || tool.name, status: tool.status, live: false });
+      });
+    });
+    const liveByCommand = new Map<string, { status: string; id: number }>();
+    run.events.forEach((e, i) => {
+      if (e.kind !== "line") return;
+      const line = e.line as { type?: string; payload?: { toolName?: string; input?: unknown } } | undefined;
+      if (!line?.type?.startsWith("tool.call.") || !line.payload?.toolName || !isBash(String(line.payload.toolName))) return;
+      const command = String(line.payload.input || line.payload.toolName).slice(0, 200);
+      liveByCommand.set(command, { status: line.type.split(".").pop() || "", id: e.id || i });
+    });
+    for (const [command, { status }] of liveByCommand) {
+      out.push({ key: `l-${command}`, command, status, live: true });
+    }
+    return out;
+  }, [history.turns, run.events]);
+  const terminalSignature = terminalEntries.map((e) => e.key).join("|");
+  const visibleTerminalEntries = terminalClearedSig === terminalSignature ? [] : terminalEntries;
 
   // derived live message bits
   const liveTools = run.events
@@ -616,8 +692,62 @@ export function ChatPanel({
   return (
     <section className="chat-panel" aria-label="Agent conversation">
       <div className="chat-context">
-        <span title={cwd}><span className="project-dot" /><span>{cwd.split("/").filter(Boolean).pop()}</span><ChevronDown size={12} /></span>
+        <div className="composer-menu-wrap project-menu-wrap">
+          <button
+            className="project-chip"
+            onClick={openProjectMenu}
+            title="Switch project"
+            aria-haspopup="listbox"
+            aria-expanded={menu === "project"}
+          >
+            <span className="project-dot" /><span>{cwd.split("/").filter(Boolean).pop()}</span>
+            <ChevronDown size={12} className={menu === "project" ? "rotate-180" : ""} />
+          </button>
+          {menu === "project" && (
+            <div className="popover project-popover" role="listbox" aria-label="Projects">
+              <div className="popover-label">SWITCH PROJECT</div>
+              {projectsByRoot === null && <div className="popover-label">loading…</div>}
+              {projectsByRoot && (roots || []).map((root) => (
+                <div key={root} className="project-group-list">
+                  <div className="popover-label">{root.split("/").filter(Boolean).pop()?.toUpperCase()} ROOT</div>
+                  <button role="option" aria-selected={cwd === root} onClick={() => { setMenu(null); onNavigateCwd?.(root); }}>
+                    <FolderClosed size={15} /><span><b>{root.split("/").filter(Boolean).pop()}</b><small>{root}</small></span>
+                    {cwd === root && <Check size={13} className="success-text" />}
+                  </button>
+                  {(projectsByRoot[root] || []).map((d) => {
+                    const dir = root.replace(/\/$/, "") + "/" + d;
+                    return (
+                      <button key={dir} role="option" aria-selected={cwd === dir} onClick={() => { setMenu(null); onNavigateCwd?.(dir); }}>
+                        <FolderClosed size={15} /><span><b>{d}</b><small>{dir}</small></span>
+                        {cwd === dir && <Check size={13} className="success-text" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
         {branch && <span className="branch-chip" title="git branch (read-only)"><GitBranch size={12} />{branch}</span>}
+        <span className="agent-active" title={busy ? "A turn is running" : "No turn running"}>
+          <span className={`pulse-dot ${busy ? "" : "idle"}`} />
+          <span>{busy ? `Agent active · ${(models.find((m) => m.ref === model)?.model || "GLM").split("/").pop()?.toUpperCase()}` : "Idle"}</span>
+        </span>
+        <button className="details-toggle" onClick={() => setExactTimes((v) => !v)} title="Toggle relative and exact message times">
+          <Clock3 size={12} /><span>{exactTimes ? "HH:MM" : "Relative"}</span>
+        </button>
+        <button
+          className={`details-toggle ${terminalOpen ? "context-active" : ""}`}
+          onClick={() => setTerminalOpen((v) => !v)}
+          title="Agent terminal — commands Zcode runs in this workspace"
+          aria-pressed={terminalOpen}
+        >
+          {terminalOpen ? <SquareTerminal size={12} /> : <Terminal size={12} />}<span>Terminal</span>
+        </button>
+        <button className="details-toggle token-chip" onClick={() => setTokenDialog(true)} title="Token telemetry for this session">
+          <Coins size={12} />
+          <span>{sessionTokens ? `${sessionTokens >= 10_000 ? `${Math.round(sessionTokens / 1000)}k` : sessionTokens.toLocaleString()} tokens` : "Tokens"}</span>
+        </button>
         <button className="details-toggle" onClick={() => setDetailsHidden((v) => !v)} title="Toggle thinking and tool details for messages">
           {detailsHidden ? <Eye size={12} /> : <EyeOff size={12} />}<span>{detailsHidden ? "Show details" : "Hide details"}</span>
         </button>
@@ -665,10 +795,19 @@ export function ChatPanel({
             <article className="user-message-block" key={t.id || `h${i}`}>
               {events.length > 0 && <div className="timeline-stack">{events.map((ev, j) => <TimelineRow key={j} event={ev} />)}</div>}
               <div className="message-byline">
-                <span className="user-avatar">Y</span><strong>You</strong>
-                <IconButton label="Copy prompt" onClick={() => void copyText(`u${i}`, t.text)}>
-                  {copied === `u${i}` ? <Check size={12} /> : <Copy size={12} />}
-                </IconButton>
+                <strong>You</strong>
+                {t.createdAt ? <Time createdAt={t.createdAt} exact={exactTimes} /> : null}
+                <span className="message-footer-actions user-turn-actions">
+                  <IconButton label="Copy prompt" onClick={() => void copyText(`u${i}`, t.text)}>
+                    {copied === `u${i}` ? <Check size={12} /> : <Copy size={12} />}
+                  </IconButton>
+                  <IconButton label="Edit and resend this prompt" onClick={() => { setInput(t.text); textarea.current?.focus(); }}>
+                    <SquarePen size={12} />
+                  </IconButton>
+                  <IconButton label="Run this prompt again" disabled={busy} onClick={() => void send(t.text)}>
+                    <RotateCcw size={12} />
+                  </IconButton>
+                </span>
               </div>
               <div className="user-message">{t.text}</div>
               {(t.files || []).length > 0 && (
@@ -679,15 +818,29 @@ export function ChatPanel({
             <article className={`agent-message ${detailsHidden ? "details-hidden" : ""}`} key={t.id || `h${i}`}>
               {events.length > 0 && <div className="timeline-stack">{events.map((ev, j) => <TimelineRow key={j} event={ev} />)}</div>}
               <div className="agent-byline">
-                <span className="agent-avatar"><ZLogo size={18} /></span><strong>Zcode</strong>
+  <strong>Zcode</strong>
+                {t.createdAt ? <Time createdAt={t.createdAt} exact={exactTimes} /> : null}
+                {t.tokens ? (
+                  <button className="tk-pill" onClick={() => setTokenDialog(true)} title="Token telemetry for this session">
+                    <Zap size={9} />{(t.tokens / 1000).toFixed(1)}k tk
+                  </button>
+                ) : null}
                 <button className="message-details-toggle" onClick={() => setDetailsHidden((v) => !v)} aria-expanded={!detailsHidden}>
                   {detailsHidden ? <Eye size={12} /> : <EyeOff size={12} />}<span>{detailsHidden ? "Details" : "Hide"}</span>
                 </button>
               </div>
-              {!detailsHidden && t.reasoning && (
+              {!detailsHidden && (t.reasoning || (t.tools || []).length > 0) && (
                 <details className="thinking-block history-thinking">
-                  <summary className="thinking-heading"><Brain size={13} /><span>Thinking</span><span className="thinking-hint">How I approached this</span></summary>
-                  <p>{t.reasoning}</p>
+                  <summary className="thinking-heading">
+                    <Brain size={13} />
+                    <span>
+                      {t.reasoning ? "Thinking" : "Steps"}
+                      {t.durationMs ? ` · ${formatDuration(t.durationMs)}` : ""}
+                      {(t.tools || []).length ? ` · ${(t.tools || []).length} step${(t.tools || []).length === 1 ? "" : "s"}` : ""}
+                    </span>
+                    <span className="thinking-hint">How I approached this</span>
+                  </summary>
+                  {t.reasoning && <p>{t.reasoning}</p>}
                 </details>
               )}
               {!detailsHidden && (t.tools || []).length > 0 && (
@@ -707,7 +860,11 @@ export function ChatPanel({
                     <CheckMark />
                     {t.durationMs ? `Worked for ${formatDuration(t.durationMs)}` : t.error ? "Turn failed" : "Completed"}
                     {t.error ? <span className="failed-chip">failed</span> : null}
-                    {t.tokens ? <span className="turn-tokens">· {(t.tokens / 1000).toFixed(1)}k tokens</span> : null}
+                    {t.tokens ? (
+                      <button className="turn-tokens" onClick={() => setTokenDialog(true)} title="Token telemetry">
+                        · {(t.tokens / 1000).toFixed(1)}k tokens
+                      </button>
+                    ) : null}
                   </span>
                   <span className="message-footer-actions">
                     <IconButton label="Copy response" onClick={() => void copyText(`h${i}`, t.text)}>
@@ -726,11 +883,22 @@ export function ChatPanel({
           );
         })}
 
+        {/* instant echo of the prompt just sent — the transcript only
+            commits it when the run's messages land */}
+        {echoVisible && (
+          <article className="user-message-block echo" key={`echo-${run.requestId}`}>
+            <div className="message-byline">
+              <strong>You</strong>
+            </div>
+            <div className="user-message">{run.submittedText}</div>
+          </article>
+        )}
+
         {/* a turn running in the desktop/CLI: progress row, no send */}
         {externalActive && !localBusy && (
           <article className="agent-message">
             <div className="agent-byline">
-              <span className="agent-avatar"><ZLogo size={18} /></span><strong>Zcode</strong>
+<strong>Zcode</strong>
             </div>
             <div className="working-message external-working">
               <LoaderCircle size={13} className="spin" />
@@ -743,7 +911,7 @@ export function ChatPanel({
         {(run.answer || run.reasoning || localBusy || run.error) && (
           <article className="agent-message">
             <div className="agent-byline">
-              <span className="agent-avatar"><ZLogo size={18} /></span><strong>Zcode</strong>
+<strong>Zcode</strong>
               <span className="agent-model">{(models.find((m) => m.ref === model)?.model || "GLM").split("/").pop()?.toUpperCase()}</span>
               {run.phase !== "idle" && <span className="message-duration"><Clock3 size={11} />{run.phase}</span>}
               <button className="message-details-toggle" onClick={() => setDetailsHidden((v) => !v)} aria-expanded={!detailsHidden}>
@@ -760,14 +928,27 @@ export function ChatPanel({
                 ))}
               </div>
             )}
-            {run.answer ? <Markdown text={run.answer} /> : null}
+            {run.answer
+              ? <span className="stream-wrap"><Markdown text={run.answer} />{localBusy && <span className="stream-caret" aria-hidden="true" />}</span>
+              : null}
             {liveError && <div className="danger-text">{liveError}</div>}
             {run.error && <div className="danger-text">{run.error}</div>}
+            {run.error && isTerminal(run.phase) && run.submittedText && !busy && (
+              <div className="message-footer">
+                <button className="retry-button" onClick={() => void send(run.submittedText)}>
+                  <RotateCcw size={12} />Retry this prompt
+                </button>
+              </div>
+            )}
             {!busy && run.phase === "succeeded" && (
               <div className="message-footer">
                 <span className="task-completed">
                   <CheckMark />{mode === "plan" ? "Plan ready" : "Task completed"}
-                  {liveTokens ? <span className="turn-tokens">· {(liveTokens / 1000).toFixed(1)}k tokens</span> : null}
+                  {liveTokens ? (
+                    <button className="turn-tokens" onClick={() => setTokenDialog(true)} title="Token telemetry">
+                      · {(liveTokens / 1000).toFixed(1)}k tokens
+                    </button>
+                  ) : null}
                 </span>
                 {mode === "plan" && (
                   <button className="plan-apply" onClick={() => { setMode("build"); savePrefs({ mode: "build" }); textarea.current?.focus(); }}>
@@ -781,11 +962,17 @@ export function ChatPanel({
 
         {localBusy && (
           <div className="working-message" role="status">
-            <span className="agent-avatar"><ZLogo size={18} /></span>
             <span>Zcode is working<span className="thinking-dots"><i /><i /><i /></span></span>
           </div>
         )}
       </div>
+
+      <AgentTerminalDrawer
+        open={terminalOpen}
+        entries={visibleTerminalEntries}
+        onClose={() => setTerminalOpen(false)}
+        onClear={() => setTerminalClearedSig(terminalSignature)}
+      />
 
       <div className="composer-zone">
         {localBusy && run.transportLost && (
@@ -856,7 +1043,9 @@ export function ChatPanel({
               const files = Array.from(e.clipboardData.files || []);
               if (files.length) { e.preventDefault(); void attachFiles(files); }
             }}
-            placeholder={sessionId ? "Ask for follow-up changes…" : "What would you like to build?"}
+            placeholder={!providerLive
+              ? "No model provider configured on this host — set one up before sending"
+              : sessionId ? "Ask for follow-up changes…" : "What would you like to build?"}
             aria-label="Message Zcode"
             role="combobox"
             aria-expanded={cmdQuery != null && cmdMatches.length > 0}
@@ -881,20 +1070,23 @@ export function ChatPanel({
               <div className="composer-menu-wrap">
                 <IconButton label="Attach a file" onClick={() => fileInput.current?.click()}><Plus size={17} /></IconButton>
               </div>
-              <IconButton label="Mention a file" onClick={() => fileInput.current?.click()}><AtSign size={15} /></IconButton>
               <div className="composer-menu-wrap">
                 <button className="mode-picker" onClick={() => setMenu(menu === "mode" ? null : "mode")}>
                   <ShieldCheck size={13} /><span>{mode}</span><ChevronDown size={11} />
                 </button>
                 {menu === "mode" && (
                   <div className="popover mode-popover">
-                    <div className="popover-label">EXECUTION MODE <kbd>⇧ Tab</kbd></div>
-                    {(modes.includes("plan") || modes.includes("build") ? [
-                      { id: "plan", label: "Plan", description: "Think it through before building" },
-                      { id: "build", label: "Build", description: "Make changes to project files" },
-                      { id: "edit", label: "Edit", description: "Edit files with confirmation" },
-                      { id: "yolo", label: "Yolo", description: "Run without asking (trusted repos)" },
-                    ] : modes.map((m) => ({ id: m, label: m, description: "" }))).map((item) => (
+                    <div className="popover-label">EXECUTION MODE</div>
+                    {modes.map((m) => ({
+                      id: m,
+                      label: m.charAt(0).toUpperCase() + m.slice(1),
+                      description: ({
+                        plan: "Think it through before building",
+                        build: "Make changes to project files",
+                        edit: "Edit files with confirmation",
+                        yolo: "Run without asking (trusted repos)",
+                      } as Record<string, string>)[m] || "Server-advertised execution mode",
+                    })).map((item) => (
                       <button key={item.id} onClick={() => { setMode(item.id); savePrefs({ mode: item.id }); setMenu(null); }}>
                         {item.id === "plan" ? <MessageSquare size={15} /> : <SquarePen size={15} />}
                         <span><b>{item.label}</b><small>{item.description}</small></span>
@@ -929,7 +1121,13 @@ export function ChatPanel({
               {busy && run.jobId && (
                 <IconButton label="Stop run" onClick={stopRun}><Square size={13} /></IconButton>
               )}
-              <button className="send-button" disabled={busy || uploading > 0 || (!input.trim() && !attachments.length)} aria-label="Send message" title="Send message (Enter)" onClick={() => void send()}>
+              <button
+                className="send-button"
+                disabled={busy || uploading > 0 || !providerLive || (!input.trim() && !attachments.length)}
+                aria-label="Send message"
+                title={!providerLive ? "No model provider is configured on this host" : "Send message (Enter)"}
+                onClick={() => void send()}
+              >
                 {busy ? <LoaderCircle size={16} className="spin" /> : <ArrowUp size={17} strokeWidth={2.2} />}
               </button>
             </div>
@@ -953,15 +1151,27 @@ export function ChatPanel({
         }}
       />
       {preview && <PreviewOverlay preview={preview} onClose={() => setPreview(null)} />}
+      {tokenDialog && (
+        <TokenTelemetryDialog
+          sessionId={sessionId || "draft"}
+          title={sessionTitle || "New chat"}
+          turns={history.turns}
+          liveTokens={liveTokens && !isTerminal(run.phase) ? liveTokens : null}
+          onClose={() => setTokenDialog(false)}
+        />
+      )}
     </section>
   );
 }
 
-function useStickyModel(models: ModelInfo[]) {
-  const prefs = loadPrefs();
-  return models.some((m) => m.ref === prefs.model) ? prefs.model : models.find((m) => m.isDefault)?.ref || models[0]?.ref || "";
+// byline time — relative ("5m") by default, exact HH:MM when toggled
+function Time({ createdAt, exact }: { createdAt: number; exact: boolean }) {
+  const d = new Date(createdAt);
+  const label = exact
+    ? `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
+    : relativeTime(createdAt);
+  return <time title={d.toLocaleString()}>{label}</time>;
 }
-void useStickyModel;
 
 
 // Reference-pattern collapsible tool evidence (activity-stack classes).

@@ -35,6 +35,9 @@ export type RunState = {
   lastEventId: number;            // highest applied id (replay cursor)
   streamAttached: boolean;        // transport state — NOT run state
   transportLost: boolean;         // reconnects exhausted; awaiting job reconciliation — run NOT failed
+  /** the prompt as typed — echoed instantly until the transcript commits it */
+  submittedText: string;
+  submittedAt: number;
   error: string | null;
   activity: string;
   reasoning: string;
@@ -45,6 +48,7 @@ export function initialRun(): RunState {
   return {
     jobId: null, phase: "idle", requestId: null, sessionId: null,
     events: [], lastEventId: 0, streamAttached: false, transportLost: false,
+    submittedText: "", submittedAt: 0,
     error: null, activity: "", reasoning: "", answer: "",
   };
 }
@@ -56,7 +60,7 @@ export function isTerminal(phase: RunPhase): boolean {
 }
 
 type Action =
-  | { type: "submit"; requestId: string }
+  | { type: "submit"; requestId: string; text?: string }
   | { type: "accepted"; jobId: string; sessionId: string | null; replayed?: boolean }
   | { type: "submit-failed"; error: string }
   | { type: "stream-attached" }
@@ -120,7 +124,14 @@ function applyEvent(run: RunState, ev: StoredEvent): RunState {
 export function runReducer(run: RunState, action: Action): RunState {
   switch (action.type) {
     case "submit":
-      return { ...initialRun(), phase: "submitting", requestId: action.requestId };
+      return {
+        ...initialRun(),
+        phase: "submitting",
+        requestId: action.requestId,
+        // echo the prompt instantly — the transcript only commits it later
+        submittedText: action.text ?? "",
+        submittedAt: Date.now(),
+      };
     case "accepted":
       return {
         ...run,

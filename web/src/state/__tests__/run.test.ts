@@ -16,6 +16,23 @@ describe("run reducer", () => {
     expect(r.phase).toBe("running");
   });
 
+  it("the sent prompt echoes until the transcript commits it", () => {
+    let r = runReducer(initialRun(), { type: "submit", requestId: "r1", text: "fix the login bug" });
+    // echo is live immediately, before any event arrives
+    expect(r.submittedText).toBe("fix the login bug");
+    expect(r.submittedAt).toBeGreaterThan(0);
+    r = runReducer(r, { type: "accepted", jobId: "j1", sessionId: "sess_echo" });
+    r = runReducer(r, { type: "events", events: [line(1, "turn.started")] });
+    expect(r.submittedText).toBe("fix the login bug");
+    // terminal without the committed turn in history: echo stays (UI decides via createdAt)
+    r = runReducer(r, { type: "job-status", status: "succeeded" });
+    expect(r.submittedText).toBe("fix the login bug");
+    // reset (detach/new chat) clears the echo
+    r = runReducer(r, { type: "reset" });
+    expect(r.submittedText).toBe("");
+    expect(r.submittedAt).toBe(0);
+  });
+
   it("text deltas accumulate into answer; reasoning separately", () => {
     let r = runReducer(initialRun(), { type: "accepted", jobId: "j1", sessionId: null });
     r = runReducer(r, {

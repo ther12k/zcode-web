@@ -80,6 +80,8 @@ export type TranscriptTurn = {
   error?: string | null;
   /** wall-clock duration of the whole agentic turn (turn_usage), when it ended */
   durationMs?: number | null;
+  /** message creation time (epoch ms) — byline timestamps */
+  createdAt?: number | null;
   /** assistant message still streaming from another writer */
   incomplete?: boolean;
 };
