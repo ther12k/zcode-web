@@ -15,6 +15,11 @@ import { scanIssueRefs, issueKey, parseIssueKey, type IssueIdentity, type Scanne
 import { loadDraft, saveDraft, loadPrefs, savePrefs } from "../state/prefs";
 import { AgentTerminalDrawer, TokenTelemetryDialog, type TerminalEntry } from "./Telemetry";
 
+// transcript page size: big enough that the user's own recent prompts are in
+// view when opening an agent-heavy session (tool runs chain many turns per
+// prompt; 10-turn pages routinely hid them)
+const HISTORY_PAGE = 30;
+
 // zcode-artifact://<sessionId>/tool-result-<uuid> → server route args
 function artifactArgs(url: string): { sessionId: string; uuid: string } | null {
   const m = url.match(/zcode-artifact:\/\/(sess_[A-Za-z0-9-]+)\/tool-result-([A-Za-z0-9-]+)$/);
@@ -200,7 +205,7 @@ export function ChatPanel({
     stickToBottom.current = true;
     setHistory({ turns: [], total: 0, hasMore: false });
     setHistoryLoading(true);
-    void client.session(sessionId, 10, 0)
+    void client.session(sessionId, HISTORY_PAGE, 0)
       .then((d) => { if (alive) applySessionPage(d); })
       .catch((e) => { if (alive) onNotify(e instanceof ApiError ? e.message : String(e), "error"); })
       .finally(() => { if (alive) setHistoryLoading(false); });
@@ -211,7 +216,7 @@ export function ChatPanel({
   useEffect(() => {
     if (!syncTick || !sessionId) return;
     let alive = true;
-    void client.session(sessionId, 10, 0)
+    void client.session(sessionId, HISTORY_PAGE, 0)
       .then((d) => { if (alive) mergeSessionPage(d); })
       .catch(() => {});
     return () => { alive = false; };
@@ -244,7 +249,7 @@ export function ChatPanel({
       if (fetching || document.visibilityState !== "visible") return;
       fetching = true;
       try {
-        const d = await client.session(sessionId, 10, 0);
+        const d = await client.session(sessionId, HISTORY_PAGE, 0);
         if (alive) mergeSessionPage(d);
       } catch { /* transient */ }
       finally { fetching = false; }
@@ -538,7 +543,7 @@ export function ChatPanel({
     };
     const epoch = sessionEpochRef.current;
     try {
-      const d = await client.session(sessionId, 10, history.turns.length);
+      const d = await client.session(sessionId, HISTORY_PAGE, history.turns.length);
       // the reader may have switched conversations while the page was in
       // flight — a stale prepend must never land in the new view
       if (sessionEpochRef.current !== epoch) return;
