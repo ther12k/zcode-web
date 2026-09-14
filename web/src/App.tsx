@@ -21,6 +21,7 @@ import { SearchDialog } from "./components/SearchDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { ShortcutsDialog, SkillsDialog, ToolsDialog } from "./components/InfoDialogs";
 import { AnalyticsDialog } from "./components/AnalyticsDialog";
+import type { IssueIdentity, ScannedIssueRef } from "./lib/issueRefs";
 
 type SessionRow = {
   id: string; title: string; directory: string; updatedAt: number;
@@ -155,6 +156,17 @@ export function App() {
   );
   const [sortMenu, setSortMenu] = useState(false);
   const [branch, setBranch] = useState<string | null>(null);
+  // GitHub repo bound to this project (origin remote) — bare #N resolves here
+  const [gitRemote, setGitRemote] = useState<{ host: string; owner: string; repo: string } | null>(null);
+  // ZWUI-051: issue references seen in the conversation + the one selected
+  const [conversationIssues, setConversationIssues] = useState<ScannedIssueRef[]>([]);
+  const [selectedIssue, setSelectedIssue] = useState<IssueIdentity | null>(null);
+  const openIssue = useCallback((identity: IssueIdentity) => {
+    setSelectedIssue(identity);
+    // the pane opens onto the issue; on compact widths that is the pane switch
+    if (isPane) setMobilePreview(true);
+    else setRightCollapsed(false);
+  }, [isPane]);
   const [modal, setModal] = useState<null | "search" | "settings" | "shortcuts" | "tools" | "skills" | "analytics">(null);
   const [taskMenu, setTaskMenu] = useState(false);
   const [runBusy, setRunBusy] = useState(false);
@@ -298,7 +310,7 @@ export function App() {
       // always consume the body: an unread fetch body keeps the request
       // in-flight in Chromium and breaks networkidle-based waits
       .then((r) => r.json().catch(() => null))
-      .then((j) => { if (alive && j?.branch) setBranch(j.branch); else if (alive) setBranch(null); })
+      .then((j) => { if (!alive) return; setBranch(j?.branch || null); setGitRemote(j?.remote ?? null); })
       .catch(() => {});
     return () => { alive = false; };
   }, [cwd]);
@@ -586,6 +598,9 @@ export function App() {
           newChatNonce={newChatNonce}
           reloadKey={transcriptReload}
           injectedDraft={draft}
+          repoBinding={gitRemote}
+          onOpenIssue={openIssue}
+          onIssuesChange={setConversationIssues}
           onNotify={notify}
           onBusyChange={setRunBusy}
           onSlashAction={onSlashAction}
@@ -623,6 +638,10 @@ export function App() {
             runBusy={runBusy}
             sessionTitle={activeSession?.title}
             branch={branch}
+            client={client}
+            issues={conversationIssues}
+            selectedIssue={selectedIssue}
+            onAddToPrompt={(text) => setDraft({ text, key: Date.now() })}
             expanded={panelExpanded}
             onToggleExpanded={() => setPanelExpanded((v) => !v)}
             onCollapse={() => {

@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { JobManager, cliStatus, cliRuntimeStatus, config, uploadsDir } from "./zcode.js";
 import { ContentSearchIndex, renameSession } from "./sessions.js";
 import { SessionStore } from "./sessions.js";
+import { githubCapability, fetchIssue, fetchComments, validOwner, validRepo } from "./github.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const PUBLIC_DIR = join(ROOT, "public");
@@ -191,8 +192,35 @@ function serveStatic(res, pathname) {
   serveFile(file);
 }
 
-function providerConfigured() {
+// Parse a git remote URL into a GitHub identity: https or scp-style,
+// github.com or an enterprise host. Returns null when it is not one.
+function parseGitRemote(url) {
   try {
+    let host = null;
+    let path = url;
+    if (url.startsWith("http://") || url.startsWith("https://")) {
+      const u = new URL(url);
+      host = u.host;
+      path = u.pathname;
+    } else if (/^[^@]+@[^:]+:.+/.test(url)) {
+      const at = url.indexOf("@");
+      const colon = url.indexOf(":", at);
+      host = url.slice(at + 1, colon);
+      path = url.slice(colon + 1);
+    } else {
+      return null;
+    }
+    const segs = path.replace(/^\/+/, "").replace(/\.git\/?$/, "").split("/").filter(Boolean);
+    if (segs.length < 2) return null;
+    const [owner, repo] = segs.slice(-2);
+    if (!validOwner(owner) || !validRepo(repo)) return null;
+    return { host, owner, repo };
+  } catch {
+    return null;
+  }
+}
+
+function providerConfigured() {  try {
     const cfg = JSON.parse(readFileSync(cliStatus().configPath, "utf8"));
     return Boolean(cfg?.model?.main || typeof cfg?.model === "string");
   } catch {
@@ -791,6 +819,45 @@ async function handleApi(req, res, url) {
       return sendJson(res, e.code === "DB_MISSING" ? 503 : 500, { error: e.message });
     }
   }
+  // ---- ZWUI-051: read-only GitHub issue reading (backend-owned credentials;
+  // requests go only to the configured API base — never an arbitrary proxy) ----
+  if (route === "/api/github/capability" && req.method === "GET") {
+    return sendJson(res, 200, githubCapability());
+  }
+
+  const ghIssueMatch = route.match(/^\/api\/github\/issues\/([^/]+)\/([^/]+)\/(\d+)$/);
+  if (ghIssueMatch && req.method === "GET") {
+    if (!githubCapability().enabled) {
+      return sendJson(res, 403, { error: "GitHub reading is disabled on this deployment", code: "GITHUB_DISABLED" });
+    }
+    const owner = decodeURIComponent(ghIssueMatch[1]);
+    const repo = decodeURIComponent(ghIssueMatch[2]);
+    try {
+      const out = await fetchIssue(owner, repo, ghIssueMatch[3], { refresh: url.searchParams.get("refresh") === "1" });
+      return sendJson(res, 200, out);
+    } catch (e) {
+      return sendJson(res, e.status || 500, { error: e.message, code: e.code, retryAfter: e.retryAfter ?? null });
+    }
+  }
+
+  const ghCommentsMatch = route.match(/^\/api\/github\/issues\/([^/]+)\/([^/]+)\/(\d+)\/comments$/);
+  if (ghCommentsMatch && req.method === "GET") {
+    if (!githubCapability().enabled) {
+      return sendJson(res, 403, { error: "GitHub reading is disabled on this deployment", code: "GITHUB_DISABLED" });
+    }
+    try {
+      const out = await fetchComments(
+        decodeURIComponent(ghCommentsMatch[1]),
+        decodeURIComponent(ghCommentsMatch[2]),
+        ghCommentsMatch[3],
+        { page: Number(url.searchParams.get("page")) || 1 }
+      );
+      return sendJson(res, 200, out);
+    } catch (e) {
+      return sendJson(res, e.status || 500, { error: e.message, code: e.code });
+    }
+  }
+
   if (route === "/api/search" && req.method === "GET") {
     const q = (url.searchParams.get("q") || "").trim();
     if (q.length < 2) return sendJson(res, 200, { results: [] });
@@ -943,7 +1010,14 @@ async function handleApi(req, res, url) {
         path: line.slice(3),
       }));
       execFile("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd }, (e2, branch) => {
-        return sendJson(res, 200, { cwd, entries, branch: e2 ? null : String(branch).trim() });
+        // the origin remote binds bare #N references to a repository
+        // (issue resolution rule: never guess a repo for a bare number)
+        execFile("git", ["remote", "get-url", "origin"], { cwd }, (e3, rurl) => {
+          return sendJson(res, 200, {
+            cwd, entries, branch: e2 ? null : String(branch).trim(),
+            remote: e3 ? null : parseGitRemote(String(rurl).trim()),
+          });
+        });
       });
     });
     return;

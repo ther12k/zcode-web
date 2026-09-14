@@ -122,6 +122,32 @@ export type ChatAccepted = {
   replayed?: boolean;
 };
 
+export type GitHubCapability = { enabled: boolean; tokenPresent: boolean; apiHost: string; allowlist: string[] };
+export type GitHubIssue = {
+  number: number;
+  title: string;
+  state: "open" | "closed";
+  isPR: boolean;
+  author: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  closedAt: string | null;
+  body: string;
+  htmlUrl: string;
+  comments: number;
+  labels: { name: string; color: string | null }[];
+  assignees: string[];
+  milestone: { title: string; dueOn: string | null } | null;
+};
+export type GitHubComment = {
+  id: number;
+  author: string | null;
+  body: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+  htmlUrl: string;
+};
+
 export class ApiClient {
   private getToken: () => string;
   private baseUrl: string;
@@ -193,6 +219,19 @@ export class ApiClient {
       body: JSON.stringify({ jobId }),
     });
     return r.ticket;
+  }
+  githubCapability() {
+    return this.request<GitHubCapability>("/api/github/capability");
+  }
+  githubIssue(owner: string, repo: string, number: number, opts: { refresh?: boolean } = {}) {
+    return this.request<{ issue: GitHubIssue; cached: boolean }>(
+      `/api/github/issues/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${number}${opts.refresh ? "?refresh=1" : ""}`
+    );
+  }
+  githubComments(owner: string, repo: string, number: number, page = 1) {
+    return this.request<{ comments: GitHubComment[]; page: number; hasMore: boolean }>(
+      `/api/github/issues/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${number}/comments?page=${page}`
+    );
   }
   uploadUrl(name: string) {
     return `/api/uploads/${encodeURIComponent(name)}`;

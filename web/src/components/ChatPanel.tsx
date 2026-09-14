@@ -11,6 +11,7 @@ import { ApiError, type ApiClient, type CommandInfo, type FileCard, type ModelIn
 import { isTerminal } from "../state/run";
 import * as runs from "../state/runManager";
 import { snapshotSubmission, mayClearDraft, type Submission } from "../lib/submission";
+import { scanIssueRefs, issueKey, parseIssueKey, type IssueIdentity, type ScannedIssueRef } from "../lib/issueRefs";
 import { loadDraft, saveDraft, loadPrefs, savePrefs } from "../state/prefs";
 import { AgentTerminalDrawer, TokenTelemetryDialog, type TerminalEntry } from "./Telemetry";
 
@@ -30,7 +31,7 @@ type PreviewState =
   | { kind: "text"; title: string; text: string };
 
 export function ChatPanel({
-  client, cwd, sessionId, sessionTitle, modes, defaultMode, branch, roots, onNavigateCwd, providerLive = true, newChatNonce = 0, reloadKey = 0, injectedDraft, onNotify, onSessionCreated, onBusyChange, onSlashAction, onSessionMeta,
+  client, cwd, sessionId, sessionTitle, modes, defaultMode, branch, roots, onNavigateCwd, providerLive = true, newChatNonce = 0, reloadKey = 0, injectedDraft, onNotify, onSessionCreated, onBusyChange, onSlashAction, onSessionMeta, repoBinding, onOpenIssue, onIssuesChange,
 }: {
   client: ApiClient;
   cwd: string;
@@ -55,6 +56,12 @@ export function ChatPanel({
   onSlashAction?: (action: string) => boolean;
   /** session metadata from transcript fetches (title lift for deep links) */
   onSessionMeta?: (s: { id: string; title: string; directory?: string }) => void;
+  /** GitHub repo bound to this project (origin remote) — bare #N resolves here */
+  repoBinding?: { host: string; owner: string; repo: string } | null;
+  /** an issue reference was clicked in the conversation */
+  onOpenIssue?: (identity: IssueIdentity) => void;
+  /** issue references currently visible in this conversation */
+  onIssuesChange?: (refs: ScannedIssueRef[]) => void;
 }) {
   const draftKey = `${cwd}::${sessionId || "new"}`;
   // ZWUI-050: the run is OWNED by the job-keyed manager and survives view
@@ -638,6 +645,22 @@ export function ChatPanel({
     return groups;
   }, [models]);
 
+  // ZWUI-051: bare #N resolves against THIS project's origin remote —
+  // switching projects never reinterprets an old reference (resolution is
+  // per-scan, against the conversation's own binding)
+  const resolveBare = useCallback(() => repoBinding ?? null, [repoBinding]);
+  const conversationIssueRefs = useMemo(() => {
+    const texts = history.turns.filter((t) => t.text).map((t) => t.text);
+    if (run.answer) texts.push(run.answer);
+    if (run.submittedText) texts.push(run.submittedText);
+    return scanIssueRefs(texts.join("\n\n"), { resolveBare });
+  }, [history.turns, run.answer, run.submittedText, resolveBare]);
+  const issueRefSig = conversationIssueRefs.map(issueKey).join("|");
+  useEffect(() => {
+    if (onIssuesChange) onIssuesChange(conversationIssueRefs);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [issueRefSig]);
+
   // tokens reported by the latest turn.completed envelope
   const liveTokens = useMemo(() => {
     for (let i = run.events.length - 1; i >= 0; i--) {
@@ -806,7 +829,15 @@ export function ChatPanel({
           )}
         </div>
       </div>
-      <div className="messages-scroll" ref={scroll} onScroll={(e) => {
+      <div className="messages-scroll" ref={scroll}
+        onClick={(e) => {
+          const el = (e.target as HTMLElement).closest("[data-issue-ref]");
+          if (!el) return;
+          e.preventDefault();
+          const identity = parseIssueKey(el.getAttribute("data-issue-ref") || "");
+          if (identity) onOpenIssue?.(identity);
+        }}
+        onScroll={(e) => {
         const el = e.currentTarget;
         const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
         stickToBottom.current = atBottom;
@@ -924,7 +955,7 @@ export function ChatPanel({
               {!detailsHidden && (t.files || []).length > 0 && (
                 <FileCards files={t.files || []} onPreview={(f) => void previewArtifact(f)} />
               )}
-              <Markdown text={t.text} />
+              <Markdown text={t.text} issueResolver={resolveBare} />
               {t.durationMs || t.tokens || t.error ? (
                 <div className="message-footer">
                   <span className="task-completed" title={t.error || undefined}>
@@ -1023,7 +1054,7 @@ export function ChatPanel({
               </details>
             )}
             {run.answer
-              ? <span className="stream-wrap"><Markdown text={run.answer} />{localBusy && <span className="stream-caret" aria-hidden="true" />}</span>
+              ? <span className="stream-wrap"><Markdown text={run.answer} issueResolver={resolveBare} />{localBusy && <span className="stream-caret" aria-hidden="true" />}</span>
               : null}
             {liveError && <div className="danger-text">{liveError}</div>}
             {run.error && <div className="danger-text">{run.error}</div>}

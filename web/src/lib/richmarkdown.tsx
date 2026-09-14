@@ -6,6 +6,7 @@
 import { useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { safeMarkdown } from "./markdown";
+import { linkifyIssueRefsHtml, type RepoBinding } from "./issueRefs";
 
 export type CodeSegment = { kind: "code"; lang: string; code: string };
 export type TextSegment = { kind: "text"; text: string };
@@ -87,7 +88,7 @@ export function CodeBlock({ code, lang }: { code: string; lang: string }) {
   );
 }
 
-export function RichMarkdown({ text }: { text: string }) {
+export function RichMarkdown({ text, issueResolver }: { text: string; issueResolver?: () => RepoBinding | null }) {
   if (!text) return null;
   const segments = splitFences(text);
   return (
@@ -95,7 +96,12 @@ export function RichMarkdown({ text }: { text: string }) {
       {segments.map((seg, i) =>
         seg.kind === "code"
           ? <CodeBlock key={i} code={seg.code} lang={seg.lang} />
-          : <span key={i} className="markdown" dangerouslySetInnerHTML={{ __html: safeMarkdown(seg.text).html }} />
+          : <span key={i} className="markdown" dangerouslySetInnerHTML={{
+              // refs are linkified AFTER sanitization, over text nodes only
+              __html: issueResolver
+                ? linkifyIssueRefsHtml(safeMarkdown(seg.text).html, { resolveBare: issueResolver })
+                : safeMarkdown(seg.text).html,
+            }} />
       )}
     </>
   );

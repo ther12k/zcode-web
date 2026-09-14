@@ -767,3 +767,103 @@ test("ZWUI-049: splitters are keyboard-operable separators with live values", as
   const width = await page.evaluate(() => getComputedStyle(document.querySelector(".workspace-main")).gridTemplateColumns.split(" ").map((s) => parseFloat(s)));
   assert.ok(width.some((w) => Math.abs(w - 420) < 2), `inspector column should be the 420px default, got ${width.join(",")}`);
 });
+
+// ---- ZWUI-051: GitHub issue references and the read-only Issues inspector ----
+test.describe("issue inspector", () => {
+  const GH = (n: number, over: Record<string, unknown> = {}) => ({
+    number: n, title: `Issue ${n}`, state: "open", isPR: false,
+    author: "ther12k", createdAt: "2026-09-01T10:00:00Z", updatedAt: "2026-09-10T08:00:00Z",
+    closedAt: null, body: "## Acceptance\n- [ ] first criterion\n- [x] second criterion",
+    htmlUrl: `https://github.com/ther12k/zcode-web/issues/${n}`,
+    comments: 1, labels: [{ name: "ux", color: "1d76db" }], assignees: ["ther12k"],
+    milestone: { title: "v0.4", dueOn: null }, ...over,
+  });
+
+  test.beforeEach(async ({ page }) => {
+    // (routes must exist before the shell's one-time git-status fetch, so a
+    // reload after registration keeps the binding deterministic)
+    // the project's origin remote binds bare #N references
+    await page.route(/\/api\/git\/status.*/, (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        branch: "main", entries: [], remote: { host: "github.com", owner: "ther12k", repo: "zcode-web" },
+      }) })
+    );
+    await page.route(/\/api\/github\/capability/, (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        enabled: true, tokenPresent: false, apiHost: "api.github.com", allowlist: [],
+      }) })
+    );
+    await page.route(/\/api\/github\/issues\/ther12k\/zcode-web\/491$/, (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        issue: GH(491, { title: "Improve session recovery" }), cached: false,
+      }) })
+    );
+    await page.route(/\/api\/github\/issues\/ther12k\/zcode-web\/500$/, (route) =>
+      route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "Issue not found", code: "NOT_FOUND" }) })
+    );
+    await page.route(/\/api\/github\/issues\/acme\/tools\/77$/, (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        issue: GH(77, { title: "Extract helper", isPR: true, htmlUrl: "https://github.com/acme/tools/pull/77" }), cached: false,
+      }) })
+    );
+    await page.route(/\/api\/github\/issues\/ther12k\/zcode-web\/491\/comments/, (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        comments: [{ id: 1, author: "reviewer", body: "Looks right to me.", createdAt: "2026-09-11T09:00:00Z", updatedAt: "2026-09-11T09:00:00Z", htmlUrl: "c" }],
+        page: 1, hasMore: false,
+      }) })
+    );
+    await page.reload();
+    await page.waitForLoadState("domcontentloaded");
+    await expect(page.getByLabel("Message Zcode")).toBeVisible({ timeout: 8000 });
+  });
+
+  test("mention → verified reference → click opens the real issue in the pane → add to prompt", async ({ page }) => {
+    const input = page.getByLabel("Message Zcode");
+    await input.fill("check #491 please");
+    await input.press("Enter");
+    // the verified inline reference chip appears in the streamed answer
+    const chip = page.locator(".markdown a.issue-ref").first();
+    await expect(chip).toHaveText(/#491/, { timeout: 20_000 });
+    await chip.click();
+    // the pane opens on the Issues section with the VERIFIED issue
+    await expect(page.locator(".preview-panel")).toBeVisible();
+    await expect(page.getByRole("tab", { name: /Issues/ })).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator(".issue-title")).toHaveText("Improve session recovery", { timeout: 8000 });
+    await expect(page.locator(".issue-badge.open")).toContainText("Open");
+    await expect(page.locator(".issue-label", { hasText: "ux" })).toBeVisible();
+    // ☑/☐ task symbols — read-only, no checkbox inputs
+    await expect(page.locator(".issue-body")).toContainText("☐ first criterion");
+    await expect(page.locator(".issue-body")).toContainText("☑ second criterion");
+    await expect(page.locator(".issue-body input")).toHaveCount(0);
+    // the discussion loads
+    await expect(page.locator(".issue-comment")).toContainText("Looks right to me.");
+    // Add to prompt appends WITHOUT sending or replacing the draft
+    await page.getByLabel("Add to prompt").click();
+    await expect(page.getByLabel("Message Zcode")).toHaveValue(/ther12k\/zcode-web#491/);
+    await expect(page.locator(".working-message")).toHaveCount(0);
+    // exactly ONE echo remains (the original send) — Add to prompt neither
+    // sends nor retires anything
+    await expect(page.locator(".user-message-block.echo")).toHaveCount(1);
+    await expect(page.locator(".user-message-block.echo")).not.toContainText("ther12k/zcode-web#491");
+    // still editable and sendable
+    await expect(page.getByRole("button", { name: "Send message" })).toBeEnabled();
+  });
+
+  test("unverified and failed lookups stay honest; PRs are labeled as pull requests", async ({ page }) => {
+    const input = page.getByLabel("Message Zcode");
+    await input.fill("also ther12k/zcode-web#500 and acme/tools#77");
+    await input.press("Enter");
+    await expect(page.locator(".markdown a.issue-ref").first()).toBeVisible({ timeout: 20_000 });
+    await page.locator(".markdown a.issue-ref").first().click();
+    const list = page.locator(".issues-list");
+    await expect(list).toBeVisible();
+    // failed lookup: honest "unable to load", never a fabricated card
+    await expect(list.locator(".issue-row", { hasText: "#500" })).toContainText("unable to load", { timeout: 8000 });
+    // the PR is labeled, not disguised as an issue
+    await expect(list.locator(".issue-row", { hasText: "#77" })).toContainText("Extract helper", { timeout: 8000 });
+    await expect(list.locator(".issue-row", { hasText: "#77" })).toContainText("PR");
+    // selecting the failed reference shows the unable-to-load card
+    await list.locator(".issue-row", { hasText: "#500" }).click();
+    await expect(page.locator(".issue-unavailable")).toContainText("Unable to load");
+  });
+});

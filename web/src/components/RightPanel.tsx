@@ -1,15 +1,18 @@
 // Right panel — reference structure: panel-tabs + preview (address bar +
 // frame) / code-panel (file-tabs + code-editor) / changes-panel (diff-file
 // lines). Capability states render as honest empty/clean-tree panels.
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
-  CheckCircle2, ChevronDown, Code2, Eye, FileCode2, FileDiff, FolderClosed, GitBranch,
+  CheckCircle2, ChevronDown, CircleDot, Code2, Eye, FileCode2, FileDiff, FolderClosed, GitBranch,
   Globe, ListTree, LoaderCircle, Maximize2, Minimize2, Monitor, PanelBottom, Play, RefreshCw, Smartphone, Target,
 } from "lucide-react";
 import { IconButton } from "../ui";
+import { IssueInspector, useGithubIssue } from "./IssueInspector";
+import { issueKey, type IssueIdentity, type ScannedIssueRef } from "../lib/issueRefs";
+import type { ApiClient } from "../api/client";
 import { DiffViewerModal, parseUnifiedDiff, type ParsedDiff } from "./DiffViewer";
 
-type Tab = "overview" | "preview" | "code" | "changes";
+type Tab = "overview" | "preview" | "code" | "changes" | "issues";
 
 function authHeaders() {
   return { authorization: `Bearer ${localStorage.getItem("zcode-web-token") || ""}` };
@@ -17,7 +20,7 @@ function authHeaders() {
 
 type Goal = { objective: string; status: string; tokensUsed: number; timeUsedSeconds: number } | null | undefined;
 
-export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleExpanded, refreshKey = 0, runBusy = false, sessionTitle, branch: branchProp }: {
+export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleExpanded, refreshKey = 0, runBusy = false, sessionTitle, branch: branchProp, client, issues = [], selectedIssue = null, onAddToPrompt }: {
   cwd: string;
   onCollapse: () => void;
   goal?: Goal;
@@ -25,6 +28,13 @@ export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleEx
   runBusy?: boolean;
   sessionTitle?: string;
   branch?: string | null;
+  /** authenticated client — issue reads go through it, never bare fetches */
+  client: ApiClient;
+  /** issue references seen in this conversation (chat reports them) */
+  issues?: ScannedIssueRef[];
+  selectedIssue?: IssueIdentity | null;
+  /** append a reference to the composer WITHOUT sending (ZWUI-051) */
+  onAddToPrompt?: (text: string) => void;
   /** bumped when a run finishes — inspectors refetch (the tree may have changed) */
   refreshKey?: number;
   /** full-width layout (`.preview-expanded` on the workspace grid) */
@@ -33,6 +43,12 @@ export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleEx
 }) {
   const [tab, setTab] = useState<Tab>("overview");
   const [mobile, setMobile] = useState(false);
+  const showIssuesTab = issues.length > 0 || !!selectedIssue;
+  const selectedIssueKey = selectedIssue ? issueKey(selectedIssue) : "";
+  // a clicked reference (or new selection) opens the Issues section
+  useEffect(() => {
+    if (selectedIssueKey) setTab("issues");
+  }, [selectedIssueKey]);
   // Preview appears ONLY where the deployment supports it (REF2-04) — it is
   // never the default empty surface
   const [previewCap, setPreviewCap] = useState<{ enabled: boolean } | null>(null);
@@ -55,6 +71,12 @@ export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleEx
           {previewCap?.enabled && (
             <button role="tab" aria-selected={tab === "preview"} className={`panel-tab ${tab === "preview" ? "active" : ""}`} onClick={() => setTab("preview")}><Globe size={14} /><span>Preview</span></button>
           )}
+          {showIssuesTab && (
+            <button role="tab" aria-selected={tab === "issues"} className={`panel-tab ${tab === "issues" ? "active" : ""}`} onClick={() => setTab("issues")}>
+              <CircleDot size={14} /><span>Issues</span>
+              {issues.length > 0 && <span className="panel-tab-badge">{issues.length}</span>}
+            </button>
+          )}
         </div>
         <div className="panel-actions">
           {onToggleExpanded && (
@@ -72,7 +94,77 @@ export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleEx
       {tab === "preview" && previewCap?.enabled && <PreviewTab cwd={cwd} mobile={mobile} onMobile={setMobile} cap={previewCap} />}
       {tab === "code" && <CodeTab cwd={cwd} refreshKey={refreshKey} />}
       {tab === "changes" && <ChangesTab cwd={cwd} refreshKey={refreshKey} />}
+      {tab === "issues" && showIssuesTab && (
+        <IssuesTab client={client} refs={issues} selectedIssue={selectedIssue} onAddToPrompt={onAddToPrompt ?? (() => {})} />
+      )}
     </section>
+  );
+}
+
+// ---------- Issues (ZWUI-051) ----------
+// Compact "issues in this conversation" list, grouped by repository and
+// deduplicated by the scanner. Selecting shows the verified issue; a new
+// mention never hijacks what the reader is looking at.
+
+function IssuesTab({ client, refs, selectedIssue, onAddToPrompt }: {
+  client: ApiClient;
+  refs: ScannedIssueRef[];
+  selectedIssue: IssueIdentity | null;
+  onAddToPrompt: (text: string) => void;
+}) {
+  const [selected, setSelected] = useState<IssueIdentity | null>(selectedIssue ?? refs[0] ?? null);
+  useEffect(() => {
+    if (selectedIssue) setSelected(selectedIssue);
+  }, [issueKey(selectedIssue || { host: "", owner: "", repo: "", number: 0 })]);
+  const groups = useMemo(() => {
+    const map = new Map<string, ScannedIssueRef[]>();
+    for (const ref of refs) {
+      const g = `${ref.owner}/${ref.repo}`;
+      if (!map.has(g)) map.set(g, []);
+      map.get(g)!.push(ref);
+    }
+    return Array.from(map.entries());
+  }, [refs]);
+  const active = selected ?? refs[0] ?? null;
+  return (
+    <div className="issues-tab">
+      <div className="issues-list" aria-label="Issues in this conversation">
+        <span className="overview-label">IN THIS CONVERSATION</span>
+        {groups.map(([group, groupRefs]) => (
+          <div key={group} className="issues-group">
+            <span className="issues-group-name">{group}</span>
+            {groupRefs.map((ref) => (
+              <IssueListRow key={issueKey(ref)} client={client} ref_={ref}
+                active={!!active && issueKey(active) === issueKey(ref)}
+                onSelect={() => setSelected(ref)} />
+            ))}
+          </div>
+        ))}
+      </div>
+      {active
+        ? <IssueInspector client={client} identity={active} onAddToPrompt={onAddToPrompt} />
+        : <div className="empty-history"><p>Select an issue to read it here.</p></div>}
+    </div>
+  );
+}
+
+function IssueListRow({ client, ref_, active, onSelect }: {
+  client: ApiClient;
+  ref_: ScannedIssueRef;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  const { issue, status } = useGithubIssue(client, ref_, 0);
+  return (
+    <button className={`issue-row ${active ? "active" : ""}`} onClick={onSelect} aria-current={active ? "true" : undefined}>
+      <CircleDot size={12} className={issue?.state === "closed" ? "deletions" : "success-text"} />
+      <span className="issue-row-title">
+        {status === "loading" && !issue ? `#${ref_.number} — checking…`
+          : status === "error" && !issue ? `#${ref_.number} — unable to load`
+          : `#${ref_.number} · ${issue?.title || ""}`}
+      </span>
+      {issue?.isPR && <small className="issue-row-tag">PR</small>}
+    </button>
   );
 }
 

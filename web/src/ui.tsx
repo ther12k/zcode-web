@@ -70,8 +70,8 @@ export function Dialog({ title, subtitle, children, onClose, wide = false }: { t
 
 // ZWUI-015: fail-closed markdown — sanitized, plain-text fallback; fenced
 // code renders as rich React blocks (header/copy/line numbers).
-export function Markdown({ text }: { text: string }) {
-  return <RichMarkdown text={text} />;
+export function Markdown({ text, issueResolver }: { text: string; issueResolver?: () => import("./lib/issueRefs").RepoBinding | null }) {
+  return <RichMarkdown text={text} issueResolver={issueResolver} />;
 }
 
 export function CheckMark({ className = "" }: { className?: string }) {

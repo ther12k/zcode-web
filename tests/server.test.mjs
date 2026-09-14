@@ -3,6 +3,7 @@
 // writes — the server runs on a synthetic workspace.
 
 import { spawn } from "node:child_process";
+import { createServer as createHttpServer } from "node:http";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
@@ -36,6 +37,7 @@ function startServer(extraEnv = {}) {
       ZCODE_HOME: fakeHome,
       ZCODE_JOB_TIMEOUT_MS: "15000",
       ZCODE_ENABLE_FILES: "1",
+      ZCODE_ENABLE_GIT: "1",
       ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -974,5 +976,188 @@ describe("directory scope + analytics integrity", async () => {
     }
     assert.ok(err, "the build failure must surface");
     assert.match(err, /not found/i);
+  });
+});
+
+// ---- ZWUI-051: read-only GitHub issue routes (fixture GitHub API) ----
+describe("ZWUI-051 GitHub issue reading", () => {
+  const GH_PORT = 3475;
+  const GH_BASE = `http://127.0.0.1:${GH_PORT}`;
+  const PORT_GH = 3474;
+  const BASE_GH = `http://127.0.0.1:${PORT_GH}`;
+  const TOKEN_GH = "gh-test-token";
+  let ghApi;
+  let ghServer;
+  let stats;
+
+  const issue491 = {
+    number: 491, title: "Improve session recovery", state: "open",
+    body: "## Acceptance\n- [ ] reconnect keeps the transcript\n- [x] banner shows transport state",
+    labels: [{ name: "ux", color: "1d76db" }, { name: "p1", color: "d93f0b" }],
+    assignees: [{ login: "ther12k" }], milestone: { title: "v0.4", due_on: null },
+    user: { login: "ther12k" }, created_at: "2026-09-01T10:00:00Z", updated_at: "2026-09-10T08:00:00Z",
+    closed_at: null, comments: 3, html_url: `${GH_BASE.replace(GH_PORT, 4400)}/ther12k/zcode-web/issues/491`,
+  };
+
+  before(async () => {
+    stats = { detail200: 0, detail304: 0 };
+    ghApi = createHttpServer((req, res) => {
+        const url = new URL(req.url, GH_BASE);
+        const p = url.pathname;
+        const json = (code, body, headers = {}) => {
+          if (code === 304) {
+            // a real 304 carries no body
+            res.writeHead(304, headers);
+            return res.end();
+          }
+          const buf = Buffer.from(JSON.stringify(body));
+          res.writeHead(code, { "content-type": "application/json", ...headers });
+          res.end(buf);
+        };
+        if (p === "/repos/ther12k/zcode-web/issues/491") {
+          if (req.headers["if-none-match"] === '"W/491"') { stats.detail304 += 1; return json(304, undefined); }
+          stats.detail200 += 1;
+          return json(200, issue491, { etag: '"W/491"' });
+        }
+        if (p === "/repos/ther12k/zcode-web/issues/42") {
+          return json(200, { ...issue491, number: 42, title: "Extract recovery helper", pull_request: { html_url: "x" } });
+        }
+        if (p === "/repos/ther12k/zcode-web/issues/500") return json(404, { message: "Not Found" });
+        if (p === "/repos/ther12k/zcode-web/issues/491/comments") {
+          const page = Number(url.searchParams.get("page")) || 1;
+          const mk = (i) => ({ id: 1000 + i, user: { login: `user${i}` }, body: `comment ${i}`, created_at: "2026-09-11T09:00:00Z", updated_at: "2026-09-11T09:00:00Z", html_url: "c" });
+          return json(200, page === 1 ? Array.from({ length: 20 }, (_, i) => mk(i)) : [mk(20)]);
+        }
+        return json(404, { message: "Not Found" });
+    });
+    await new Promise((res) => ghApi.listen(GH_PORT, "127.0.0.1", res));
+
+    // app server instance with the fixture API base + repo allowlist
+    const ws2 = mkdtempSync(join(tmpdir(), "zc-gh-"));
+    mkdirSync(join(ws2, "proj"), { recursive: true });
+    ghServer = spawn(process.execPath, [join(SERVER_ROOT, "server", "index.js")], {
+      env: {
+        ...process.env,
+        PORT: String(PORT_GH), HOST: "127.0.0.1",
+        ZCODE_WEB_TOKEN: TOKEN_GH,
+        ZCODE_CLI_ENTRY: join(SERVER_ROOT, "scripts", "fake-cli.mjs"),
+        ZCODE_WORKSPACE_ROOT: ws2,
+        ZCODE_HOME: mkdtempSync(join(tmpdir(), "zc-gh-home-")),
+        ZCODE_GITHUB_API_BASE: GH_BASE,
+        ZCODE_GITHUB_REPOS: "ther12k/zcode-web",
+      },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    ghServer.stderr.on("data", (c) => process.stderr.write(c));
+    await new Promise((resolve) => {
+      const t = setInterval(async () => {
+        try {
+          const r = await fetch(`${BASE_GH}/api/health`, { headers: { authorization: `Bearer ${TOKEN_GH}` } });
+          if (r.ok) { clearInterval(t); resolve(); }
+        } catch {}
+      }, 100);
+    });
+  });
+
+  after(async () => {
+    ghServer.kill("SIGTERM");
+    await new Promise((res) => ghServer.once("exit", res));
+    ghApi.closeAllConnections?.();
+    await new Promise((res) => ghApi.close(res));
+  });
+
+  const ghAuth = { authorization: `Bearer ${TOKEN_GH}` };
+
+  it("capability reports enabled state, token presence and the allowlist", async () => {
+    const r = await fetch(`${BASE_GH}/api/github/capability`, { headers: ghAuth });
+    assert.equal(r.status, 200);
+    const j = await r.json();
+    assert.equal(j.enabled, true);
+    assert.equal(j.tokenPresent, false);
+    assert.deepEqual(j.allowlist, ["ther12k/zcode-web"]);
+  });
+
+  it("serves a normalized verified issue with labels, assignee, milestone and task list", async () => {
+    const r = await fetch(`${BASE_GH}/api/github/issues/ther12k/zcode-web/491`, { headers: ghAuth });
+    assert.equal(r.status, 200);
+    const { issue, cached } = await r.json();
+    assert.equal(cached, false);
+    assert.equal(issue.number, 491);
+    assert.equal(issue.title, "Improve session recovery");
+    assert.equal(issue.state, "open");
+    assert.equal(issue.isPR, false);
+    assert.ok(issue.body.includes("[ ] reconnect"));
+    assert.deepEqual(issue.labels.map((l) => l.name), ["ux", "p1"]);
+    assert.deepEqual(issue.assignees, ["ther12k"]);
+    assert.equal(issue.milestone.title, "v0.4");
+  });
+
+  it("identifies pull requests via the pull_request field (never labeled an issue)", async () => {
+    const r = await fetch(`${BASE_GH}/api/github/issues/ther12k/zcode-web/42`, { headers: ghAuth });
+    const { issue } = await r.json();
+    assert.equal(issue.isPR, true);
+  });
+
+  it("paginates comments and reports hasMore", async () => {
+    const p1 = await (await fetch(`${BASE_GH}/api/github/issues/ther12k/zcode-web/491/comments?page=1`, { headers: ghAuth })).json();
+    assert.equal(p1.comments.length, 20);
+    assert.equal(p1.hasMore, true);
+    const p2 = await (await fetch(`${BASE_GH}/api/github/issues/ther12k/zcode-web/491/comments?page=2`, { headers: ghAuth })).json();
+    assert.equal(p2.comments.length, 1);
+    assert.equal(p2.hasMore, false);
+  });
+
+  it("revalidates with ETag conditional requests (304 serves the cache)", async () => {
+    const r1 = await fetch(`${BASE_GH}/api/github/issues/ther12k/zcode-web/491`, { headers: ghAuth });
+    await r1.json();
+    const before200 = stats.detail200;
+    const r2 = await fetch(`${BASE_GH}/api/github/issues/ther12k/zcode-web/491`, { headers: ghAuth });
+    const j2 = await r2.json();
+    assert.equal(j2.cached, true, "second read must come from the ETag cache");
+    assert.equal(stats.detail200, before200, "the fixture served a 304, not a fresh 200");
+  });
+
+  it("refresh bypasses the conditional request", async () => {
+    const before200 = stats.detail200;
+    await fetch(`${BASE_GH}/api/github/issues/ther12k/zcode-web/491?refresh=1`, { headers: ghAuth });
+    assert.equal(stats.detail200, before200 + 1);
+  });
+
+  it("maps missing/inaccessible issues to NOT_FOUND, not a fabricated card", async () => {
+    const r = await fetch(`${BASE_GH}/api/github/issues/ther12k/zcode-web/500`, { headers: ghAuth });
+    assert.equal(r.status, 404);
+    const j = await r.json();
+    assert.equal(j.code, "NOT_FOUND");
+  });
+
+  it("enforces the repository allowlist (scoped to exposed repositories)", async () => {
+    const r = await fetch(`${BASE_GH}/api/github/issues/acme/other/1`, { headers: ghAuth });
+    assert.equal(r.status, 403);
+    assert.equal((await r.json()).code, "REPO_FORBIDDEN");
+  });
+
+  it("rejects malformed identities before constructing any upstream request", async () => {
+    for (const path of ["/ther12k/zcode-web/0", "/th%2F12k/zcode-web/5"]) {
+      const r = await fetch(`${BASE_GH}/api/github/issues${path}`, { headers: ghAuth });
+      assert.equal(r.status, 400, path);
+      assert.equal((await r.json()).code, "BAD_IDENTITY", path);
+    }
+    {
+      // URL normalization flattens dot segments before routing — nothing
+      // upstream is ever constructed from them
+      const r = await fetch(`${BASE_GH}/api/github/issues/ther12k/../etc/1`, { headers: ghAuth });
+      assert.ok([400, 404].includes(r.status), "traversal flattened, never proxied");
+    }
+  });
+
+  it("binds bare #N resolution: git status exposes the parsed origin remote", async () => {
+    // init a real git repo with a github origin in the MAIN server's workspace
+    const { execFileSync } = await import("node:child_process");
+    const projDir = join(ws, "proj");
+    execFileSync("git", ["init", "-q"], { cwd: projDir });
+    execFileSync("git", ["remote", "add", "origin", "git@github.com:ther12k/zcode-web.git"], { cwd: projDir });
+    const r = await fetch(`${BASE}/api/git/status?cwd=${encodeURIComponent(projDir)}`, { headers: auth });
+    const j = await r.json();
+    assert.deepEqual(j.remote, { host: "github.com", owner: "ther12k", repo: "zcode-web" });
   });
 });
