@@ -302,26 +302,30 @@ test("deep-linked session shows its real title in the topbar", async ({ page }) 
   await expect(page.getByRole("heading", { name: "Probe: gate-out combo" })).toBeVisible();
 });
 
-test("Sessions view scopes to the selected project, like the desktop", async ({ page }) => {
-  const wsRoot = new URL("../../.e2e-ws", import.meta.url).pathname.replace(/\/$/, "");
-  const roots: string[] = [];
+test("Sessions view shows the latest 50 across roots with project labels", async ({ page }) => {
+  const queries: string[] = [];
   await page.route(/\/api\/sessions\/recent\?.*/, async (route) => {
     const url = new URL(route.request().url());
-    roots.push(url.searchParams.get("root") || "");
+    queries.push(url.searchParams.get("limit") || "");
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ sessions: [{ id: "sess_proj1", title: "project session", directory: wsRoot + "/proj", updatedAt: 1, createdAt: 1 }] }),
+      body: JSON.stringify({ sessions: [
+        { id: "sess_g1", title: "session in another project", directory: "/home/ther12k/Workspace/other-proj", updatedAt: 2, createdAt: 2 },
+        { id: "sess_g2", title: "session in this project", directory: "/home/ther12k/Workspace/proj", updatedAt: 1, createdAt: 1 },
+      ] }),
     });
   });
-  // a nested workspace route — the query must target that folder, not the parent root
-  roots.length = 0;
-  await page.goto("/w/" + encodeURIComponent(wsRoot + "/proj"));
+  await page.goto("/w/default");
   await page.waitForLoadState("domcontentloaded");
   await page.getByRole("tab", { name: /Sessions/ }).click();
-  await expect(page.getByText("project session")).toBeVisible();
-  assert.ok(roots.length > 0, "sessions view queried the recent endpoint");
-  for (const r of roots) assert.equal(r, wsRoot + "/proj", "query scoped to the project subtree, not the parent root");
+  await expect(page.getByText("session in another project")).toBeVisible();
+  // global list: every query asks for the latest 50 without a project filter
+  assert.ok(queries.length > 0);
+  for (const q of queries) assert.equal(q, "50", "latest-50 query, no root scoping");
+  // each row labels its project
+  const row = page.locator(".task-row", { hasText: "session in another project" });
+  await expect(row.locator(".task-project")).toHaveText("other-proj");
 });
 
 test("desktop updates append without reloading the open view", async ({ page }) => {

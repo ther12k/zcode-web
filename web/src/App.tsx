@@ -215,16 +215,16 @@ export function App() {
       ? { id: activeSessionId, title: sessionTitles[activeSessionId], directory: cwd, createdAt: 0, updatedAt: 0, goal: null }
       : null);
 
-  // recent sessions for the "Sessions" view — scoped to the SELECTED PROJECT
-  // subtree (like the ZCode app), not the whole workspace root
+  // "Sessions" view: the LATEST 50 across all allowed roots (like the search
+  // dialog's empty state). The row label shows each session's project, so a
+  // global list still reads clearly. Re-selecting still merges the active
+  // project's own sessions to the top via pinned/sort below.
   const [recent, setRecent] = useState<SessionRow[]>([]);
-  // root-scope list kept only so pinned sessions from other projects still show
-  const [recentRoot, setRecentRoot] = useState<SessionRow[]>([]);
   useEffect(() => {
     let alive = true;
     if (!cwd || sidebarView !== "sessions") return;
     const load = () => {
-      void fetch(`/api/sessions/recent?root=${encodeURIComponent(cwd)}`, {
+      void fetch("/api/sessions/recent?limit=50", {
         headers: { authorization: `Bearer ${loadTokenSafe()}` },
       })
         .then((r) => r.json())
@@ -232,29 +232,12 @@ export function App() {
         .catch(() => {});
     };
     load();
-    if (prefs.pinnedSessions.length > 0) {
-      void fetch(`/api/sessions/recent?root=${encodeURIComponent(rootOf(cwd, roots))}`, {
-        headers: { authorization: `Bearer ${loadTokenSafe()}` },
-      })
-        .then((r) => r.json())
-        .then((j) => { if (alive) setRecentRoot(j.sessions || []); })
-        .catch(() => {});
-    }
     // the desktop adds sessions too — follow along while this view is open
     const poll = setInterval(() => {
       if (document.visibilityState !== "visible") return;
       load();
-      if (prefs.pinnedSessions.length > 0) {
-        void fetch(`/api/sessions/recent?root=${encodeURIComponent(rootOf(cwd, roots))}`, {
-          headers: { authorization: `Bearer ${loadTokenSafe()}` },
-        })
-          .then((r) => r.json())
-          .then((j) => { if (alive) setRecentRoot(j.sessions || []); })
-          .catch(() => {});
-      }
     }, 30_000);
     return () => { alive = false; clearInterval(poll); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cwd, sidebarView, token]);
 
   function selectSession(id: string) {
@@ -346,7 +329,7 @@ export function App() {
           </span>
           <div className="view-switch" role="tablist" aria-label="Sidebar view">
             <button role="tab" aria-selected={sidebarView === "projects"} className={sidebarView === "projects" ? "active" : ""} onClick={() => setSidebarView("projects")} title="Group sessions by project"><FolderClosed size={13} /><span className="nav-label">Projects</span></button>
-            <button role="tab" aria-selected={sidebarView === "sessions"} className={sidebarView === "sessions" ? "active" : ""} onClick={() => setSidebarView("sessions")} title="Recent sessions in this project"><History size={13} /><span className="nav-label">Sessions</span></button>
+            <button role="tab" aria-selected={sidebarView === "sessions"} className={sidebarView === "sessions" ? "active" : ""} onClick={() => setSidebarView("sessions")} title="Latest 50 sessions"><History size={13} /><span className="nav-label">Sessions</span></button>
           </div>
         </div>
         <div className="sidebar-section"><span>{sidebarView === "projects" ? "PROJECTS" : "RECENT SESSIONS"}</span><div><IconButton label="New chat" onClick={navigateNewChat}><Plus size={14} /></IconButton></div></div>
@@ -357,7 +340,7 @@ export function App() {
                 <div className="pinned-section">
                   <div className="pinned-heading"><Pin size={11} /><span>PINNED</span><span className="pinned-count">{prefs.pinnedSessions.filter((id) => recent.some((r) => r.id === id)).length}</span></div>
                   {prefs.pinnedSessions.map((id) => {
-                    const row = recent.find((r) => r.id === id) || recentRoot.find((r) => r.id === id);
+                    const row = recent.find((r) => r.id === id);
                     if (!row) return null;
                     return (
                       <button key={id} className={`pinned-row ${id === activeSessionId ? "active" : ""}`} onClick={() => selectSession(id)} title={row.title}>
@@ -669,9 +652,10 @@ function SessionRow({ row, active, prefs, onSelect, onPin, onHide }: {
   const pinned = prefs.pinnedSessions.includes(row.id);
   return (
     <div className={`task-row ${active ? "active" : ""} ${pinned ? "is-pinned" : ""}`}>
-      <button className="task-link" onClick={onSelect} title={row.title}>
+      <button className="task-link" onClick={onSelect} title={`${row.title}${row.directory ? ` — ${row.directory}` : ""}`}>
         <span className="task-dot" />
         <span className="task-title-wrap"><span className="task-title">{prefs.displayAliases[row.id] || row.title || row.id}</span></span>
+        <span className="task-project" title={row.directory}>{baseName(row.directory)}</span>
         <time>{relativeTime(row.updatedAt)}</time>
       </button>
       <span className="task-row-actions">
@@ -702,7 +686,4 @@ function safeDecode(v: string) {
     }
   }
   return out;
-}
-function rootOf(cwd: string, roots: string[]) {
-  return roots.find((r) => cwd === r || cwd.startsWith(r + "/")) || cwd;
 }

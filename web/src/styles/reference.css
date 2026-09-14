@@ -101,7 +101,7 @@
 .new-group-button:hover{border-color:#5c7050;color:#c4d6b3;background:#232d1f}
 .sessions-list{display:flex;flex-direction:column;gap:1px}
 .task-title-wrap{display:flex;flex-direction:column;min-width:0;flex:1;gap:2px}
-.task-project{font-size:8.5px;color:#75866c;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.task-project{font-size:8px;color:#78827a;border:1px solid #363a35;border-radius:3px;padding:1px 4px;white-space:nowrap;flex-shrink:0;max-width:88px;overflow:hidden;text-overflow:ellipsis}
 .task-row-actions{display:none;align-items:center;gap:1px;flex-shrink:0}
 .task-row:hover .task-row-actions{display:flex}
 .task-row-actions .icon-button{width:23px;height:23px}
