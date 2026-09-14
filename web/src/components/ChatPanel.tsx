@@ -3,37 +3,16 @@
 // mode/model pickers, live-run "working" message. Run state comes from the
 // ZWUI-016 reducer; transport from the ZWUI-017 controller.
 
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { ArrowLeftRight, ArrowUp, ArrowUpRight, BadgeCheck, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Coins, Copy, Eye, EyeOff, FileText, FoldVertical, FolderClosed, GitBranch, LoaderCircle, MessageSquare, Plus, RotateCcw, ShieldCheck, Sparkles, Square, SquarePen, SquareTerminal, Terminal, Unplug, Wrench, X, Zap } from "lucide-react";
 import { ZLogo, IconButton, Markdown, CheckMark, useDialogA11y, relativeTime } from "../ui";
 import { randomUUID } from "../lib/uuid";
 import { ApiError, type ApiClient, type CommandInfo, type FileCard, type ModelInfo, type SessionDetail, type TimelineEvent, type TranscriptTurn } from "../api/client";
-import { runReducer, initialRun, isTerminal, type StoredEvent } from "../state/run";
-import { StreamController } from "../state/stream";
+import { isTerminal } from "../state/run";
+import * as runs from "../state/runManager";
+import { snapshotSubmission, mayClearDraft, type Submission } from "../lib/submission";
 import { loadDraft, saveDraft, loadPrefs, savePrefs } from "../state/prefs";
 import { AgentTerminalDrawer, TokenTelemetryDialog, type TerminalEntry } from "./Telemetry";
-
-// One pending attachment: uploaded path for --attach plus the local File for
-// in-composer preview (object URL created lazily, revoked on removal)
-type Attachment = { name: string; path: string; file?: File; previewUrl?: string };
-
-// ZWUI-041: the exact request this panel last tried to submit. Retry reuses
-// it verbatim (same idempotency key, same payload); rerun deliberately makes
-// a NEW execution from it; neither ever borrows the live composer state.
-type SubmittedRequest = {
-  requestId: string;
-  text: string;
-  attachments: string[];
-  sessionId: string | null;
-  cwd: string;
-  mode: string;
-  model: string;
-};
-
-type PreviewState =
-  | { kind: "image"; title: string; src: string }
-  | { kind: "pdf"; title: string; src: string }
-  | { kind: "text"; title: string; text: string };
 
 // zcode-artifact://<sessionId>/tool-result-<uuid> → server route args
 function artifactArgs(url: string): { sessionId: string; uuid: string } | null {
@@ -42,6 +21,13 @@ function artifactArgs(url: string): { sessionId: string; uuid: string } | null {
 }
 const artifactUrl = (a: { sessionId: string; uuid: string }) => `/api/artifacts/${a.sessionId}/${a.uuid}`;
 
+// One pending attachment: uploaded path for --attach plus the local File for
+// in-composer preview (object URL created lazily, revoked on removal)
+type Attachment = { name: string; path: string; file?: File; previewUrl?: string };
+type PreviewState =
+  | { kind: "image"; title: string; src: string }
+  | { kind: "pdf"; title: string; src: string }
+  | { kind: "text"; title: string; text: string };
 
 export function ChatPanel({
   client, cwd, sessionId, sessionTitle, modes, defaultMode, branch, roots, onNavigateCwd, providerLive = true, newChatNonce = 0, reloadKey = 0, injectedDraft, onNotify, onSessionCreated, onBusyChange, onSlashAction, onSessionMeta,
@@ -71,7 +57,15 @@ export function ChatPanel({
   onSessionMeta?: (s: { id: string; title: string; directory?: string }) => void;
 }) {
   const draftKey = `${cwd}::${sessionId || "new"}`;
-  const [run, dispatch] = useReducer(runReducer, undefined, initialRun);
+  // ZWUI-050: the run is OWNED by the job-keyed manager and survives view
+  // switches and panel remounts; this panel only subscribes to it. A fresh
+  // chat runs under `new:<nonce>` — the manager rekeys it to the session
+  // when the server accepts and names it.
+  const runKey = sessionId ?? `new:${newChatNonce}`;
+  const run = useSyncExternalStore(
+    useCallback((cb: () => void) => runs.subscribeRun(`${cwd}::${runKey}`, cb), [cwd, runKey]),
+    useCallback(() => runs.getRun(`${cwd}::${runKey}`), [cwd, runKey]),
+  );
   const [input, setInput] = useState(loadDraft(draftKey));
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [mode, setMode] = useState(defaultMode);
@@ -122,7 +116,6 @@ export function ChatPanel({
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [history, setHistory] = useState<{ turns: TranscriptTurn[]; total: number; hasMore: boolean }>({ turns: [], total: 0, hasMore: false });
   const [loadingOlder, setLoadingOlder] = useState(false);
-  const esRef = useRef<StreamController | null>(null);
   const scroll = useRef<HTMLDivElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -253,7 +246,7 @@ export function ChatPanel({
   }, [sessionId, run.phase, client, mergeSessionPage]);
 
   useEffect(() => {
-    if (lastKey.current !== draftKey) { setInput(loadDraft(draftKey)); setAttachments([]); setMenu(null); lastKey.current = draftKey; }
+    if (lastKey.current !== draftKey) { setInput(loadDraft(draftKey)); setAttachments([]); setMenu(null); draftRevRef.current = 0; lastKey.current = draftKey; }
   }, [draftKey]);
   // injected drafts (skills launcher) land in the composer, keeping what's
   // already typed; the saved draft follows so it survives a remount
@@ -263,6 +256,7 @@ export function ChatPanel({
     lastInjected.current = injectedDraft.key;
     const next = (input ? input.trimEnd() + " " : "") + injectedDraft.text;
     setInput(next);
+    touchDraft();
     saveDraft(draftKey, next);
     requestAnimationFrame(() => { textarea.current?.focus(); textarea.current?.setSelectionRange(next.length, next.length); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -271,53 +265,23 @@ export function ChatPanel({
     const t = setTimeout(() => saveDraft(draftKey, input), 250);
     return () => clearTimeout(t);
   }, [input, draftKey]);
-  // switching conversations detaches this panel from any live run (the job
-  // itself keeps running server-side) — except when the run just created the
-  // session we are navigating to, so a fresh chat keeps its live stream
-  const activeJob = useRef<string | null>(null);
-  // the last submission attempt (ZWUI-041) — retry/rerun derive from THIS
-  // record, never from whatever currently sits in the composer
-  const lastRequestRef = useRef<SubmittedRequest | null>(null);
+  // ZWUI-050: run ownership lives in the job-keyed manager — switching views
+  // or remounting this panel never resets a run; the panel only follows it.
   // bumped on every session change; async history reads validate their epoch
   // after each await so a slow page can never land in the wrong conversation
   const sessionEpochRef = useRef(0);
-  // the view identity a run was submitted under ("new" for a fresh chat);
-  // adoption re-points it at the created session so the URL catching up is
-  // not mistaken for a switch. undefined = no run attached to this view.
-  const runViewKey = useRef<string | null | undefined>(undefined);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const detachRun = useCallback(() => {
-    if (runViewKey.current === undefined) return;
-    esRef.current?.close();
-    esRef.current = null;
-    activeJob.current = null;
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-    runViewKey.current = undefined;
-    dispatch({ type: "reset" });
-  }, []);
-  // unmount (cwd switch remounts this panel): stop the stream subscription
-  // and the reconciliation poll — the job itself keeps running server-side
-  useEffect(() => () => {
-    esRef.current?.close();
-    if (pollRef.current) clearInterval(pollRef.current);
-  }, []);
+  // the view identity (read in submit callbacks): acceptance navigates the
+  // URL only when the user is still on the view that submitted
+  const viewKeyRef = useRef(runKey);
+  viewKeyRef.current = runKey;
+  // draft revision — every composer edit bumps it, so a late acceptance can
+  // only clear the draft revision that was actually submitted (ZWUI-041)
+  const draftRevRef = useRef(0);
+  const touchDraft = useCallback(() => { draftRevRef.current += 1; }, []);
+  // a run adopted the session this view created — surface it so the URL and
+  // sidebar catch up (the manager has already rekeyed the entry)
   useEffect(() => {
-    const viewKey = sessionId ?? "new";
-    if (runViewKey.current !== undefined && runViewKey.current !== viewKey) detachRun();
-  }, [sessionId, detachRun]);
-  // New chat detaches any run — including one still awaiting its first
-  // envelope under the same "new" view key; the job keeps running server-side
-  const lastNonce = useRef(newChatNonce);
-  useEffect(() => {
-    if (lastNonce.current === newChatNonce) return;
-    lastNonce.current = newChatNonce;
-    detachRun();
-  }, [newChatNonce, detachRun]);
-  // a new chat learns its session from stream envelopes (the POST /api/chat
-  // response has none yet) — surface it so the URL and sidebar catch up
-  useEffect(() => {
-    if (!sessionId && run.sessionId && run.phase !== "idle") {
-      runViewKey.current = run.sessionId;
+    if (!sessionId && run.sessionId && run.phase !== "idle" && viewKeyRef.current === `new:${newChatNonce}`) {
       // keep anything typed since submit: the draft key flips with the URL
       if (input) saveDraft(`${cwd}::${run.sessionId}`, input);
       onSessionCreated?.(run.sessionId);
@@ -425,12 +389,14 @@ export function ChatPanel({
       // insert and keep focus — commands can take args after the name; Enter
       // then sends it as the prompt and the CLI expands/executes it
       setInput(`/${c.name} `);
+      touchDraft();
       setCmdDismissed(true);
       textarea.current?.focus();
       return;
     }
     c.run();
     setInput("");
+    touchDraft();
     saveDraft(draftKey, "");
     setCmdDismissed(true);
     textarea.current?.focus();
@@ -461,6 +427,7 @@ export function ChatPanel({
         });
         const saved = await client.upload(file.name, data);
         setAttachments((a) => [...a, { name: saved.name, path: saved.path, file }]);
+        touchDraft();
       } catch (e) {
         onNotify(`${file.name}: ${(e as Error).message}`, "error");
       } finally {
@@ -474,6 +441,7 @@ export function ChatPanel({
       const gone = a.find((x) => x.path === path);
       // nothing to revoke yet — object URLs are created lazily on preview
       if (gone?.previewUrl) URL.revokeObjectURL(gone.previewUrl);
+      touchDraft();
       return a.filter((x) => x.path !== path);
     });
   }, []);
@@ -576,129 +544,86 @@ export function ChatPanel({
 
   const stopRun = useCallback(() => {
     if (!run.jobId) return;
-    void client.cancel(run.jobId).catch(() => onNotify("Could not stop the run.", "error"));
-  }, [run.jobId, client, onNotify]);
+    runs.cancelRun(`${cwd}::${runKey}`);
+  }, [run.jobId, cwd, runKey]);
   stopRunRef.current = stopRun;
 
-  // Core submission (ZWUI-041): always from an immutable SubmittedRequest —
-  // never read the composer here, so a rerun/retry cannot mix old text with
-  // the current draft's attachments. `clearDraft` is true ONLY when the
-  // payload IS the composer's content.
-  const execute = useCallback(async (req: SubmittedRequest, opts: { clearDraft: boolean }) => {
-    if (busy || uploading > 0 || !providerLive) return;
-    lastRequestRef.current = req;
-    const submitView = req.sessionId ?? "new";
-    runViewKey.current = submitView;
-    dispatch({ type: "submit", requestId: req.requestId, text: req.text });
-    try {
-      const accepted = await client.chat({
-        text: req.text || "Analyze the attached file(s).",
-        sessionId: req.sessionId, cwd: req.cwd, mode: req.mode, model: req.model || undefined,
-        attachments: req.attachments.length ? req.attachments : undefined,
-        requestId: req.requestId,
-      });
-      // the user may have switched views (or hit New chat) while the POST
-      // was in flight — a detached panel must not adopt this job
-      if (runViewKey.current !== submitView) return;
-      dispatch({ type: "accepted", jobId: accepted.jobId, sessionId: accepted.sessionId ?? req.sessionId });
-      activeJob.current = accepted.jobId;
-      if (opts.clearDraft) { setInput(""); setAttachments([]); }
-      if (accepted.sessionId && accepted.sessionId !== req.sessionId) {
-        // the accepted job already knows its session (e.g. a replayed
-        // idempotent adoption) — re-point this view BEFORE surfacing the
-        // navigation, or the URL catching up reads as a view switch and
-        // detaches the run that just landed
-        runViewKey.current = accepted.sessionId;
-        onSessionCreated?.(accepted.sessionId);
-      }
-      const controller = new StreamController(client, accepted.jobId, {
-        onEvents: (events: StoredEvent[]) => { if (activeJob.current === accepted.jobId) dispatch({ type: "events", events }); },
-        onAttached: () => { if (activeJob.current === accepted.jobId) dispatch({ type: "stream-attached" }); },
-        onDetached: () => { if (activeJob.current === accepted.jobId) dispatch({ type: "stream-detached" }); },
-        onFatal: (message) => { if (activeJob.current === accepted.jobId) dispatch({ type: "stream-lost", error: message }); },
-      });
-      esRef.current?.close();
-      esRef.current = controller;
-      controller.start();
-      // reconciliation poll: finalizes truthfully if the stream dies
-      if (pollRef.current) clearInterval(pollRef.current);
-      const poll = pollRef.current = setInterval(async () => {
-        if (activeJob.current !== accepted.jobId) { clearInterval(poll); pollRef.current = null; return; }
-        try {
-          const st = await client.job(accepted.jobId);
-          // the view may have switched WHILE the request was in flight —
-          // identity is re-checked after every await, and the action still
-          // carries the job id so the reducer rejects stale applications
-          if (activeJob.current !== accepted.jobId) return;
-          dispatch({ type: "job-status", jobId: accepted.jobId, status: st.status as never });
-          if (["succeeded", "failed", "cancelled", "timeout"].includes(st.status)) { clearInterval(poll); pollRef.current = null; }
-        } catch { /* transient */ }
-      }, 5000);
-      setTimeout(() => { clearInterval(poll); if (pollRef.current === poll) pollRef.current = null; }, 17 * 60_000);
-    } catch (e) {
-      if (runViewKey.current === submitView) {
-        dispatch({ type: "submit-failed", error: e instanceof ApiError ? e.message : String(e) });
-      }
-    }
-  }, [busy, uploading, providerLive, client, onSessionCreated]);
+  // ZWUI-050: the manager owns the POST, the stream and the poll; this panel
+  // only supplies view concerns. Submissions are immutable snapshots built
+  // from the composer AT CALL TIME (ZWUI-041) — retries/reruns never re-read
+  // the live composer, and acceptance may only clear the draft revision that
+  // was actually submitted (mayClearDraft).
+  const submitWith = useCallback((sub: Submission, opts: { clearDraft: boolean; submitView: string }) => {
+    void runs.submitRun(`${cwd}::${opts.submitView}`, sub, client, {
+      onAccepted: (accepted, acceptedSub) => {
+        if (opts.clearDraft && mayClearDraft({ draftKey, revision: draftRevRef.current }, acceptedSub)) {
+          setInput(""); setAttachments([]); touchDraft();
+        }
+        // navigation follows the run only from the view that submitted it
+        if (accepted.sessionId && viewKeyRef.current === opts.submitView) {
+          onSessionCreated?.(accepted.sessionId);
+        }
+      },
+    });
+  }, [cwd, client, draftKey, touchDraft, onSessionCreated]);
+
+  const guard = busy || uploading > 0 || !providerLive;
 
   // composer send: the submitted record IS the draft
   const send = useCallback(() => {
+    if (guard) return;
     const text = input.trim();
     if (!text && !attachments.length) return;
-    void execute({
-      requestId: randomUUID(),
-      text,
-      attachments: attachments.map((a) => a.path),
-      sessionId, cwd, mode, model: model || "",
-    }, { clearDraft: true });
-  }, [input, attachments, sessionId, cwd, mode, model, execute]);
+    submitWith(snapshotSubmission({
+      draftKey, revision: draftRevRef.current,
+      projectKey: cwd, cwd, sessionId,
+      text, model: model || "", mode,
+      attachments: attachments.map((a) => ({ uploadRef: a.path, name: a.name })),
+    }, randomUUID()), { clearDraft: true, submitView: runKey });
+  }, [guard, input, attachments, draftKey, cwd, sessionId, mode, model, runKey, submitWith]);
 
   // ambiguous delivery: the POST threw, so the server may have already
   // accepted the request. Reuse the SAME request id and exact payload — the
   // server's idempotency key adopts the accepted job (or starts it once).
   const retryDelivery = useCallback(() => {
-    const req = lastRequestRef.current;
-    if (!req || req.requestId !== run.requestId) return;
-    void execute(req, { clearDraft: false });
-  }, [run.requestId, execute]);
+    if (guard) return;
+    const sub = runs.lastSubmission(`${cwd}::${runKey}`);
+    if (!sub || sub.requestId !== run.requestId) return;
+    submitWith(sub, { clearDraft: false, submitView: runKey });
+  }, [guard, cwd, runKey, run.requestId, submitWith]);
 
   // deliberate new execution after a terminal failure: NEW request identity,
   // exact original payload — the server replaying the dead job would be
   // useless, so a fresh id starts a fresh run
   const retryFailedRun = useCallback(() => {
-    const req = lastRequestRef.current;
-    const same = req && req.requestId === run.requestId;
-    void execute({
-      requestId: randomUUID(),
-      text: same ? req.text : run.submittedText,
-      attachments: same ? req.attachments : [],
-      sessionId: same ? req.sessionId : sessionId,
-      cwd: same ? req.cwd : cwd,
-      mode: same ? req.mode : mode,
-      model: same ? req.model : (model || ""),
-    }, { clearDraft: false });
-  }, [run.requestId, run.submittedText, sessionId, cwd, mode, model, execute]);
+    if (guard) return;
+    runs.retryFailedRun(`${cwd}::${runKey}`, {
+      onAccepted: (accepted) => {
+        if (accepted.sessionId && viewKeyRef.current === runKey) onSessionCreated?.(accepted.sessionId);
+      },
+    });
+  }, [guard, cwd, runKey, onSessionCreated]);
 
   // "Run again" on a historical prompt: a new execution of THAT text — no
   // borrow of the composer's attachments, and the draft stays untouched
   const runAgain = useCallback((text: string) => {
-    void execute({
-      requestId: randomUUID(),
-      text,
-      attachments: [],
-      sessionId, cwd, mode, model: model || "",
-    }, { clearDraft: false });
-  }, [sessionId, cwd, mode, model, execute]);
+    if (guard) return;
+    submitWith(snapshotSubmission({
+      draftKey, revision: draftRevRef.current,
+      projectKey: cwd, cwd, sessionId,
+      text, model: model || "", mode, attachments: [],
+    }, randomUUID()), { clearDraft: false, submitView: runKey });
+  }, [guard, draftKey, cwd, sessionId, mode, model, runKey, submitWith]);
 
   // "Edit and resend" loads a historical prompt into the composer — an
   // explicit replace of the draft, surfaced to the user when one existed
   const editResend = useCallback((text: string) => {
     const hadDraft = input.trim().length > 0 && input.trim() !== text.trim();
     setInput(text);
+    touchDraft();
     textarea.current?.focus();
     if (hadDraft) onNotify("Loaded this prompt into the composer — your draft was replaced.");
-  }, [input, onNotify]);
+  }, [input, onNotify, touchDraft]);
 
   // models grouped by provider in server order (same-provider models are adjacent)
   const modelGroups = useMemo(() => {
@@ -875,7 +800,7 @@ export function ChatPanel({
             <p>Describe what you have in mind.<br />I'll help you take it from here.</p>
             <div className="prompt-suggestions">
               {["Explain this project", "Write tests for the API", "Make a refactor plan"].map((text) => (
-                <button key={text} onClick={() => { setInput(text); textarea.current?.focus(); }}><Sparkles size={13} />{text}<ArrowUpRight size={12} /></button>
+                <button key={text} onClick={() => { setInput(text); touchDraft(); textarea.current?.focus(); }}><Sparkles size={13} />{text}<ArrowUpRight size={12} /></button>
               ))}
             </div>
           </div>
@@ -1153,7 +1078,7 @@ export function ChatPanel({
           <textarea
             ref={textarea}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => { setInput(e.target.value); touchDraft(); }}
             onPaste={(e) => {
               const files = Array.from(e.clipboardData.files || []);
               if (files.length) { e.preventDefault(); void attachFiles(files); }
