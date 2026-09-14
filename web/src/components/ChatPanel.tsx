@@ -4,8 +4,8 @@
 // ZWUI-016 reducer; transport from the ZWUI-017 controller.
 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { ArrowLeftRight, ArrowUp, ArrowUpRight, AtSign, BadgeCheck, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Copy, Eye, EyeOff, FileText, FoldVertical, GitBranch, LoaderCircle, MessageSquare, Plus, ShieldCheck, Sparkles, Square, SquarePen, Terminal, Wrench, X } from "lucide-react";
-import { ZLogo, IconButton, Markdown, CheckMark } from "../ui";
+import { ArrowLeftRight, ArrowUp, ArrowUpRight, AtSign, BadgeCheck, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Copy, Eye, EyeOff, FileText, FoldVertical, GitBranch, LoaderCircle, MessageSquare, Plus, ShieldCheck, Sparkles, Square, SquarePen, Terminal, Unplug, Wrench, X } from "lucide-react";
+import { ZLogo, IconButton, Markdown, CheckMark, useDialogA11y } from "../ui";
 import { randomUUID } from "../lib/uuid";
 import { ApiError, type ApiClient, type CommandInfo, type FileCard, type ModelInfo, type SessionDetail, type TimelineEvent, type TranscriptTurn } from "../api/client";
 import { runReducer, initialRun, isTerminal, type StoredEvent } from "../state/run";
@@ -46,7 +46,7 @@ export function ChatPanel({
   /** app-level slash actions (open dialogs, new chat) — true when handled */
   onSlashAction?: (action: string) => boolean;
   /** session metadata from transcript fetches (title lift for deep links) */
-  onSessionMeta?: (s: { id: string; title: string }) => void;
+  onSessionMeta?: (s: { id: string; title: string; directory?: string }) => void;
 }) {
   const draftKey = `${cwd}::${sessionId || "new"}`;
   const [run, dispatch] = useReducer(runReducer, undefined, initialRun);
@@ -110,7 +110,7 @@ export function ChatPanel({
     setHistory({ turns: d.transcript, total: d.total, hasMore: d.hasMore });
     setExternalActive(!!d.runActive);
     setExternalStartedAt(d.runStartedAt ?? null);
-    if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title });
+    if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory });
   }, [onSessionMeta]);
   // incremental refresh: match turns by message id — known turns update in
   // place (streaming text grows), new ones append. Older pages the reader
@@ -134,7 +134,7 @@ export function ChatPanel({
     });
     setExternalActive(!!d.runActive);
     setExternalStartedAt(d.runStartedAt ?? null);
-    if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title });
+    if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory });
   }, [onSessionMeta]);
   // initial load — full replace only when the session (or an explicit
   // re-select reload) changes
@@ -447,9 +447,19 @@ export function ChatPanel({
       return;
     }
     const route = artifactUrl(a);
-    if (f.mime.startsWith("image/")) setPreview({ kind: "image", title: f.mime.replace("image/", "").toUpperCase() + " artifact", src: route });
-    else if (f.mime === "application/pdf") setPreview({ kind: "pdf", title: "PDF artifact", src: route });
-    else {
+    if (f.mime.startsWith("image/") || f.mime === "application/pdf") {
+      try {
+        const token = localStorage.getItem("zcode-web-token") || "";
+        const r = await fetch(route, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+        if (!r.ok) throw new Error("Could not load media");
+        const blob = await r.blob();
+        const objUrl = URL.createObjectURL(blob);
+        if (f.mime.startsWith("image/")) setPreview({ kind: "image", title: f.mime.replace("image/", "").toUpperCase() + " artifact", src: objUrl });
+        else setPreview({ kind: "pdf", title: "PDF artifact", src: objUrl });
+      } catch {
+        onNotify("Could not load artifact.", "error");
+      }
+    } else {
       try {
         const text = await fetch(route, { headers: { authorization: `Bearer ${localStorage.getItem("zcode-web-token") || ""}` } }).then((r) => r.text());
         setPreview({ kind: "text", title: "Artifact content", text: text.slice(0, 200_000) });
@@ -526,7 +536,7 @@ export function ChatPanel({
         onEvents: (events: StoredEvent[]) => { if (activeJob.current === accepted.jobId) dispatch({ type: "events", events }); },
         onAttached: () => { if (activeJob.current === accepted.jobId) dispatch({ type: "stream-attached" }); },
         onDetached: () => { if (activeJob.current === accepted.jobId) dispatch({ type: "stream-detached" }); },
-        onFatal: (message) => { if (activeJob.current === accepted.jobId) dispatch({ type: "submit-failed", error: message }); },
+        onFatal: (message) => { if (activeJob.current === accepted.jobId) dispatch({ type: "stream-lost", error: message }); },
       });
       esRef.current?.close();
       esRef.current = controller;
@@ -589,6 +599,19 @@ export function ChatPanel({
   }, null);
 
   const empty = !sessionId && !history.turns.length && !run.answer && run.phase === "idle";
+
+  // transport label under the composer — separate from run phase: a run can
+  // be alive while its stream is reconnecting or fully detached
+  function streamLabel(): string {
+    if (run.phase === "submitting") return "sending…";
+    if (localBusy) {
+      if (run.transportLost) return "connection lost — work may still be running";
+      if (run.streamAttached) return "stream live";
+      return "reconnecting…";
+    }
+    if (externalActive) return "streaming in the Zcode app";
+    return "idle";
+  }
 
   return (
     <section className="chat-panel" aria-label="Agent conversation">
@@ -765,6 +788,12 @@ export function ChatPanel({
       </div>
 
       <div className="composer-zone">
+        {localBusy && run.transportLost && (
+          <div className="stream-status-banner" role="status">
+            <Unplug size={13} />
+            <span>Connection lost — your work is still running. This page will catch up when it finishes.</span>
+          </div>
+        )}
         {showJumpLatest && (
           <button
             className="jump-latest"
@@ -785,10 +814,11 @@ export function ChatPanel({
         onDrop={(e) => { e.preventDefault(); if (e.dataTransfer.files?.length) void attachFiles(e.dataTransfer.files); }}
       >
         {cmdQuery != null && cmdMatches.length > 0 && (
-          <div className="command-menu" role="listbox" aria-label="Slash commands">
+          <div className="command-menu" role="listbox" id="command-menu" aria-label="Slash commands">
             {cmdMatches.map((c, i) => (
               <button
                 key={`${c.group}:${c.name}`}
+                id={`cmd-option-${i}`}
                 role="option"
                 aria-selected={i === cmdIndex}
                 className={`command-row ${i === cmdIndex ? "active" : ""}`}
@@ -828,6 +858,11 @@ export function ChatPanel({
             }}
             placeholder={sessionId ? "Ask for follow-up changes…" : "What would you like to build?"}
             aria-label="Message Zcode"
+            role="combobox"
+            aria-expanded={cmdQuery != null && cmdMatches.length > 0}
+            aria-controls="command-menu"
+            aria-autocomplete="list"
+            aria-activedescendant={cmdQuery != null && cmdMatches.length > 0 ? `cmd-option-${cmdIndex}` : undefined}
             rows={2}
             onKeyDown={(e) => {
               // "/" palette navigation takes precedence while it is open
@@ -837,14 +872,8 @@ export function ChatPanel({
                 if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); pickCommand(cmdMatches[cmdIndex] || cmdMatches[0]); return; }
                 if (e.key === "Escape") { e.preventDefault(); setCmdDismissed(true); return; }
               }
+              // Shift+Tab stays native (reverse focus navigation); IME-safe Enter
               if (e.key === "Enter" && !e.shiftKey && !(e.nativeEvent as KeyboardEvent).isComposing) { e.preventDefault(); void send(); }
-              if (e.key === "Tab" && e.shiftKey) {
-                e.preventDefault();
-                const i = modes.indexOf(mode);
-                const next = modes[(i + 1 + modes.length) % modes.length] || modes[0] || mode;
-                setMode(next);
-                savePrefs({ mode: next });
-              }
             }}
           />
           <div className="composer-toolbar">
@@ -908,7 +937,7 @@ export function ChatPanel({
         </div>
         <div className="composer-hint">
           <span><kbd>↵</kbd> send <span className="hint-dot">·</span> <kbd>shift ↵</kbd> new line <span className="hint-dot">·</span> <kbd>/</kbd> commands</span>
-          <span className="composer-status"><span className={`tiny-dot ${run.streamAttached ? "green" : ""}`} />{run.streamAttached ? "stream live" : externalActive && !localBusy ? "streaming in the Zcode app" : localBusy ? "reconnecting" : "idle"}</span>
+          <span className="composer-status"><span className={`tiny-dot ${run.streamAttached ? "green" : localBusy ? "amber" : ""}`} />{streamLabel()}</span>
         </div>
       </div>
       </div>
@@ -990,16 +1019,40 @@ function FileCards({ files, onPreview }: { files: FileCard[]; onPreview: (f: Fil
 
 function FileChip({ file: f, onPreview }: { file: FileCard; onPreview: (f: FileCard) => void }) {
   const [thumbFailed, setThumbFailed] = useState(false);
+  const [thumbSrc, setThumbSrc] = useState<string | null>(null);
   const a = artifactArgs(f.url);
-  const route = a ? artifactUrl(a) : null;
   const isImage = f.mime.startsWith("image/");
+
+  useEffect(() => {
+    let alive = true;
+    if (!isImage || !a) return;
+    const route = artifactUrl(a);
+    const token = localStorage.getItem("zcode-web-token") || "";
+    fetch(route, { headers: token ? { authorization: `Bearer ${token}` } : {} })
+      .then((r) => {
+        if (!r.ok) throw new Error("not ok");
+        return r.blob();
+      })
+      .then((blob) => {
+        if (!alive) return;
+        const url = URL.createObjectURL(blob);
+        setThumbSrc(url);
+      })
+      .catch(() => {
+        if (alive) setThumbFailed(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [f.url, isImage]);
+
   // desktop shows the pasted filename; artifact-protocol URLs have none, so
   // those fall back to the mime label
   const base = f.url ? (f.url.split("/").pop() || "") : "";
   const label = base && base.includes(".") ? base.slice(0, 48) : isImage ? f.mime.replace("image/", "").toUpperCase() : (f.mime === "application/pdf" ? "PDF" : f.mime.split("/").pop()?.toUpperCase() || "FILE");
   return (
     <button className={`file-card ${isImage && !thumbFailed ? "is-image" : ""}`} onClick={() => onPreview(f)} title="Preview attachment">
-      {isImage && route && !thumbFailed ? <img src={route} alt="attached screenshot" loading="lazy" onError={() => setThumbFailed(true)} /> : <FileText size={12} />}
+      {isImage && thumbSrc && !thumbFailed ? <img src={thumbSrc} alt="attached screenshot" loading="lazy" onError={() => setThumbFailed(true)} /> : <FileText size={12} />}
       <span>{label}{f.size ? ` · ${(f.size / 1024).toFixed(0)}KB` : ""}</span>
     </button>
   );
@@ -1011,14 +1064,18 @@ function FileChip({ file: f, onPreview }: { file: FileCard; onPreview: (f: FileC
 // notice instead of a broken frame.
 function PreviewOverlay({ preview, onClose }: { preview: PreviewState; onClose: () => void }) {
   const [imgFailed, setImgFailed] = useState(false);
-  useEffect(() => { setImgFailed(false); }, [preview]);
+  const ref = useRef<HTMLDivElement>(null);
+  useDialogA11y(ref, onClose);
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+    setImgFailed(false);
+    return () => {
+      if (preview.kind !== "text" && preview.src.startsWith("blob:")) {
+        URL.revokeObjectURL(preview.src);
+      }
+    };
+  }, [preview]);
   return (
-    <div className="preview-backdrop" role="dialog" aria-modal="true" aria-label={`Preview ${preview.title}`} onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div className="preview-backdrop" role="dialog" aria-modal="true" aria-label={`Preview ${preview.title}`} ref={ref} onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div className="preview-panel-light">
         <header className="preview-light-header">
           <FileText size={13} />

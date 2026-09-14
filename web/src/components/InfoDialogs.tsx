@@ -1,8 +1,9 @@
 // Reference-style utility dialogs: keyboard shortcuts, workspace tools,
 // and the skills launcher backed by the CLI's real skill registry.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { BookOpen, Check, Database, FileCode2, FolderClosed, Globe, Search, ShieldCheck, Sparkles, TerminalSquare, WandSparkles } from "lucide-react";
 import type { AppConfig, SkillInfo } from "../api/client";
+import { useDialogA11y } from "../ui";
 
 type ToolsCaps = Pick<AppConfig, "allowedRoots" | "cliPresent" | "providerConfigured">;
 
@@ -15,24 +16,7 @@ function toneFor(name: string) {
 
 function DialogShell({ title, subtitle, onClose, children }: { title: string; subtitle?: string; onClose: () => void; children: React.ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const previouslyFocused = document.activeElement as HTMLElement | null;
-    const timer = setTimeout(() => {
-      ref.current?.querySelector<HTMLElement>("button")?.focus();
-    }, 30);
-    function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") onClose();
-      if (event.key === "Tab") {
-        const elements = ref.current?.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], input:not([disabled])');
-        if (!elements?.length) return;
-        const first = elements[0], last = elements[elements.length - 1];
-        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
-      }
-    }
-    document.addEventListener("keydown", onKey);
-    return () => { clearTimeout(timer); document.removeEventListener("keydown", onKey); previouslyFocused?.focus(); };
-  }, [onClose]);
+  useDialogA11y(ref, onClose);
   return (
     <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div className="dialog" role="dialog" aria-modal="true" aria-label={title} ref={ref}>
@@ -49,11 +33,11 @@ function DialogShell({ title, subtitle, onClose, children }: { title: string; su
 export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
   const rows = [
     { label: "Find a session", keys: ["⌘ / Ctrl", "K"] },
-    { label: "Start a new chat", keys: ["⌘ / Ctrl", "N"] },
     { label: "Toggle the sidebar", keys: ["⌘ / Ctrl", "B"] },
     { label: "Toggle the preview panel", keys: ["⌘ / Ctrl", "J"] },
-    { label: "Cycle execution mode", keys: ["Shift", "Tab"] },
+    { label: "Send your message", keys: ["↵"] },
     { label: "A new line in your message", keys: ["Shift", "↵"] },
+    { label: "Browse slash commands", keys: ["/"] },
     { label: "Close a dialog", keys: ["Esc"] },
   ];
   return (

@@ -1,23 +1,44 @@
 // UI primitives ported from the reference design (user-provided sample).
-import { useEffect, useRef, type ReactNode, type ButtonHTMLAttributes } from "react";
+import { useEffect, useRef, useState, type ReactNode, type ButtonHTMLAttributes } from "react";
 import { X, Check, LoaderCircle } from "lucide-react";
-import { marked } from "marked";
-import DOMPurify from "dompurify";
+import { safeMarkdown } from "./lib/markdown";
 
-export function ZLogo({ size = 25, className = "" }: { size?: number; className?: string }) {
-  return <svg width={size} height={size} viewBox="0 0 28 28" fill="none" className={className} aria-hidden="true"><path d="M5 5h19l-4 5H1l4-5Zm5 8h10l-8 10H2l8-10Zm9 0h8l-4 5h-8l4-5Z" fill="currentColor" /></svg>;
-}
-
-export function IconButton({ label, children, className = "", ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { label: string; children: ReactNode }) {
-  return <button type="button" className={`icon-button ${className}`} title={label} aria-label={label} {...props}>{children}</button>;
-}
-
-export function Dialog({ title, subtitle, children, onClose, wide = false }: { title: string; subtitle?: string; children: ReactNode; onClose: () => void; wide?: boolean }) {
-  const ref = useRef<HTMLDivElement>(null);
+// Reactive CSS media query. Drives the shell's responsive behavior — the
+// navigation drawer exists below 1100px, the chat/inspector pane switch
+// below 821px.
+export function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() =>
+    typeof window !== "undefined" && "matchMedia" in window ? window.matchMedia(query).matches : false
+  );
   useEffect(() => {
-    const timer = setTimeout(() => {
-      ref.current?.querySelector<HTMLElement>("[autofocus], input, textarea, select, button")?.focus();
-    }, 30);
+    const mq = window.matchMedia(query);
+    const onChange = () => setMatches(mq.matches);
+    onChange();
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [query]);
+  return matches;
+}
+
+// Overlay behavior shared by every dialog-sized surface: focus the first
+// control on open, trap Tab inside while open, close on Escape, and restore
+// focus to the element that launched the overlay on close.
+export function useDialogA11y(ref: React.RefObject<HTMLElement | null>, onClose: () => void, autoFocus = true) {
+  useEffect(() => {
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const timer = autoFocus
+      ? setTimeout(() => {
+          ref.current?.querySelector<HTMLElement>("[autofocus], input, textarea, select, button")?.focus();
+        }, 30)
+      : undefined;
+    return () => {
+      if (timer) clearTimeout(timer);
+      previouslyFocused?.focus();
+    };
+    // mount/unmount only: restore must capture the launcher exactly once
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
     function onKey(event: KeyboardEvent) {
       if (event.key === "Escape") onClose();
       if (event.key === "Tab") {
@@ -29,20 +50,28 @@ export function Dialog({ title, subtitle, children, onClose, wide = false }: { t
       }
     }
     document.addEventListener("keydown", onKey);
-    return () => { clearTimeout(timer); document.removeEventListener("keydown", onKey); };
-  }, [onClose]);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [ref, onClose]);
+}
+
+export function ZLogo({ size = 25, className = "" }: { size?: number; className?: string }) {
+  return <svg width={size} height={size} viewBox="0 0 28 28" fill="none" className={className} aria-hidden="true"><path d="M5 5h19l-4 5H1l4-5Zm5 8h10l-8 10H2l8-10Zm9 0h8l-4 5h-8l4-5Z" fill="currentColor" /></svg>;
+}
+
+export function IconButton({ label, children, className = "", ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { label: string; children: ReactNode }) {
+  return <button type="button" className={`icon-button ${className}`} title={label} aria-label={label} {...props}>{children}</button>;
+}
+
+export function Dialog({ title, subtitle, children, onClose, wide = false }: { title: string; subtitle?: string; children: ReactNode; onClose: () => void; wide?: boolean }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useDialogA11y(ref, onClose);
   return <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}><div className={`dialog ${wide ? "dialog-wide" : ""}`} role="dialog" aria-modal="true" aria-label={title} ref={ref}><header className="dialog-header"><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div><IconButton label="Close dialog" onClick={onClose}><X size={18} /></IconButton></header>{children}</div></div>;
 }
 
 // ZWUI-015: fail-closed markdown — sanitized, plain-text fallback.
 export function Markdown({ text }: { text: string }) {
-  let html = "";
-  try {
-    html = DOMPurify.sanitize(marked.parse(text, { async: false, breaks: true, gfm: true }) as string);
-  } catch {
-    html = "<pre>" + text.replace(/&/g, "&amp;").replace(/</g, "&lt;") + "</pre>";
-  }
-  return <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} />;
+  const { html, degraded } = safeMarkdown(text);
+  return <div className={`markdown ${degraded ? "is-degraded" : ""}`} dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
 export function CheckMark({ className = "" }: { className?: string }) {

@@ -239,3 +239,11 @@
 .composer-hint kbd{font-size:9px;color:#9aa396;border:1px solid #43473f;border-radius:3px;padding:0 3px;background:#26282498}
 .composer-status{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
 .topbar-title{min-width:0;flex-shrink:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:52ch}
+
+/* Responsive shell (ZPAR-016): transport banner, drawer close, pane switch */
+.stream-status-banner{display:flex;align-items:center;gap:8px;margin:0 21px 8px;padding:8px 11px;border:1px solid #6e5a3a;background:#332e22;border-radius:8px;color:#d8c9a4;font-size:10px;line-height:1.5}
+.stream-status-banner>svg{color:#c9ae72;flex-shrink:0}
+.tiny-dot.amber{background:#c9ae72}
+.drawer-close{display:none}
+@media(max-width:1099px){.is-sidebar-open .drawer-close{display:inline-flex}}
+.pane-back-button{color:#8d978a}

@@ -16,9 +16,15 @@ function authHeaders() {
 
 type Goal = { objective: string; status: string; tokensUsed: number; timeUsedSeconds: number } | null | undefined;
 
-export function RightPanel({ cwd, onCollapse, goal }: { cwd: string; onCollapse: () => void; goal?: Goal }) {
+export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleExpanded }: {
+  cwd: string;
+  onCollapse: () => void;
+  goal?: Goal;
+  /** full-width layout (`.preview-expanded` on the workspace grid) */
+  expanded?: boolean;
+  onToggleExpanded?: () => void;
+}) {
   const [tab, setTab] = useState<Tab>("preview");
-  const [expanded, setExpanded] = useState(false);
   const [mobile, setMobile] = useState(false);
 
   return (
@@ -30,10 +36,12 @@ export function RightPanel({ cwd, onCollapse, goal }: { cwd: string; onCollapse:
           <button role="tab" aria-selected={tab === "changes"} className={`panel-tab ${tab === "changes" ? "active" : ""}`} onClick={() => setTab("changes")}><FileDiff size={14} /><span>Changes</span></button>
         </div>
         <div className="panel-actions">
-          <IconButton label={expanded ? "Collapse panel width" : "Expand panel width"} onClick={() => setExpanded(!expanded)}>
-            {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-          </IconButton>
-          <IconButton label="Hide panel" onClick={onCollapse}><Eye size={14} /></IconButton>
+          {onToggleExpanded && (
+            <IconButton label={expanded ? "Restore chat beside the panel" : "Expand panel to full width"} onClick={onToggleExpanded} aria-pressed={expanded}>
+              {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+            </IconButton>
+          )}
+          <IconButton label="Close panel" className="pane-back-button" onClick={onCollapse}><Eye size={14} /></IconButton>
         </div>
       </div>
       {tab === "preview" && <PreviewTab cwd={cwd} mobile={mobile} onMobile={setMobile} />}

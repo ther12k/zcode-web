@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useWorkspace } from "./workspace";
-import { ZLogo, IconButton, relativeTime } from "./ui";
+import { ZLogo, IconButton, relativeTime, useMediaQuery, useDialogA11y } from "./ui";
 import { loadPrefs, savePrefs } from "./state/prefs";
 import type * as prefsMod from "./state/prefs";
 import { ChatPanel } from "./components/ChatPanel";
@@ -36,6 +36,15 @@ export function App() {
     (() => { try { return localStorage.getItem("zcode-sidebar-collapsed") === "1"; } catch { return false; } })()
   );
   const [rightCollapsed, setRightCollapsed] = useState(false);
+  // Responsive shell state (ZPAR-016): below 1100px the sidebar is an icon
+  // rail; `navOpen` turns it into the fixed overlay drawer the stylesheet
+  // already styles (`.is-sidebar-open`). Below 821px chat and inspector are
+  // exclusive panes; `mobilePreview` flips between them (`.preview-active`).
+  const [navOpen, setNavOpen] = useState(false);
+  const [mobilePreview, setMobilePreview] = useState(false);
+  const [panelExpanded, setPanelExpanded] = useState(false);
+  const isNarrowNav = useMediaQuery("(max-width: 1099px)");
+  const isPane = useMediaQuery("(max-width: 820px)");
   // chat text scale (device-local; changed from Settings → Text size)
   const [fontSize, setFontSizeState] = useState<prefsMod.FontSize>(() => loadPrefs().fontSize);
   useEffect(() => {
@@ -98,16 +107,17 @@ export function App() {
     function keyboard(event: KeyboardEvent) {
       const t = event.target as HTMLElement;
       if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable) return;
+      // ⌘N intentionally NOT intercepted — the browser owns New Window
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); setModal("search"); }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "n") { event.preventDefault(); navigateNewChat(); }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "b") { event.preventDefault(); setSidebarCollapsed((c) => !c); }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "j") { event.preventDefault(); setRightCollapsed((c) => !c); }
-      if (event.key === "Escape") { setModal(null); setTaskMenu(false); setSortMenu(false); }
+      if (event.key === "Escape") { setModal(null); setTaskMenu(false); setSortMenu(false); setNavOpen(false); }
     }
     window.addEventListener("keydown", keyboard);
     return () => window.removeEventListener("keydown", keyboard);
   });
 
+  const activeSessionId = params.sessionId || null;
   const roots = caps?.allowedRoots || [];
   const cwd = useMemo(() => {
     if (params.workspace) {
@@ -128,6 +138,9 @@ export function App() {
   const [newChatNonce, setNewChatNonce] = useState(0);
   const navigateNewChat = useCallback(() => {
     setNewChatNonce((n) => n + 1);
+    setNavOpen(false);
+    // on pane widths, a new chat happens in the chat pane
+    setMobilePreview(false);
     navigateToCwd(cwd || safeDecode(params.workspace || ""));
   }, [cwd, params.workspace, navigateToCwd]);
 
@@ -138,9 +151,19 @@ export function App() {
     if (action === "search" || action === "skills" || action === "tools" || action === "settings" || action === "shortcuts") { setModal(action); return true; }
     return false;
   }, [navigateNewChat]);
-  const onSessionMeta = useCallback((s: { id: string; title: string }) => {
+  const onSessionMeta = useCallback((s: { id: string; title: string; directory?: string }) => {
     setSessionTitles((m) => (m[s.id] === s.title ? m : { ...m, [s.id]: s.title }));
-  }, []);
+    if (s.directory && s.id === activeSessionId) {
+      const canonical = safeDecode(s.directory);
+      if (canonical && cwd && canonical !== cwd && roots.some((r) => canonical === r || canonical.startsWith(r))) {
+        navigate({
+          to: "/w/$workspace/s/$sessionId",
+          params: { workspace: canonical, sessionId: s.id },
+          replace: true,
+        });
+      }
+    }
+  }, [activeSessionId, cwd, roots, navigate]);
 
   // sessions of the current cwd (task rows under the active "project")
   const [sessions, setSessions] = useState<SessionRow[]>([]);
@@ -188,8 +211,6 @@ export function App() {
     return () => { alive = false; };
   }, [cwd]);
 
-
-  const activeSessionId = params.sessionId || null;
   const renameSession = useCallback(async () => {
     if (!activeSessionId || !renaming?.title.trim() || renaming.busy) return;
     setRenaming((r) => (r ? { ...r, busy: true } : r));
@@ -240,14 +261,17 @@ export function App() {
     return () => { alive = false; clearInterval(poll); };
   }, [cwd, sidebarView, token]);
 
-  function selectSession(id: string) {
-    if (id === activeSessionId) {
+  function selectSession(id: string, directory?: string) {
+    const targetDir = directory || recent.find((r) => r.id === id)?.directory || sessions.find((s) => s.id === id)?.directory || cwd;
+    setNavOpen(false);
+    setMobilePreview(false);
+    if (id === activeSessionId && targetDir === cwd) {
       // re-selecting the open session pulls the transcript fresh — the
       // ZCode app may have continued it meanwhile (shared session store)
       setTranscriptReload((k) => k + 1);
       return;
     }
-    navigate({ to: "/w/$workspace/s/$sessionId", params: { workspace: cwd, sessionId: id } });
+    navigate({ to: "/w/$workspace/s/$sessionId", params: { workspace: targetDir, sessionId: id } });
   }
 
   if (!caps) {
@@ -258,9 +282,17 @@ export function App() {
   const projectLabel = cwd ? baseName(cwd) : "workspace";
 
   return (
-    <main className={`app-shell fs-${fontSize} ${sidebarCollapsed ? "sidebar-collapsed" : ""}`} data-fs={fontSize}>
+    <main
+      className={`app-shell fs-${fontSize} ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${navOpen ? "is-sidebar-open" : ""}`}
+      data-fs={fontSize}
+    >
       <header className="brand-header">
-        <button className="brand-button" onClick={() => setSidebarCollapsed(!sidebarCollapsed)} aria-label="Toggle workspace navigation">
+        <button
+          className="brand-button"
+          aria-label={isNarrowNav ? "Open workspace navigation" : "Toggle workspace navigation"}
+          aria-expanded={isNarrowNav ? navOpen : !sidebarCollapsed}
+          onClick={() => (isNarrowNav ? setNavOpen(true) : setSidebarCollapsed(!sidebarCollapsed))}
+        >
           <ZLogo size={25} /><span className="brand-name">zcode</span>
         </button>
         <span className="web-badge">web</span>
@@ -268,7 +300,12 @@ export function App() {
       </header>
 
       <header className="topbar">
-        <IconButton label="Open navigation" className="mobile-menu-button" onClick={() => setSidebarCollapsed(!sidebarCollapsed)}><Menu size={17} /></IconButton>
+        <IconButton
+          label="Open navigation"
+          className="mobile-menu-button"
+          aria-expanded={navOpen}
+          onClick={() => setNavOpen(true)}
+        ><Menu size={17} /></IconButton>
         <div className="breadcrumbs">
           <button onClick={() => navigateToCwd(cwd)}><FolderClosed size={13} /><span>{projectLabel}</span></button>
           <span className="breadcrumb-divider">/</span>
@@ -278,6 +315,12 @@ export function App() {
         <div className="topbar-actions">
           <span className="save-status">{runBusy ? <LoaderCircle size={12} className="spin" /> : <CloudCheck size={14} />}<span>{runBusy ? "Working…" : "All changes saved"}</span></span>
           <IconButton label={rightCollapsed ? "Show preview panel" : "Hide preview panel"} className="desktop-pane-button" onClick={() => setRightCollapsed(!rightCollapsed)}><PanelRight size={16} /></IconButton>
+          <IconButton
+            label={mobilePreview ? "Back to chat" : "Open preview panel"}
+            className="mobile-preview-button"
+            aria-pressed={mobilePreview}
+            onClick={() => { setRightCollapsed(false); setMobilePreview((v) => !v); }}
+          ><PanelRight size={16} /></IconButton>
           <div className="task-menu-wrap">
             <IconButton label="Session options" className={taskMenu ? "selected" : ""} onClick={() => setTaskMenu(!taskMenu)}><MoreHorizontal size={18} /></IconButton>
             {taskMenu && activeSessionId && (
@@ -308,7 +351,7 @@ export function App() {
 
       <aside className="sidebar" aria-label="Workspace navigation">
         <div className="primary-nav">
-          <button className="nav-button new-task-button" onClick={navigateNewChat} title="New chat"><SquarePen size={16} /><span className="nav-label">New chat</span><kbd>⌘ N</kbd></button>
+          <button className="nav-button new-task-button" onClick={navigateNewChat} title="New chat"><SquarePen size={16} /><span className="nav-label">New chat</span></button>
           <button className="nav-button" onClick={() => setModal("search")} title="Search sessions"><Search size={16} /><span className="nav-label">Search sessions</span><kbd>⌘ K</kbd></button>
           <button className="nav-button" onClick={() => { updatePrefs({ rootPath: roots.find((r) => r !== cwd) || roots[0] || "" }); notify("Switched workspace root."); }} title="Open workspace"><FolderOpen size={16} /><span className="nav-label">Open workspace</span></button>
         </div>
@@ -332,7 +375,15 @@ export function App() {
             <button role="tab" aria-selected={sidebarView === "sessions"} className={sidebarView === "sessions" ? "active" : ""} onClick={() => setSidebarView("sessions")} title="Latest 50 sessions"><History size={13} /><span className="nav-label">Sessions</span></button>
           </div>
         </div>
-        <div className="sidebar-section"><span>{sidebarView === "projects" ? "PROJECTS" : "RECENT SESSIONS"}</span><div><IconButton label="New chat" onClick={navigateNewChat}><Plus size={14} /></IconButton></div></div>
+        <div className="sidebar-section">
+          <span>{sidebarView === "projects" ? "PROJECTS" : "RECENT SESSIONS"}</span>
+          <div>
+            {navOpen && isNarrowNav && (
+              <IconButton label="Close navigation" className="drawer-close" onClick={() => setNavOpen(false)}><X size={14} /></IconButton>
+            )}
+            <IconButton label="New chat" onClick={navigateNewChat}><Plus size={14} /></IconButton>
+          </div>
+        </div>
         <div className="project-list">
           {sidebarView === "sessions" ? (
             <div className="sessions-list">
@@ -343,7 +394,7 @@ export function App() {
                     const row = recent.find((r) => r.id === id);
                     if (!row) return null;
                     return (
-                      <button key={id} className={`pinned-row ${id === activeSessionId ? "active" : ""}`} onClick={() => selectSession(id)} title={row.title}>
+                      <button key={id} className={`pinned-row ${id === activeSessionId ? "active" : ""}`} onClick={() => selectSession(id, row.directory)} title={row.title}>
                         <span className="task-dot" />
                         <span>{prefs.displayAliases[id] || row.title || id}</span>
                         <span className="pinned-kind">{row.directory.split("/").filter(Boolean).pop()}</span>
@@ -361,7 +412,7 @@ export function App() {
                     row={s}
                     active={s.id === activeSessionId}
                     prefs={prefs}
-                    onSelect={() => selectSession(s.id)}
+                    onSelect={() => selectSession(s.id, s.directory)}
                     onPin={(pin) => savePrefs({ pinnedSessions: pin ? [...prefs.pinnedSessions, s.id] : prefs.pinnedSessions.filter((x) => x !== s.id) })}
                     onHide={() => savePrefs({ hiddenSessions: [...prefs.hiddenSessions, s.id] })}
                   />
@@ -391,8 +442,11 @@ export function App() {
           <IconButton label="Settings" onClick={() => setModal("settings")}><Settings2 size={15} /></IconButton>
         </div>
       </aside>
+      {navOpen && <div className="sidebar-scrim" onClick={() => setNavOpen(false)} aria-hidden="true" />}
 
-      <div className={`workspace-main ${rightCollapsed ? "right-collapsed" : ""}`}>
+      <div
+        className={`workspace-main ${rightCollapsed ? "right-collapsed" : ""} ${mobilePreview ? "preview-active" : ""} ${panelExpanded ? "preview-expanded" : ""}`}
+      >
         <ChatPanel
           key={cwd}
           client={client}
@@ -418,7 +472,18 @@ export function App() {
           }}
         />
         {!rightCollapsed ? (
-          <RightPanel cwd={cwd} onCollapse={() => setRightCollapsed(true)} goal={activeSession?.goal} />
+          <RightPanel
+            cwd={cwd}
+            expanded={panelExpanded}
+            onToggleExpanded={() => setPanelExpanded((v) => !v)}
+            onCollapse={() => {
+              // on pane widths the collapse control means "back to chat";
+              // on desktop it hides the panel to the rail
+              if (isPane) setMobilePreview(false);
+              else setRightCollapsed(true);
+            }}
+            goal={activeSession?.goal}
+          />
         ) : (
           <div className="pane-rail" aria-label="Preview panel collapsed">
             <IconButton label="Show preview panel" onClick={() => setRightCollapsed(false)}><PanelRight size={15} /></IconButton>
@@ -446,6 +511,8 @@ export function App() {
           onClose={() => setModal(null)}
           onSelect={(id, directory) => {
             // navigate into the session's own project directory
+            setNavOpen(false);
+            setMobilePreview(false);
             navigate({ to: "/w/$workspace/s/$sessionId", params: { workspace: directory, sessionId: id } });
           }}
         />
@@ -454,21 +521,13 @@ export function App() {
         <SettingsDialog caps={caps} onClose={() => setModal(null)} onLogout={() => { clearTokenSafe(); setToken(""); }} />
       )}
       {renaming && activeSessionId && (
-        <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) setRenaming(null); }}>
-          <div className="dialog" role="dialog" aria-modal="true" aria-label="Rename session">
-            <header className="dialog-header"><div><h2>Give it a good name.</h2><p>Something that makes it easy to pick up where you left off.</p></div></header>
-            <form onSubmit={(e) => { e.preventDefault(); void renameSession(); }}>
-              <div className="dialog-body">
-                <label className="field-label" htmlFor="rename-session">Session name</label>
-                <input id="rename-session" className="text-field" autoFocus value={renaming.title} onChange={(e) => setRenaming({ title: e.target.value, busy: renaming.busy })} maxLength={200} required />
-              </div>
-              <footer className="dialog-footer">
-                <button type="button" className="secondary-button" onClick={() => setRenaming(null)}>Cancel</button>
-                <button className="primary-button" disabled={!renaming.title.trim() || renaming.busy}>{renaming.busy ? <LoaderCircle size={13} className="spin" /> : <CheckCircle2 size={13} />}Save name</button>
-              </footer>
-            </form>
-          </div>
-        </div>
+        <RenameDialog
+          title={renaming.title}
+          busy={renaming.busy}
+          onChange={(title) => setRenaming((r) => (r ? { ...r, title } : r))}
+          onCancel={() => setRenaming(null)}
+          onSubmit={() => void renameSession()}
+        />
       )}
       {modal === "shortcuts" && <ShortcutsDialog onClose={() => setModal(null)} />}
       {modal === "tools" && <ToolsDialog caps={caps} onClose={() => setModal(null)} />}
@@ -491,12 +550,17 @@ export function App() {
           <button aria-label="Dismiss notification" onClick={() => setToast(null)}><X size={13} /></button>
         </div>
       )}
-      {needsToken() && <TokenPrompt onSubmit={(t) => setToken(t)} />}
+      {needsToken() && (
+        <TokenPrompt
+          isInvalid={Boolean(caps?.authRequired && token && !caps.workspaceRoot)}
+          onSubmit={(t) => setToken(t)}
+        />
+      )}
     </main>
   );
 
   function needsToken() {
-    return Boolean(caps?.authRequired) && !token;
+    return Boolean(caps?.authRequired) && (!token || !caps?.workspaceRoot);
   }
   function updatePrefs(patch: Parameters<typeof savePrefs>[0]) {
     savePrefs(patch);
@@ -510,12 +574,17 @@ export function App() {
   }
 }
 
-function TokenPrompt({ onSubmit }: { onSubmit: (t: string) => void }) {
+function TokenPrompt({ onSubmit, isInvalid }: { onSubmit: (t: string) => void; isInvalid?: boolean }) {
   const [v, setV] = useState("");
   return (
     <div className="modal-backdrop">
       <div className="dialog" role="dialog" aria-modal="true" aria-label="Access token required">
-        <header className="dialog-header"><div><h2>Access token required</h2><p>Paste the deployment's ZCODE_WEB_TOKEN to continue.</p></div></header>
+        <header className="dialog-header">
+          <div>
+            <h2>{isInvalid ? "Invalid access token" : "Access token required"}</h2>
+            <p>{isInvalid ? "The provided token was rejected. Please paste the valid ZCODE_WEB_TOKEN." : "Paste the deployment's ZCODE_WEB_TOKEN to continue."}</p>
+          </div>
+        </header>
         <input
           type="password"
           value={v}
@@ -523,8 +592,37 @@ function TokenPrompt({ onSubmit }: { onSubmit: (t: string) => void }) {
           onKeyDown={(e) => e.key === "Enter" && onSubmit(v.trim())}
           placeholder="token"
           style={{ width: "100%", marginBottom: 12 }}
+          autoFocus
         />
         <button className="primary-button" onClick={() => onSubmit(v.trim())}>Continue</button>
+      </div>
+    </div>
+  );
+}
+
+function RenameDialog({ title, busy, onChange, onCancel, onSubmit }: {
+  title: string;
+  busy: boolean;
+  onChange: (title: string) => void;
+  onCancel: () => void;
+  onSubmit: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useDialogA11y(ref, onCancel);
+  return (
+    <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
+      <div className="dialog" role="dialog" aria-modal="true" aria-label="Rename session" ref={ref}>
+        <header className="dialog-header"><div><h2>Give it a good name.</h2><p>Something that makes it easy to pick up where you left off.</p></div></header>
+        <form onSubmit={(e) => { e.preventDefault(); onSubmit(); }}>
+          <div className="dialog-body">
+            <label className="field-label" htmlFor="rename-session">Session name</label>
+            <input id="rename-session" className="text-field" autoFocus value={title} onChange={(e) => onChange(e.target.value)} maxLength={200} required />
+          </div>
+          <footer className="dialog-footer">
+            <button type="button" className="secondary-button" onClick={onCancel}>Cancel</button>
+            <button className="primary-button" disabled={!title.trim() || busy}>{busy ? <LoaderCircle size={13} className="spin" /> : <CheckCircle2 size={13} />}Save name</button>
+          </footer>
+        </form>
       </div>
     </div>
   );
@@ -534,7 +632,7 @@ function ProjectGroups({ roots, activeSessionId, pinnedSessions, onSelectSession
   roots: string[];
   activeSessionId: string | null;
   pinnedSessions: string[];
-  onSelectSession: (id: string) => void;
+  onSelectSession: (id: string, directory: string) => void;
   onSelectProject: (dir: string) => void;
 }) {
   const token = (() => { try { return localStorage.getItem("zcode-web-token") || ""; } catch { return ""; } })();
@@ -619,7 +717,7 @@ function ProjectGroups({ roots, activeSessionId, pinnedSessions, onSelectSession
                         <div className="project-tasks">
                           {(rows || []).map((s) => (
                             <div className={`task-row ${activeSessionId === s.id ? "active" : ""}`} key={s.id}>
-                              <button className="task-link" onClick={() => onSelectSession(s.id)} title={s.title}>
+                              <button className="task-link" onClick={() => onSelectSession(s.id, s.directory || dir)} title={s.title}>
                                 <span className="task-dot" />
                                 <span className="task-title-wrap"><span className="task-title">{s.title || s.id}</span></span>
                                 <time>{relativeTime(s.updatedAt)}</time>

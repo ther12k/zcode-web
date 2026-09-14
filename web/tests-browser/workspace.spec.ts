@@ -326,6 +326,10 @@ test("Sessions view shows the latest 50 across roots with project labels", async
   // each row labels its project
   const row = page.locator(".task-row", { hasText: "session in another project" });
   await expect(row.locator(".task-project")).toHaveText("other-proj");
+
+  // clicking a session from another project routes to its canonical directory
+  await row.locator(".task-link").click();
+  await expect(page).toHaveURL(/.*other-proj.*sess_g1/);
 });
 
 test("desktop updates append without reloading the open view", async ({ page }) => {
@@ -399,4 +403,43 @@ test("chat affordances: jump-to-latest pill and stable load-older position", asy
     return { scrollTop: el.scrollTop, atTop: el.scrollTop < 10 };
   });
   assert.ok(!pos.atTop, "load-older must not yank the viewport to the top");
+});
+
+// ZPAR-016: responsive shell — navigation drawer below 1100px and the
+// chat/inspector pane switch below 821px must be fully operable.
+test.describe("mobile shell (390px)", () => {
+  test.use({ viewport: { width: 390, height: 800 } });
+
+  test("navigation drawer opens, dismisses, and closes on selection", async ({ page }) => {
+    // desktop chrome is hidden at this width; only the hamburger remains
+    await expect(page.locator(".brand-header")).toBeHidden();
+    await expect(page.locator(".sidebar")).toBeHidden();
+    await page.locator(".mobile-menu-button").click();
+    await expect(page.locator(".sidebar")).toBeVisible();
+    await expect(page.locator(".sidebar-scrim")).toBeVisible();
+    // scrim dismisses the drawer (click its right edge — the drawer covers
+    // the left 238px of the full-width scrim)
+    await page.locator(".sidebar-scrim").click({ position: { x: 350, y: 20 } });
+    await expect(page.locator(".sidebar")).toBeHidden();
+    // Escape closes it too
+    await page.locator(".mobile-menu-button").click();
+    await expect(page.locator(".sidebar")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".sidebar")).toBeHidden();
+    // a selection from the drawer closes it and lands in the chat pane
+    await page.locator(".mobile-menu-button").click();
+    await page.locator(".new-task-button").click();
+    await expect(page.locator(".sidebar")).toBeHidden();
+    await expect(page.getByLabel("Message Zcode")).toBeVisible();
+  });
+
+  test("preview button switches between the chat and inspector panes", async ({ page }) => {
+    await page.locator(".mobile-preview-button").click();
+    await expect(page.locator(".preview-panel")).toBeVisible();
+    await expect(page.getByLabel("Message Zcode")).toBeHidden();
+    // the panel's close control returns to the chat pane
+    await page.getByLabel("Close panel").click();
+    await expect(page.getByLabel("Message Zcode")).toBeVisible();
+    await expect(page.locator(".preview-panel")).toBeHidden();
+  });
 });
