@@ -496,7 +496,8 @@ test.describe("telemetry surfaces", () => {
   });
 
   test("agent terminal drawer lists bash evidence and is read-only", async ({ page }) => {
-    await page.locator(".chat-context .details-toggle", { hasText: "Terminal" }).click();
+    await page.locator(".chat-context .context-menu-wrap button").click();
+    await page.getByRole("menuitemcheckbox", { name: /Agent terminal/ }).click();
     const term = page.locator(".workspace-terminal");
     await expect(term).toBeVisible();
     await expect(term.getByText("read-only")).toBeVisible();
@@ -513,10 +514,12 @@ test.describe("telemetry surfaces", () => {
 
   test("byline times render and toggle between relative and exact", async ({ page }) => {
     const bar = page.locator(".chat-context");
-    await bar.locator(".details-toggle").first().click();
-    await expect(bar).toContainText("HH:MM");
+    const timesItem = () => page.getByRole("menuitemcheckbox", { name: /Exact times/ });
+    await bar.locator(".context-menu-wrap > button").click();
+    await timesItem().click();
     await expect(page.locator(".message-byline time").first()).toHaveText(/\d{2}:\d{2}/);
-    await bar.locator(".details-toggle").first().click();
+    // checkbox items keep the menu open — toggle straight back
+    await timesItem().click();
     await expect(page.locator(".message-byline time").first()).toHaveText(/^\d+[mhd]$/);
   });
 });
@@ -714,7 +717,7 @@ test("ZWUI-041: run-again on an old prompt leaves the current draft and its atta
   await page.goto("/w/default/s/sess_rerun000000000000000000000000");
   await page.waitForLoadState("domcontentloaded");
   const originalBlock = page.locator(".user-message-block", { hasText: "rerun original prompt" }).first();
-  await expect(originalBlock.getByLabel("Run this prompt again")).toBeVisible({ timeout: 8000 });
+  await expect(originalBlock.getByLabel("Prompt actions")).toBeVisible({ timeout: 8000 });
 
   // a NEW draft with an attachment — the rerun must not consume either
   const input = page.getByLabel("Message Zcode");
@@ -729,7 +732,8 @@ test("ZWUI-041: run-again on an old prompt leaves the current draft and its atta
     bodies.push(route.request().postDataJSON());
     await route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ error: "no need to run" }) });
   });
-  await originalBlock.getByLabel("Run this prompt again").click();
+  await originalBlock.getByLabel("Prompt actions").click();
+  await page.getByRole("menuitem", { name: /Run again/ }).click();
   await page.waitForTimeout(600);
   assert.equal(bodies.length, 1);
   assert.equal(bodies[0].text, "rerun original prompt");

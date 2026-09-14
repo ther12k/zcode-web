@@ -4,7 +4,7 @@
 // ZWUI-016 reducer; transport from the ZWUI-017 controller.
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { ArrowLeftRight, ArrowUp, ArrowUpRight, BadgeCheck, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Coins, Copy, Eye, EyeOff, FileText, FoldVertical, FolderClosed, GitBranch, LoaderCircle, MessageSquare, Plus, RotateCcw, ShieldCheck, Sparkles, Square, SquarePen, SquareTerminal, Terminal, Unplug, Wrench, X, Zap } from "lucide-react";
+import { ArrowLeftRight, ArrowUp, ArrowUpRight, BadgeCheck, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Coins, Copy, Eye, EyeOff, FileText, FoldVertical, FolderClosed, GitBranch, LoaderCircle, MessageSquare, MoreHorizontal, Plus, RotateCcw, ShieldCheck, SlidersHorizontal, Sparkles, Square, SquarePen, SquareTerminal, Terminal, Unplug, Wrench, X, Zap } from "lucide-react";
 import { ZLogo, IconButton, Markdown, CheckMark, useDialogA11y, relativeTime } from "../ui";
 import { randomUUID } from "../lib/uuid";
 import { ApiError, type ApiClient, type CommandInfo, type FileCard, type ModelInfo, type SessionDetail, type TimelineEvent, type TranscriptTurn } from "../api/client";
@@ -70,7 +70,9 @@ export function ChatPanel({
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [mode, setMode] = useState(defaultMode);
   const [model, setModel] = useState("");
-  const [menu, setMenu] = useState<"mode" | "model" | "project" | null>(null);
+  const [menu, setMenu] = useState<"mode" | "model" | "project" | "view" | null>(null);
+  // per-turn action menu ("…" byline control) — keyed by turn id
+  const [turnMenu, setTurnMenu] = useState<string | null>(null);
   // project switcher data (roots → projects), fetched on first open
   const [projectsByRoot, setProjectsByRoot] = useState<Record<string, string[]> | null>(null);
   const openProjectMenu = useCallback(() => {
@@ -319,13 +321,13 @@ export function ChatPanel({
     if (!menu) return;
     const close = (e: MouseEvent) => {
       const el = e.target as HTMLElement;
-      if (!el.closest(".composer-menu-wrap") && !el.closest(".project-menu-wrap")) setMenu(null);
+      if (!el.closest(".composer-menu-wrap") && !el.closest(".project-menu-wrap")) { setMenu(null); setTurnMenu(null); }
     };
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMenu(null); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { setMenu(null); setTurnMenu(null); } };
     document.addEventListener("mousedown", close);
     window.addEventListener("keydown", onKey);
     return () => { document.removeEventListener("mousedown", close); window.removeEventListener("keydown", onKey); };
-  }, [menu]);
+  }, [menu, turnMenu]);
 
   const localBusy = run.phase !== "idle" && !isTerminal(run.phase);
   // the sent prompt echoes instantly; once the transcript commits the real
@@ -767,24 +769,42 @@ export function ChatPanel({
           <span className={`pulse-dot ${busy ? "" : "idle"}`} />
           <span>{busy ? `Agent active · ${(models.find((m) => m.ref === model)?.model || "GLM").split("/").pop()?.toUpperCase()}` : "Idle"}</span>
         </span>
-        <button className="details-toggle" onClick={() => setExactTimes((v) => !v)} title="Toggle relative and exact message times">
-          <Clock3 size={12} /><span>{exactTimes ? "HH:MM" : "Relative"}</span>
-        </button>
-        <button
-          className={`details-toggle ${terminalOpen ? "context-active" : ""}`}
-          onClick={() => setTerminalOpen((v) => !v)}
-          title="Agent terminal — commands Zcode runs in this workspace"
-          aria-pressed={terminalOpen}
-        >
-          {terminalOpen ? <SquareTerminal size={12} /> : <Terminal size={12} />}<span>Terminal</span>
-        </button>
+        {/* the single usage entry point — REF2-06 keeps detailed numbers here,
+            not repeated across composer and messages */}
         <button className="details-toggle token-chip" onClick={() => setTokenDialog(true)} title="Token telemetry — totals cover every message of this session">
           <Coins size={12} />
           <span>{sessionTokens ? `${sessionTokens >= 10_000 ? `${Math.round(sessionTokens / 1000)}k` : sessionTokens.toLocaleString()} tokens` : "Tokens"}</span>
         </button>
-        <button className="details-toggle" onClick={() => setDetailsHidden((v) => !v)} title="Toggle thinking and tool details for messages">
-          {detailsHidden ? <Eye size={12} /> : <EyeOff size={12} />}<span>{detailsHidden ? "Show details" : "Hide details"}</span>
-        </button>
+        <div className="composer-menu-wrap context-menu-wrap">
+          <button
+            className={`details-toggle ${menu === "view" ? "context-active" : ""}`}
+            onClick={() => setMenu(menu === "view" ? null : "view")}
+            aria-haspopup="menu"
+            aria-expanded={menu === "view"}
+            title="View options"
+          >
+            <SlidersHorizontal size={12} /><span>View</span><ChevronDown size={11} />
+          </button>
+          {menu === "view" && (
+            <div className="popover view-popover" role="menu" aria-label="View options">
+              <button role="menuitemcheckbox" aria-checked={terminalOpen} onClick={() => setTerminalOpen((v) => !v)}>
+                {terminalOpen ? <SquareTerminal size={15} /> : <Terminal size={15} />}
+                <span><b>Agent terminal</b><small>Commands Zcode ran in this workspace</small></span>
+                {terminalOpen && <Check size={13} className="success-text" />}
+              </button>
+              <button role="menuitemcheckbox" aria-checked={exactTimes} onClick={() => setExactTimes((v) => !v)}>
+                <Clock3 size={15} />
+                <span><b>Exact times</b><small>{exactTimes ? "HH:MM bylines" : "Relative bylines (5m ago)"}</small></span>
+                {exactTimes && <Check size={13} className="success-text" />}
+              </button>
+              <button role="menuitemcheckbox" aria-checked={!detailsHidden} onClick={() => setDetailsHidden((v) => !v)}>
+                {detailsHidden ? <Eye size={15} /> : <EyeOff size={15} />}
+                <span><b>Thinking & steps</b><small>{detailsHidden ? "Hidden behind Details toggles" : "Shown under each answer"}</small></span>
+                {!detailsHidden && <Check size={13} className="success-text" />}
+              </button>
+            </div>
+          )}
+        </div>
       </div>
       <div className="messages-scroll" ref={scroll} onScroll={(e) => {
         const el = e.currentTarget;
@@ -821,6 +841,7 @@ export function ChatPanel({
         )}
         {!historyLoading && history.turns.map((t, i) => {
           const events = t.timeline || [];
+          const menuKey = t.id || `h${i}`;
           const timelineOnly = events.length > 0 && !t.text.trim() && !(t.tools || []).length && !(t.files || []).length && !t.reasoning;
           if (timelineOnly) {
             return <div className="timeline-stack" key={t.id || `h${i}`}>{events.map((ev, j) => <TimelineRow key={j} event={ev} />)}</div>;
@@ -835,12 +856,28 @@ export function ChatPanel({
                   <IconButton label="Copy prompt" onClick={() => void copyText(`u${i}`, t.text)}>
                     {copied === `u${i}` ? <Check size={12} /> : <Copy size={12} />}
                   </IconButton>
-                  <IconButton label="Edit and resend this prompt" onClick={() => editResend(t.text)}>
-                    <SquarePen size={12} />
-                  </IconButton>
-                  <IconButton label="Run this prompt again" disabled={busy} onClick={() => runAgain(t.text)}>
-                    <RotateCcw size={12} />
-                  </IconButton>
+                  <div className="composer-menu-wrap turn-menu-wrap">
+                    <IconButton
+                      label="Prompt actions"
+                      aria-haspopup="menu"
+                      aria-expanded={turnMenu === menuKey}
+                      onClick={() => setTurnMenu(turnMenu === menuKey ? null : menuKey)}
+                    >
+                      <MoreHorizontal size={12} />
+                    </IconButton>
+                    {turnMenu === menuKey && (
+                      <div className="popover turn-popover" role="menu" aria-label="Prompt actions">
+                        <button role="menuitem" onClick={() => { setTurnMenu(null); editResend(t.text); }}>
+                          <SquarePen size={15} />
+                          <span><b>Edit and resend</b><small>Loads this prompt into the composer — history stays</small></span>
+                        </button>
+                        <button role="menuitem" disabled={busy} onClick={() => { setTurnMenu(null); runAgain(t.text); }}>
+                          <RotateCcw size={15} />
+                          <span><b>Run again</b><small>Starts a new execution of this prompt</small></span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </span>
               </div>
               <div className="user-message">{t.text}</div>
@@ -952,15 +989,38 @@ export function ChatPanel({
                 {detailsHidden ? <Eye size={12} /> : <EyeOff size={12} />}<span>{detailsHidden ? "Details" : "Hide"}</span>
               </button>
             </div>
-            {!detailsHidden && run.reasoning && (
+            {/* answer first: while running, the CURRENT activity streams
+                visibly; once terminal, routine details collapse (REF2-03) —
+                failures below always stay visible */}
+            {!detailsHidden && localBusy && run.reasoning && (
               <div className="thinking-block"><Brain size={13} /><p>{run.reasoning}</p></div>
             )}
-            {liveTools.length > 0 && (
+            {!detailsHidden && localBusy && liveTools.length > 0 && (
               <div className="activity-stack">
                 {liveTools.map((t, i) => (
                   <ToolActivity key={i} name={t.name} status={t.status} detail={t.detail || ""} live />
                 ))}
               </div>
+            )}
+            {!localBusy && !detailsHidden && (run.reasoning || liveTools.length > 0) && (
+              <details className="thinking-block history-thinking">
+                <summary className="thinking-heading">
+                  <Brain size={13} />
+                  <span>
+                    {run.reasoning ? "Thinking" : "Steps"}
+                    {liveTools.length ? ` · ${liveTools.length} step${liveTools.length === 1 ? "" : "s"}` : ""}
+                  </span>
+                  <span className="thinking-hint">How I approached this</span>
+                </summary>
+                {run.reasoning && <p>{run.reasoning}</p>}
+                {liveTools.length > 0 && (
+                  <div className="activity-stack">
+                    {liveTools.map((t, i) => (
+                      <ToolActivity key={i} name={t.name} status={t.status} detail={t.detail || ""} live />
+                    ))}
+                  </div>
+                )}
+              </details>
             )}
             {run.answer
               ? <span className="stream-wrap"><Markdown text={run.answer} />{localBusy && <span className="stream-caret" aria-hidden="true" />}</span>

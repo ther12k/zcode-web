@@ -599,3 +599,81 @@ body.is-col-resizing .workspace-main{pointer-events:none}
 .agent-byline{min-height:22px}
 .message-byline{height:18px;margin-bottom:7px}
 .message-byline time,.agent-byline time{font-size:8.5px;color:#6b6b74}
+
+/* ============================================================
+   REF2 layer — legibility, reach, and the reference-v2 polish.
+   Conversation first: 15px reading text, ≥12px metadata, 44px
+   touch controls on compact viewports, reduced-motion honored.
+   ============================================================ */
+
+/* ---- conversation typography (was 11.6–11.7px) ---- */
+.user-message{font-size:15px;line-height:1.65;border-radius:12px 12px 4px 12px;padding:12px 15px}
+.agent-message .markdown{font-size:15px;line-height:1.7}
+.agent-message .markdown code,.user-message code{font-size:.9em}
+.message-byline strong,.agent-byline strong{font-size:12px}
+.message-byline time,.agent-byline time{font-size:12px}
+.agent-byline .agent-model,.message-duration{font-size:12px}
+.tk-pill,.turn-tokens{font-size:12px}
+.thinking-heading span,.thinking-hint{font-size:12px}
+.activity-trigger span,.activity-trigger small{font-size:12.5px}
+.message-footer .task-completed{font-size:12px}
+.load-older{font-size:12.5px}
+.working-message{font-size:13px}
+/* composer */
+.composer textarea{font-size:15px;line-height:1.55}
+.composer-hint{font-size:12px}
+.composer-status{font-size:12px}
+/* context strip stays compact but legible metadata */
+.chat-context{font-size:12px}
+.details-toggle{font-size:12px;gap:5px}
+.branch-chip{font-size:11.5px}
+/* sidebar + panels */
+.task-title{font-size:12.5px}
+.task-project{font-size:11.5px}
+.popover-label{font-size:10.5px}
+
+/* ---- view + turn menus (context strip & byline overflow) ---- */
+.view-popover{right:0;top:calc(100% + 6px);min-width:250px;display:flex;flex-direction:column}
+.view-popover button{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:7px;text-align:left}
+.view-popover button span{display:flex;flex-direction:column;flex:1}
+.view-popover button b{font-size:12.5px;font-weight:600;color:#e6e9ef}
+.view-popover button small{font-size:11.5px;color:#8b8b94}
+.turn-menu-wrap{position:relative;display:inline-flex}
+.turn-popover{right:0;top:calc(100% + 6px);min-width:240px;display:flex;flex-direction:column;z-index:70}
+.turn-popover button{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:7px;text-align:left}
+.turn-popover button span{display:flex;flex-direction:column;flex:1}
+.turn-popover button b{font-size:12.5px;font-weight:600;color:#e6e9ef}
+.turn-popover button small{font-size:11.5px;color:#8b8b94}
+.turn-popover button:disabled{opacity:.5;cursor:not-allowed}
+/* byline actions must not be hover-only: visible on focus too */
+.user-message-block .message-byline .icon-button,.turn-menu-wrap .icon-button{opacity:.55}
+.user-message-block:hover .message-byline .icon-button,.user-message-block:focus-within .message-byline .icon-button,
+.turn-menu-wrap:focus-within .icon-button{opacity:1}
+
+/* ---- inspector Overview (REF2-04) ---- */
+.overview-panel{display:flex;flex-direction:column;gap:10px;padding:12px;overflow-y:auto}
+.overview-card{border:1px solid #26272f;background:#15161c;border-radius:9px;padding:10px 12px;display:flex;flex-direction:column;gap:5px}
+.overview-label{font-size:10.5px;letter-spacing:.6px;color:#8b8b94}
+.overview-title{font-size:13.5px;font-weight:600;color:#e6e9ef;display:flex;align-items:center;gap:7px;margin:0}
+.overview-sub{font-size:12px;color:#8b8b94;display:inline-flex;align-items:center;gap:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.overview-links{display:flex;flex-direction:column;gap:6px}
+.overview-links button{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid #26272f;background:#15161c;border-radius:9px;text-align:left;transition:border-color .15s,background .15s}
+.overview-links button:hover{border-color:#323341;background:#1a1b24}
+.overview-links button span{display:flex;flex-direction:column}
+.overview-links button b{font-size:13px;color:#e6e9ef;font-weight:600}
+.overview-links button small{font-size:11.5px;color:#8b8b94}
+
+/* ---- compact viewports: 44px reach ---- */
+@media (max-width:820px){
+  .icon-button,.details-toggle,.send-button,.panel-tab,.new-task-button,.mode-picker,.model-picker{min-width:44px;min-height:44px}
+  .details-toggle{padding:0 12px}
+  .composer textarea{font-size:16px} /* avoids iOS focus zoom */
+  .turn-popover,.view-popover{min-width:220px}
+}
+
+/* ---- reduced motion (reference-v2 scaffold) ---- */
+@media (prefers-reduced-motion: reduce){
+  .app-shell *,.app-shell *::before,.app-shell *::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
+  .messages-scroll{scroll-behavior:auto!important}
+  .jump-latest{scroll-behavior:auto!important}
+}

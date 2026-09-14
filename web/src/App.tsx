@@ -620,6 +620,9 @@ export function App() {
           <RightPanel
             cwd={cwd}
             refreshKey={panelRefreshKey}
+            runBusy={runBusy}
+            sessionTitle={activeSession?.title}
+            branch={branch}
             expanded={panelExpanded}
             onToggleExpanded={() => setPanelExpanded((v) => !v)}
             onCollapse={() => {

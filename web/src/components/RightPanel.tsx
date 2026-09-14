@@ -4,12 +4,12 @@
 import { useEffect, useState } from "react";
 import {
   CheckCircle2, ChevronDown, Code2, Eye, FileCode2, FileDiff, FolderClosed, GitBranch,
-  Globe, LoaderCircle, Maximize2, Minimize2, Monitor, PanelBottom, Play, RefreshCw, Smartphone, Target,
+  Globe, ListTree, LoaderCircle, Maximize2, Minimize2, Monitor, PanelBottom, Play, RefreshCw, Smartphone, Target,
 } from "lucide-react";
 import { IconButton } from "../ui";
 import { DiffViewerModal, parseUnifiedDiff, type ParsedDiff } from "./DiffViewer";
 
-type Tab = "preview" | "code" | "changes";
+type Tab = "overview" | "preview" | "code" | "changes";
 
 function authHeaders() {
   return { authorization: `Bearer ${localStorage.getItem("zcode-web-token") || ""}` };
@@ -17,26 +17,44 @@ function authHeaders() {
 
 type Goal = { objective: string; status: string; tokensUsed: number; timeUsedSeconds: number } | null | undefined;
 
-export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleExpanded, refreshKey = 0 }: {
+export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleExpanded, refreshKey = 0, runBusy = false, sessionTitle, branch: branchProp }: {
   cwd: string;
   onCollapse: () => void;
   goal?: Goal;
+  /** live run state for the Overview card (ZWUI-050 subscription lives in App) */
+  runBusy?: boolean;
+  sessionTitle?: string;
+  branch?: string | null;
   /** bumped when a run finishes — inspectors refetch (the tree may have changed) */
   refreshKey?: number;
   /** full-width layout (`.preview-expanded` on the workspace grid) */
   expanded?: boolean;
   onToggleExpanded?: () => void;
 }) {
-  const [tab, setTab] = useState<Tab>("preview");
+  const [tab, setTab] = useState<Tab>("overview");
   const [mobile, setMobile] = useState(false);
+  // Preview appears ONLY where the deployment supports it (REF2-04) — it is
+  // never the default empty surface
+  const [previewCap, setPreviewCap] = useState<{ enabled: boolean } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void fetch("/api/preview/capability", { headers: authHeaders() })
+      .then((r) => (r.ok ? r.json() : { enabled: false }))
+      .then((c) => { if (alive) setPreviewCap(c); })
+      .catch(() => { if (alive) setPreviewCap({ enabled: false }); });
+    return () => { alive = false; };
+  }, []);
 
   return (
     <section className="preview-panel" aria-label="Workspace panel">
       <div className="panel-tabs">
         <div className="panel-tab-group" role="tablist" aria-label="Panel tabs">
-          <button role="tab" aria-selected={tab === "preview"} className={`panel-tab ${tab === "preview" ? "active" : ""}`} onClick={() => setTab("preview")}><Globe size={14} /><span>Preview</span></button>
-          <button role="tab" aria-selected={tab === "code"} className={`panel-tab ${tab === "code" ? "active" : ""}`} onClick={() => setTab("code")}><Code2 size={14} /><span>Code</span></button>
+          <button role="tab" aria-selected={tab === "overview"} className={`panel-tab ${tab === "overview" ? "active" : ""}`} onClick={() => setTab("overview")}><ListTree size={14} /><span>Overview</span></button>
           <button role="tab" aria-selected={tab === "changes"} className={`panel-tab ${tab === "changes" ? "active" : ""}`} onClick={() => setTab("changes")}><FileDiff size={14} /><span>Changes</span></button>
+          <button role="tab" aria-selected={tab === "code"} className={`panel-tab ${tab === "code" ? "active" : ""}`} onClick={() => setTab("code")}><Code2 size={14} /><span>Files</span></button>
+          {previewCap?.enabled && (
+            <button role="tab" aria-selected={tab === "preview"} className={`panel-tab ${tab === "preview" ? "active" : ""}`} onClick={() => setTab("preview")}><Globe size={14} /><span>Preview</span></button>
+          )}
         </div>
         <div className="panel-actions">
           {onToggleExpanded && (
@@ -47,27 +65,61 @@ export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleEx
           <IconButton label="Close panel" className="pane-back-button" onClick={onCollapse}><Eye size={14} /></IconButton>
         </div>
       </div>
-      {tab === "preview" && <PreviewTab cwd={cwd} mobile={mobile} onMobile={setMobile} />}
+      {tab === "overview" && (
+        <OverviewTab cwd={cwd} branch={branchProp} goal={goal} runBusy={runBusy} sessionTitle={sessionTitle}
+          goChanges={() => setTab("changes")} goFiles={() => setTab("code")} />
+      )}
+      {tab === "preview" && previewCap?.enabled && <PreviewTab cwd={cwd} mobile={mobile} onMobile={setMobile} cap={previewCap} />}
       {tab === "code" && <CodeTab cwd={cwd} refreshKey={refreshKey} />}
       {tab === "changes" && <ChangesTab cwd={cwd} refreshKey={refreshKey} />}
-      <GoalPanel goal={goal} />
     </section>
+  );
+}
+
+// ---------- Overview ----------
+// REF2-04: the inspector answers "what is the agent doing, what can I do
+// next" from REAL state — conversation identity, run status, goal — and
+// routes to Changes/Files. Selection-driven details open from there.
+
+function OverviewTab({ cwd, branch, goal, runBusy, sessionTitle, goChanges, goFiles }: {
+  cwd: string;
+  branch?: string | null;
+  goal: Goal;
+  runBusy: boolean;
+  sessionTitle?: string;
+  goChanges: () => void;
+  goFiles: () => void;
+}) {
+  return (
+    <div className="overview-panel">
+      <div className="overview-card">
+        <span className="overview-label">CONVERSATION</span>
+        <p className="overview-title">{sessionTitle || "New chat"}</p>
+        <small className="overview-sub" title={cwd}>{cwd}</small>
+      </div>
+      <div className="overview-card">
+        <span className="overview-label">AGENT</span>
+        <p className="overview-title">
+          <span className={`pulse-dot ${runBusy ? "" : "idle"}`} />
+          {runBusy ? "Working in this project" : "Idle — nothing running"}
+        </p>
+        {branch && <small className="overview-sub"><GitBranch size={11} /> {branch}</small>}
+      </div>
+      <GoalPanel goal={goal} />
+      <div className="overview-links">
+        <button onClick={goChanges}><FileDiff size={14} /><span><b>Review changes</b><small>Working-tree diff, unified or split</small></span></button>
+        <button onClick={goFiles}><FolderClosed size={14} /><span><b>Browse files</b><small>Read-only project files</small></span></button>
+      </div>
+    </div>
   );
 }
 
 // ---------- Preview ----------
 
-function PreviewTab({ cwd, mobile, onMobile }: { cwd: string; mobile: boolean; onMobile: (m: boolean) => void }) {
-  const [cap, setCap] = useState<{ enabled: boolean } | null>(null);
+function PreviewTab({ cwd, mobile, onMobile, cap }: { cwd: string; mobile: boolean; onMobile: (m: boolean) => void; cap: { enabled: boolean } | null }) {
   const [building, setBuilding] = useState(false);
   const [snap, setSnap] = useState<{ id: string; files: number; bytes: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    void fetch("/api/preview/capability", { headers: authHeaders() }).then((r) => r.json()).then((c) => alive && setCap(c)).catch(() => alive && setCap({ enabled: false }));
-    return () => { alive = false; };
-  }, []);
 
   async function build() {
     setBuilding(true); setError(null);
