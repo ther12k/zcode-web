@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { createServer as createHttpServer } from "node:http";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, existsSync, symlinkSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -104,6 +104,53 @@ async function collectSse(jobId, { lastEventId, ms = 4000, ticket } = {}) {
     }
   }
   return { events, ids, res: r };
+}
+
+// Ticket-specific SSE reader: NO bearer header (that is the point of the
+// ticket flow), bounded by a deadline, always aborts the socket so the
+// server's keep-alive stream cannot leak into the next test.
+async function collectTicketSse(jobId, { ticket, ms = 3000 } = {}) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    let url = `${BASE}/api/events/${jobId}`;
+    if (ticket) url += `?ticket=${encodeURIComponent(ticket)}`;
+    const r = await fetch(url, { signal: ctrl.signal, headers: {} });
+    const events = [];
+    if (r.status !== 200) return { status: r.status, events };
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    const deadline = Date.now() + ms;
+    for (;;) {
+      const { value, done } = await Promise.race([
+        reader.read(),
+        new Promise((res) => setTimeout(() => res({ done: true }), Math.max(0, deadline - Date.now()))),
+      ]);
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (line.startsWith("data: ")) {
+          const ev = JSON.parse(line.slice(6));
+          events.push(ev);
+          if (ev.kind === "done") {
+            clearTimeout(timer);
+            ctrl.abort();
+            return { status: r.status, events };
+          }
+        }
+      }
+    }
+    return { status: r.status, events };
+  } catch {
+    return { status: 0, events: [] };
+  } finally {
+    clearTimeout(timer);
+    try { ctrl.abort(); } catch {}
+  }
 }
 
 before(async () => {
@@ -260,10 +307,37 @@ describe("ZWUI-008 SSE v2", () => {
       body: JSON.stringify({ jobId }),
     });
     const { ticket } = await tr.json();
-    const noAuth = await fetch(`${BASE}/api/events/${jobId}?ticket=${ticket}`);
+    // collectTicketSse sends NO bearer — the ticket is the only credential
+    const noAuth = await collectTicketSse(jobId, { ticket, ms: 6000 });
     assert.equal(noAuth.status, 200);
-    const wrong = await fetch(`${BASE}/api/events/${jobId}?ticket=deadbeef`);
-    assert.equal(wrong.status, 401);
+    assert.ok(noAuth.events.some((e) => e.kind === "done"), "ticket-authenticated stream reaches done");
+    assert.ok(!noAuth.events.some((e) => e.kind === "ticket-expired"), "a fresh ticket must not be flagged expired");
+    // ZWUI-061: a stale/foreign ticket gets the distinguishable rotation
+    // marker (200 SSE), while a missing ticket is a bare 401
+    const wrong = await collectTicketSse(jobId, { ticket: "deadbeef", ms: 3000 });
+    assert.equal(wrong.status, 200);
+    assert.equal(wrong.events[0]?.kind, "ticket-expired", "foreign ticket must get the ticket-expired marker");
+    const none = await fetch(`${BASE}/api/events/${jobId}`);
+    assert.equal(none.status, 401);
+    await none.text();
+  });
+
+  it("ZWUI-061: tickets are single-use — a replayed ticket gets ticket-expired, not events", async () => {
+    const r = await chat({ text: "single use ticket" });
+    const { jobId } = await r.json();
+    const tr = await fetch(`${BASE}/api/sse-ticket`, {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ jobId }),
+    });
+    const { ticket } = await tr.json();
+    const first = await collectTicketSse(jobId, { ticket, ms: 6000 });
+    assert.ok(first.events.some((e) => e.kind === "done"), "first ticket use streams the run");
+    assert.ok(!first.events.some((e) => e.kind === "ticket-expired"), "first use must not be flagged expired");
+    const replay = await collectTicketSse(jobId, { ticket, ms: 3000 });
+    assert.equal(replay.status, 200);
+    assert.ok(replay.events.some((e) => e.kind === "ticket-expired"), "replayed ticket must get the rotation marker");
+    assert.ok(!replay.events.some((e) => e.kind === "line"), "a replayed ticket must not stream events");
   });
 });
 
@@ -826,8 +900,10 @@ describe("ZPAR-005 & ZPAR-008: Concurrency, idempotency conflict, and job cancel
 
   it("ZWUI-040: a graceful exit(0) AFTER cancellation still terminates cancelled (done carries status)", async () => {
     // In-process JobManager with a fixture CLI that traps SIGTERM and exits 0.
-    process.env.ZCODE_CLI_ENTRY = join(SERVER_ROOT, "tests", "fixtures", "cli-graceful-cancel.mjs");
-    const { JobManager } = await import("../server/zcode.js");
+    // config is frozen at the module's first import — set the entry directly
+    // instead of relying on process.env reaching a cached config object.
+    const { JobManager, config } = await import("../server/zcode.js");
+    config.cliEntry = join(SERVER_ROOT, "tests", "fixtures", "cli-graceful-cancel.mjs");
     const mgr = new JobManager();
     const { job } = mgr.start({ text: "graceful", cwd: ws, mode: "plan", requestId: "graceful-cancel-1" });
     assert.equal(job.status, "running");
@@ -1213,5 +1289,256 @@ describe("ZWUI-051 GitHub issue reading", () => {
     const r = await fetch(`${BASE}/api/git/status?cwd=${encodeURIComponent(projDir)}`, { headers: auth });
     const j = await r.json();
     assert.deepEqual(j.remote, { host: "github.com", owner: "ther12k", repo: "zcode-web" });
+  });
+});
+
+// ---- ZWUI-059: content search indexes real text and never throws on the
+// SQLite bind path; a missing source DB is an empty index, not a crash ----
+describe("ZWUI-059 ContentSearchIndex", async () => {
+  const { ContentSearchIndex } = await import("../server/sessions.js");
+  const { DatabaseSync } = await import("node:sqlite");
+
+  function makeSourceDb(dbPath, dir) {
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT);
+      CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, sequence INTEGER);
+      CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT, sequence INTEGER);
+    `);
+    db.prepare("INSERT INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)")
+      .run("sess_idx", "indexable session", dir, 1, 2);
+    const insPart = db.prepare("INSERT INTO part (id, message_id, session_id, data, sequence) VALUES (?,?,?,?,?)");
+    insPart.run("p1", "m1", "sess_idx", JSON.stringify({ type: "text", text: "the quick brown fox hides a secret-fox-token" }), 0);
+    insPart.run("p2", "m1", "sess_idx", JSON.stringify({ type: "tool", tool: "Bash", state: { status: "completed" } }), 1);
+    insPart.run("p3", "m2", "sess_idx", JSON.stringify({ type: "text", text: "another searchable passage about porcupines" }), 0);
+    // a rowid gap: deleted part leaves sparse rowids the watermark must pass
+    insPart.run("p5", "m3", "sess_idx", JSON.stringify({ type: "text", text: "trailing tail text" }), 0);
+    db.close();
+    return dbPath;
+  }
+
+  it("indexes text parts chunk-by-chunk and finds scoped content", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zc-idx-"));
+    const src = makeSourceDb(join(dir, "db.sqlite"), dir);
+    const idx = new ContentSearchIndex(join(dir, "search-index.sqlite"), src);
+    const p1 = idx.indexChunk([dir], { chunk: 2 });
+    assert.equal(p1.total > 0, true, "source rowid total reported");
+    assert.ok(p1.indexedThrough > 0, "watermark advanced past the first chunk");
+    const p2 = idx.indexChunk([dir], { chunk: 2 });
+    assert.equal(p2.indexedThrough, p2.total, "second chunk converges to the source total");
+    const hits = idx.search("secret-fox-token", [dir]);
+    assert.deepEqual(hits.map((h) => h.id), ["sess_idx"]);
+    assert.ok(idx.search("porcupines", [dir]).length === 1, "later rows indexed too");
+    // tool parts are not text — the fixture's tool part must not match
+    assert.equal(idx.search("Bash", [dir]).length, 0);
+    // no duplicate rows after re-indexing an already-covered range
+    assert.equal(idx.search("secret-fox-token", [dir]).length, 1);
+  });
+
+  it("reports an empty index (no throw) when the source DB does not exist", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zc-idx-none-"));
+    const idx = new ContentSearchIndex(join(dir, "search-index.sqlite"), join(dir, "missing.sqlite"));
+    const p = idx.indexChunk([dir]);
+    assert.deepEqual({ through: p.indexedThrough, total: p.total }, { through: 0, total: 0 });
+    assert.deepEqual(idx.search("anything", [dir]), []);
+  });
+});
+
+// /api/search stays useful when the content index fails: title hits return,
+// the failure is reported in index.error (ZWUI-059 honesty contract).
+describe("/api/search isolates content-index failures", () => {
+  it("answers 200 with title hits and honest index metadata (or 503 DB_MISSING)", async () => {
+    const r = await fetch(`${BASE}/api/search?q=proj`, { headers: auth });
+    if (r.status === 503) {
+      assert.equal((await r.json()).code, "DB_MISSING");
+      return;
+    }
+    assert.equal(r.status, 200);
+    const j = await r.json();
+    assert.ok(Array.isArray(j.results));
+    assert.equal(typeof j.index.through, "number");
+    assert.equal(typeof j.index.total, "number");
+  });
+});
+
+// ---- ZWUI-062: pagination over VISIBLE messages — no part-window
+// truncation, honest totals, CLI-internal messages never surface ----
+describe("SessionStore.transcript visible-message pagination", async () => {
+  const { SessionStore } = await import("../server/sessions.js");
+  const { DatabaseSync } = await import("node:sqlite");
+
+  function buildBigStore(dbPath) {
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT);
+      CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, sequence INTEGER);
+      CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT, sequence INTEGER);
+    `);
+    db.prepare("INSERT INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)")
+      .run("sess_big", "big", "/tmp", 1, 2);
+    const insMsg = db.prepare("INSERT INTO message (id, session_id, data, sequence) VALUES (?,?,?,?)");
+    const insPart = db.prepare("INSERT INTO part (id, message_id, session_id, data, sequence) VALUES (?,?,?,?,?)");
+    db.exec("BEGIN");
+    let seq = 0;
+    const N = 2100; // 2100 visible messages × 3 parts ≈ 6300 parts > the old 6000 window
+    for (let i = 0; i < N; i++) {
+      insMsg.run(`m${i}`, "sess_big", JSON.stringify({ role: "assistant", time: { created: i, completed: i + 1 } }), seq++);
+      insPart.run(`m${i}_a`, `m${i}`, "sess_big", JSON.stringify({ type: "step-start" }), 0);
+      // two text parts per message: a page boundary must never split them
+      insPart.run(`m${i}_t1`, `m${i}`, "sess_big", JSON.stringify({ type: "text", text: `turn-${i} alpha` }), 1);
+      insPart.run(`m${i}_t2`, `m${i}`, "sess_big", JSON.stringify({ type: "text", text: `turn-${i} beta` }), 2);
+      if (i % 5 === 0) {
+        // CLI-internal noise INSIDE the window: excluded from pages AND total
+        insMsg.run(`syn${i}`, "sess_big", JSON.stringify({ role: "user", synthetic: true, summary: { title: "s" } }), seq++);
+        insPart.run(`syn${i}_p`, `syn${i}`, "sess_big", JSON.stringify({ type: "text", text: `SYNTH-${i} internal` }), 0);
+      }
+    }
+    db.exec("COMMIT");
+    db.close();
+  }
+
+  it("totals every visible turn, hides internal ones, and never splits a message across pages", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zc-big-"));
+    const dbPath = join(dir, "db.sqlite");
+    buildBigStore(dbPath);
+    const store = new SessionStore(dbPath);
+
+    const first = store.transcript("sess_big", { limit: 400, offset: 0 });
+    assert.equal(first.total, 2100, "total counts visible content messages, not a part window");
+    assert.equal(first.hasMore, true);
+
+    // walk ALL pages: every visible turn exactly once, no internal text anywhere
+    const seen = new Map();
+    for (let off = 0; off < first.total; off += 400) {
+      const page = store.transcript("sess_big", { limit: 400, offset: off });
+      for (const t of page.turns) {
+        assert.ok(!seen.has(t.id), `turn ${t.id} appeared on two pages`);
+        seen.set(t.id, t);
+        assert.ok(!t.text.includes("SYNTH-"), "CLI-internal text must never surface");
+        assert.equal(t.text, t.id.replace("m", "turn-") + " alpha\n" + t.id.replace("m", "turn-") + " beta",
+          "both text parts of a message land on the same page, joined in order");
+      }
+      assert.ok(page.turns.length <= 400);
+    }
+    assert.equal(seen.size, 2100, "paging covers every visible turn exactly once");
+
+    // the OLDEST page really is the oldest turns (the old ascending-cap bug)
+    const oldest = store.transcript("sess_big", { limit: 5, offset: first.total - 5 });
+    assert.deepEqual(oldest.turns.map((t) => t.id), ["m0", "m1", "m2", "m3", "m4"]);
+    assert.equal(oldest.hasMore, false, "last page reports hasMore:false");
+  });
+});
+
+// ---- ZWUI-060: symlink-aware containment across the file/upload/cwd routes ----
+describe("ZWUI-060 realpath containment", () => {
+  it("rejects a symlink inside a root that points outside (/api/files)", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "zc-out-"));
+    const secret = join(outside, "secret.txt");
+    writeFileSync(secret, "top secret payload");
+    const link = join(ws, "proj", "link-out");
+    symlinkSync(outside, link, "dir");
+    try {
+      const r = await fetch(`${BASE}/api/files/${encodeURIComponent(join(link, "secret.txt"))}`, { headers: auth });
+      assert.equal(r.status, 403, "a symlink escape must be rejected even with an in-root spelling");
+    } finally {
+      unlinkSync(link);
+    }
+  });
+
+  it("still serves real files inside a root (no false positives)", async () => {
+    const real = join(ws, "proj", "real.txt");
+    writeFileSync(real, "plain workspace file");
+    const r = await fetch(`${BASE}/api/files/${encodeURIComponent(real)}`, { headers: auth });
+    assert.equal(r.status, 200);
+    assert.equal((await r.json()).content, "plain workspace file");
+  });
+
+  it("rejects a chat cwd that is a symlink to outside the roots", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "zc-out2-"));
+    const link = join(ws, "proj-link-out");
+    symlinkSync(outside, link, "dir");
+    try {
+      const r = await chat({ text: "symlink escape", cwd: link });
+      assert.equal(r.status, 400);
+    } finally {
+      unlinkSync(link);
+    }
+  });
+});
+
+// ---- ZWUI-072: uploads collide no more; over-limit attachments are an
+// explicit error, never a silent drop ----
+describe("upload names and attachment limits", () => {
+  it("concurrent same-millisecond same-name uploads do not overwrite each other", async () => {
+    const body = (payload) => JSON.stringify({ name: "collide.txt", data: Buffer.from(payload).toString("base64") });
+    const [a, b] = await Promise.all([
+      fetch(`${BASE}/api/upload`, { method: "POST", headers: auth, body: body("payload-alpha") }),
+      fetch(`${BASE}/api/upload`, { method: "POST", headers: auth, body: body("payload-beta") }),
+    ]);
+    assert.equal(a.status, 201);
+    assert.equal(b.status, 201);
+    const ja = await a.json();
+    const jb = await b.json();
+    assert.notEqual(ja.name, jb.name, "stored names must be collision-resistant");
+    const ca = await (await fetch(`${BASE}/api/uploads/${ja.name}`, { headers: auth })).text();
+    const cb = await (await fetch(`${BASE}/api/uploads/${jb.name}`, { headers: auth })).text();
+    assert.deepEqual([ca, cb].sort(), ["payload-alpha", "payload-beta"], "each stored file keeps its own payload");
+  });
+
+  it("more than five attachments is an explicit 400 listing the rejected ones", async () => {
+    const up = await fetch(`${BASE}/api/upload`, {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ name: "att.txt", data: Buffer.from("att").toString("base64") }),
+    });
+    const { path } = await up.json();
+    const six = Array.from({ length: 6 }, () => path);
+    const r = await chat({ text: "too many", attachments: six });
+    assert.equal(r.status, 400);
+    const j = await r.json();
+    assert.match(j.error, /too many attachments/);
+    assert.equal(j.rejected.length, 1, "the excess attachment is named");
+  });
+});
+
+// ---- ZWUI-061: an oversize body settles exactly once with a real 413 ----
+describe("readBody settles once", () => {
+  it("answers 413 promptly for an oversize chat body", async () => {
+    const big = "x".repeat(1024 * 1024 + 16);
+    const r = await fetch(`${BASE}/api/chat`, {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ text: big, cwd: join(ws, "proj"), mode: "plan" }),
+    });
+    assert.equal(r.status, 413);
+    const j = await r.json();
+    assert.match(j.error, /too large/);
+  });
+});
+
+// ---- ZWUI-072: streaming UTF-8 decode in the JSONL reader ----
+describe("JobManager stdout multibyte decoding", async () => {
+  const { JobManager, config } = await import("../server/zcode.js");
+
+  it("reassembles a multibyte character split across stdout chunks", async () => {
+    const prevEntry = config.cliEntry;
+    config.cliEntry = join(SERVER_ROOT, "tests", "fixtures", "cli-multibyte.mjs");
+    try {
+      const mgr = new JobManager();
+      const { job } = mgr.start({ text: "multibyte", cwd: ws, mode: "plan" });
+      await new Promise((res) => {
+        const t = setInterval(() => {
+          if (["succeeded", "failed", "cancelled", "timeout"].includes(job.status)) {
+            clearInterval(t);
+            res();
+          }
+        }, 25);
+      });
+      assert.equal(job.status, "succeeded");
+      const line = job.lines.find((e) => e.kind === "line");
+      assert.equal(line.line.payload.response, "héllo 🌍 done", "the split emoji survives parsing");
+    } finally {
+      config.cliEntry = prevEntry;
+    }
   });
 });

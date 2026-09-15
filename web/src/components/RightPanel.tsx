@@ -20,6 +20,30 @@ function authHeaders() {
 
 type Goal = { objective: string; status: string; tokensUsed: number; timeUsedSeconds: number } | null | undefined;
 
+// ZWUI-067: decode `git status --porcelain` XY codes into words — raw
+// two-letter codes assume git knowledge the UI must not require. X is the
+// staged (index) state, Y the unstaged (worktree) state; a space means "no
+// change on that side".
+const GIT_CODE_WORDS: Record<string, string> = {
+  M: "modified", A: "added", D: "deleted", R: "renamed", C: "copied",
+  T: "type change", U: "conflict", "?": "untracked", "!": "ignored",
+};
+function gitStatusLabel(code: string, long: boolean): string {
+  const raw = code || "";
+  if (raw === "??") return long ? "Untracked file (not yet in git)" : "new";
+  if (raw === "!!") return long ? "Ignored file" : "ignored";
+  if (raw.length > 2) return raw; // already a word (fixtures) — pass through
+  const x = raw[0] ?? "";
+  const y = raw[1] ?? "";
+  const wx = GIT_CODE_WORDS[x];
+  const wy = GIT_CODE_WORDS[y];
+  if (x && x === y && wx) return long ? `Staged and unstaged ${wx}` : wx;
+  if (wx && wy) return long ? `Staged ${wx}, unstaged ${wy}` : `${x}+${y}`;
+  if (wx) return long ? `Staged ${wx}` : wx;
+  if (wy) return long ? wy : wy;
+  return raw || "changed";
+}
+
 export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleExpanded, refreshKey = 0, runBusy = false, sessionTitle, branch: branchProp, client, issues = [], selectedIssue = null, onAddToPrompt }: {
   cwd: string;
   onCollapse: () => void;
@@ -446,10 +470,10 @@ function ChangesTab({ cwd, refreshKey = 0 }: { cwd: string; refreshKey?: number 
           </div>
         )}
         {changed.map((e) => (
-          <button key={e.path} className="diff-file-header" onClick={() => void showDiff(e.path)}>
+          <button key={e.path} className="diff-file-header" onClick={() => void showDiff(e.path)} title={gitStatusLabel(e.status, true)}>
             <FileCode2 size={12} />
             <span>{e.path}</span>
-            <small className="file-state">{e.status}</small>
+            <small className="file-state" aria-label={gitStatusLabel(e.status, true)}>{gitStatusLabel(e.status, false)}</small>
             <ChevronDown size={12} />
           </button>
         ))}

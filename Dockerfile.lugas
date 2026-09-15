@@ -1,4 +1,7 @@
-# Dual-runtime image for the Lugas migration gate (#43 G5):
+# Dual-runtime image for the Lugas migration gate (#43 G5) — EXPERIMENTAL:
+# the Node server (Dockerfile) is the supported production backend; Lugas
+# lags the route/auth/SSE contract and ships behind this opt-in image until
+# the shared contract suite passes.
 #   - pinned Bun runs the Lugas HTTP layer (server-lugas/)
 #   - Node 24 runs the ZCode CLI child (explicit ZCODE_CLI_NODE)
 # Rollback: the Node-only image (Dockerfile) remains the fallback — same
@@ -28,8 +31,13 @@ RUN curl -fsSL "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERS
 FROM base
 WORKDIR /app
 COPY package.json ./
+# ZWUI-070: install server-lugas deps IN the image from the lockfile — the
+# old `COPY server-lugas/node_modules` made the build depend on host state
+# (platform-mismatched or stale local installs) and could not build from a
+# clean checkout.
+COPY server-lugas/package.json server-lugas/package-lock.json ./server-lugas/
+RUN cd server-lugas && bun install --frozen-lockfile --production
 COPY server-lugas ./server-lugas
-COPY server-lugas/node_modules ./server-lugas/node_modules
 COPY public ./public
 COPY --from=webbuild /web/dist ./web/dist
 

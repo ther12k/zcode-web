@@ -49,19 +49,29 @@ export class StreamController {
       let url = `/api/events/${this.jobId}`;
       if (this.lastEventId > 0) url += `?lastEventId=${this.lastEventId}`;
 
+      // every (re)connect fetches a FRESH ticket — tickets are single-use on
+      // the server (ZWUI-061), so a reused one gets the ticket-expired event.
+      // If the exchange fails we still try: the 401/error path retries with a
+      // new ticket after backoff. EventSource cannot set headers, so the
+      // long-lived bearer token must never ride in this URL.
       try {
         const ticket = await this.client.sseTicket(this.jobId);
         url += `${url.includes("?") ? "&" : "?"}ticket=${encodeURIComponent(ticket)}`;
       } catch {
-        // ticket endpoint may be unavailable (e.g. job finished); fall back to
-        // bearer credentials — EventSource cannot set headers, so this only
-        // works where the deployment allows it (e.g. same-host local use).
+        // ticket endpoint unavailable (e.g. job reaped) — fall through and
+        // let the error path report a lost stream instead of faking attach
       }
       if (this.closed) return;
 
       const es = new EventSource(url);
       this.es = es;
-      this.cb.onAttached();
+      // ZWUI-061: attached means the stream actually OPENED — construction
+      // only means a request was issued; a 401/404 would otherwise count as
+      // a live connection
+      es.onopen = () => {
+        this.reconnectAttempt = 0;
+        this.cb.onAttached();
+      };
 
       es.onmessage = (ev) => {
         let msg: StoredEvent;

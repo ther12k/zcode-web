@@ -12,10 +12,12 @@ class FakeEventSource {
   closed = false;
   onmessage: ((ev: { data: string }) => void) | null = null;
   onerror: (() => void) | null = null;
+  onopen: (() => void) | null = null;
   constructor(url: string) {
     this.url = url;
     FakeEventSource.instances.push(this);
   }
+  open() { this.onopen?.(); }
   close() { this.closed = true; }
   emit(data: unknown) { this.onmessage?.({ data: typeof data === "string" ? data : JSON.stringify(data) }); }
   fail() { this.onerror?.(); }
@@ -62,6 +64,9 @@ describe("StreamController", () => {
     const s = new StreamController(makeClient(), "job-1", cb);
     s.start();
     await flush();
+    // ZWUI-061: attached means the stream OPENED, not that a request was issued
+    expect(seen.attached).toBe(0);
+    FakeEventSource.instances[0].open();
     expect(seen.attached).toBe(1);
     expect(FakeEventSource.instances[0].url).toBe("/api/events/job-1?ticket=TKT1");
     FakeEventSource.instances[0].emit({ kind: "agent", id: 1, text: "hi" });

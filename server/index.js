@@ -6,9 +6,9 @@ import { createServer } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import crypto from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { extname, join, normalize, resolve, sep } from "node:path";
+import { basename, dirname, extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { JobManager, cliStatus, cliRuntimeStatus, config, uploadsDir } from "./zcode.js";
@@ -56,14 +56,54 @@ function issueSseTicket(jobId) {
   sseTickets.set(ticket, { jobId, exp: Date.now() + config.jobTimeoutMs + 60_000 });
   return ticket;
 }
-function validSseTicket(ticket, jobId) {
-  const v = sseTickets.get(String(ticket || ""));
-  return Boolean(v && v.jobId === jobId && v.exp > Date.now());
+// ZWUI-061: a ticket is a short-lived connection credential, not a session
+// token — it is consumed on first successful use. A replayed ticket gets the
+// explicit ticket-expired marker (not a bare 401) so a reconnecting client
+// rotates cleanly instead of retrying a dead credential.
+function consumeSseTicket(ticket, jobId) {
+  const key = String(ticket || "");
+  const v = sseTickets.get(key);
+  if (v && v.jobId === jobId && v.exp > Date.now()) {
+    sseTickets.delete(key);
+    return true;
+  }
+  return false;
 }
 
 mkdirSync(WORKSPACE_ROOT, { recursive: true });
 
 // ---------- helpers ----------
+
+// ZWUI-060: lexical checks cannot see symlinks — a path that resolves inside
+// a root on paper may point anywhere on disk. Policy: resolve the REAL path
+// of the deepest existing ancestor, rejoin the not-yet-existing remainder,
+// and require containment against the equally-realified roots. Symlinked
+// directories (or files) that escape a root are rejected even when their
+// lexical spelling is inside.
+function realpathOf(p) {
+  let abs = resolve(String(p));
+  const trail = [];
+  for (;;) {
+    try {
+      return join(realpathSync(abs), ...trail.reverse());
+    } catch (err) {
+      if (err.code !== "ENOENT") return abs; // EACCES etc: lexical fallback
+      const parent = dirname(abs);
+      if (parent === abs) return abs; // reached the filesystem root
+      trail.push(basename(abs));
+      abs = parent;
+    }
+  }
+}
+
+function insideRoot(abs, root) {
+  return abs === root || abs.startsWith(root + sep);
+}
+
+// Roots are realpathified once at startup (e.g. macOS /tmp → /private/tmp)
+// so every containment check compares real path to real root.
+const REAL_ROOTS = ALLOWED_ROOTS.map(realpathOf);
+const insideAllowedRoots = (abs) => REAL_ROOTS.some((root) => insideRoot(abs, root));
 
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
@@ -75,23 +115,40 @@ function sendJson(res, status, obj) {
   res.end(body);
 }
 
+// ZWUI-061: the promise settles exactly once — an oversize body no longer
+// leaves the promise pending when 'end' arrives after the 413 rejection, and
+// listeners are removed once settled so aborted requests cannot resolve a
+// promise nobody awaits anymore.
 function readBody(req, limit = 512 * 1024) {
   return new Promise((resolveBody, reject) => {
+    let settled = false;
     let size = 0;
     const chunks = [];
-    req.on("data", (c) => {
+    const finish = (err, value) => {
+      if (settled) return;
+      settled = true;
+      req.off("data", onData);
+      req.off("end", onEnd);
+      req.off("error", onError);
+      if (err) reject(err);
+      else resolveBody(value);
+    };
+    const onData = (c) => {
       size += c.length;
       if (size > limit) {
         // drain so the 413 response can still be written; Node closes the
         // connection after the response ends
         req.resume();
-        reject(Object.assign(new Error("body too large"), { status: 413 }));
+        finish(Object.assign(new Error("body too large"), { status: 413 }));
         return;
       }
       chunks.push(c);
-    });
-    req.on("end", () => resolveBody(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
+    };
+    const onEnd = () => finish(null, Buffer.concat(chunks).toString("utf8"));
+    const onError = (err) => finish(err);
+    req.on("data", onData);
+    req.on("end", onEnd);
+    req.on("error", onError);
   });
 }
 
@@ -106,15 +163,24 @@ function isAuthorized(req) {
 
 // Resolve and validate a project directory: must be an absolute path inside
 // one of the allowed roots, or a relative name resolved under the primary
-// workspace root.
+// workspace root. ZWUI-060: the containment verdict uses the REAL path, so a
+// symlink that leaves the roots is rejected even though its spelling is inside.
 function safeCwd(input) {
   if (!input || !String(input).trim()) return WORKSPACE_ROOT;
   const dir = resolve(String(input));
-  for (const root of ALLOWED_ROOTS) {
-    if (dir === root || dir.startsWith(root + sep)) return dir;
+  if (ALLOWED_ROOTS.some((root) => dir === root || dir.startsWith(root + sep))) {
+    if (!insideAllowedRoots(realpathOf(dir))) {
+      throw Object.assign(new Error("cwd must be inside an allowed root: " + ALLOWED_ROOTS.join(", ")), { status: 400 });
+    }
+    return dir;
   }
   const rel = resolve(WORKSPACE_ROOT, "." + sep + dir.replace(/^\/+/, ""));
-  if (ALLOWED_ROOTS.some((root) => rel === root || rel.startsWith(root + sep))) return rel;
+  if (ALLOWED_ROOTS.some((root) => rel === root || rel.startsWith(root + sep))) {
+    if (!insideAllowedRoots(realpathOf(rel))) {
+      throw Object.assign(new Error("cwd must be inside an allowed root: " + ALLOWED_ROOTS.join(", ")), { status: 400 });
+    }
+    return rel;
+  }
   throw Object.assign(new Error("cwd must be inside an allowed root: " + ALLOWED_ROOTS.join(", ")), { status: 400 });
 }
 
@@ -492,8 +558,8 @@ async function handleApi(req, res, url) {
     try {
       session = store.get(sessionMatch[1]);
       if (!session) return sendJson(res, 404, { error: "session not found" });
-      const sessionDir = resolve(session.directory);
-      if (!ALLOWED_ROOTS.some((r) => sessionDir === r || sessionDir.startsWith(r + sep))) {
+      // ZWUI-060: containment verdict on the REAL path (symlink-aware)
+      if (!insideAllowedRoots(realpathOf(session.directory))) {
         return sendJson(res, 403, { error: "session outside allowed roots" });
       }
       session.goal = store.goal(session.id);
@@ -571,7 +637,9 @@ async function handleApi(req, res, url) {
     if (data.length > config.maxUploadBytes) return sendJson(res, 413, { error: "file too large" });
     const dir = uploadsDir();
     mkdirSync(dir, { recursive: true });
-    const fname = `${Date.now()}-${safeName}`;
+    // collision-resistant name: same-millisecond uploads must not overwrite
+    // each other (ZWUI-072)
+    const fname = `${Date.now()}-${randomBytes(4).toString("hex")}-${safeName}`;
     const fpath = join(dir, fname);
     writeFileSync(fpath, data);
     return sendJson(res, 201, { path: fpath, name: fname, size: data.length });
@@ -582,7 +650,9 @@ async function handleApi(req, res, url) {
   if (uploadMatch && (req.method === "GET" || req.method === "HEAD")) {
     const dir = uploadsDir();
     const file = normalize(join(dir, uploadMatch[1]));
-    if (!file.startsWith(dir + sep) || !existsSync(file)) {
+    // ZWUI-060: realpath check — a symlink inside the uploads dir must not
+    // serve anything outside it
+    if (!file.startsWith(dir + sep) || !existsSync(file) || !insideRoot(realpathOf(file), realpathOf(dir))) {
       return sendJson(res, 404, { error: "not found" });
     }
     res.writeHead(200, {
@@ -606,14 +676,19 @@ async function handleApi(req, res, url) {
     try {
       const sess = store.get(artifactSess);
       if (sess) {
-        const sessionDir = resolve(sess.directory);
-        if (!ALLOWED_ROOTS.some((r) => sessionDir === r || sessionDir.startsWith(r + sep))) {
+        // ZWUI-060: symlink-aware containment; a missing session row keeps
+        // the artifact path checks below as the only gate (desktop parity:
+        // artifacts are addressed by session id, not the sessions table)
+        if (!insideAllowedRoots(realpathOf(sess.directory))) {
           return sendJson(res, 403, { error: "session outside allowed roots" });
         }
       }
     } catch {}
-    const dir = normalize(join(config.zcodeHome, "cli", "artifacts", artifactSess));
-    if (!dir.startsWith(join(config.zcodeHome, "cli", "artifacts") + sep)) return sendJson(res, 404, { error: "not found" });
+    const artifactsBase = join(config.zcodeHome, "cli", "artifacts");
+    const dir = normalize(join(artifactsBase, artifactSess));
+    if (!dir.startsWith(artifactsBase + sep) || !insideRoot(realpathOf(dir), realpathOf(artifactsBase))) {
+      return sendJson(res, 404, { error: "not found" });
+    }
     let file = null;
     if (existsSync(dir)) {
       const needle = `tool-result-${artifactUuid}`;
@@ -647,8 +722,8 @@ async function handleApi(req, res, url) {
     try {
       const sess = store.get(renameMatch[1]);
       if (sess) {
-        const sessionDir = resolve(sess.directory);
-        if (!ALLOWED_ROOTS.some((r) => sessionDir === r || sessionDir.startsWith(r + sep))) {
+        // ZWUI-060: symlink-aware containment before the write
+        if (!insideAllowedRoots(realpathOf(sess.directory))) {
           return sendJson(res, 403, { error: "session outside allowed roots" });
         }
       }
@@ -684,11 +759,12 @@ async function handleApi(req, res, url) {
         }
       }
       if (session) {
-        const canonical = resolve(session.directory);
-        if (!ALLOWED_ROOTS.some((r) => canonical === r || canonical.startsWith(r + sep))) {
+        // ZWUI-060: compare REAL paths — a symlinked spelling of the same
+        // directory still matches its session, a symlink to elsewhere doesn't
+        if (!insideAllowedRoots(realpathOf(session.directory))) {
           return sendJson(res, 403, { error: "session directory outside allowed roots", code: "SESSION_ROOT_FORBIDDEN" });
         }
-        if (canonical !== resolve(cwd)) {
+        if (realpathOf(session.directory) !== realpathOf(cwd)) {
           return sendJson(res, 409, {
             error: "session directory mismatch",
             code: "SESSION_CONTEXT_MISMATCH",
@@ -700,15 +776,21 @@ async function handleApi(req, res, url) {
 
     const mode = config.allowedModes.includes(body.mode) ? body.mode : "plan";
     const modelEntry = listModels({ withKeys: true }).find((m) => m.ref === body.model) || null;
+    const attachments = [];
     // attachments must be files previously uploaded to the uploads dir
     const upDir = uploadsDir();
     const requested = (Array.isArray(body.attachments) ? body.attachments : [])
       .map((p) => resolve(String(p)));
+    // ZWUI-072: an explicit error, never a silent drop — a caller that sent
+    // six files must know the fifth onward were not analyzed
+    if (requested.length > 5) {
+      return sendJson(res, 400, { error: "too many attachments (max 5)", rejected: requested.slice(5) });
+    }
     const bad = requested.filter((p) => !p.startsWith(upDir + sep) || !existsSync(p));
     if (bad.length) {
       return sendJson(res, 400, { error: "attachments must be uploaded via /api/upload first", rejected: bad });
     }
-    const attachments = requested.slice(0, 5);
+    attachments.push(...requested);
 
     // ZWUI-007: idempotent submission — same X-Request-Id returns the same job
     const requestId =
@@ -865,11 +947,20 @@ async function handleApi(req, res, url) {
       const results = store.searchSessions(q, ALLOWED_ROOTS, 20);
       const seen = new Set(results.map((r) => r.id));
       if (q.length >= 3) {
-        const progress = contentIndex.indexChunk(ALLOWED_ROOTS);
-        const contentHits = contentIndex.search(q, ALLOWED_ROOTS, 20).filter((r) => !seen.has(r.id));
+        // ZWUI-059: an index failure must not take the whole search route
+        // down — title hits still return, the failure is reported honestly
+        let progress = { indexedThrough: 0, total: 0 };
+        let contentHits = [];
+        let indexError = null;
+        try {
+          progress = contentIndex.indexChunk(ALLOWED_ROOTS);
+          contentHits = contentIndex.search(q, ALLOWED_ROOTS, 20).filter((r) => !seen.has(r.id));
+        } catch (e) {
+          indexError = e.message;
+        }
         return sendJson(res, 200, {
           results: [...results, ...contentHits].slice(0, 20),
-          index: { through: progress.indexedThrough, total: progress.total },
+          index: { through: progress.indexedThrough, total: progress.total, error: indexError },
         });
       }
       return sendJson(res, 200, { results });
@@ -918,9 +1009,12 @@ async function handleApi(req, res, url) {
     const pasteRoot = resolve(join(config.zcodeHome, "tmp", "paste-attachments"));
     // transcript attachments pasted into the CLI/desktop live under the
     // shared zcode home — previewable like workspace files, without adding
-    // the CLI's internals to the browsable allowed roots
-    const inside = ALLOWED_ROOTS.some((root) => abs === root || abs.startsWith(root + sep))
-      || abs === pasteRoot || abs.startsWith(pasteRoot + sep);
+    // the CLI's internals to the browsable allowed roots.
+    // ZWUI-060: the verdict is on the REAL path — a symlink inside a root
+    // that points outside is rejected.
+    const realAbs = realpathOf(abs);
+    const inside = insideAllowedRoots(realAbs)
+      || insideRoot(realAbs, realpathOf(pasteRoot));
     if (!inside) return sendJson(res, 403, { error: "path outside allowed roots" });
     if (!existsSync(abs) || !statSync(abs).isFile()) return sendJson(res, 404, { error: "not found" });
     const stat = statSync(abs);
@@ -1006,7 +1100,9 @@ async function handleApi(req, res, url) {
     execFile("git", ["status", "--porcelain"], { cwd, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) return sendJson(res, 422, { error: stderr || err.message });
       const entries = stdout.split("\n").filter(Boolean).map((line) => ({
-        status: line.slice(0, 2).trim(),
+        // ZWUI-067: keep BOTH XY columns (staged/unstaged) — the UI decodes
+        // them into words; trimming collapsed "M " and " M" into one meaning
+        status: line.slice(0, 2),
         path: line.slice(3),
       }));
       execFile("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd }, (e2, branch) => {
@@ -1057,25 +1153,36 @@ async function handleApi(req, res, url) {
   }
 
   // SSE: stream job events. Auth: bearer header or ?ticket= from /api/sse-ticket
-  // (EventSource cannot set headers; the ticket avoids URL token leakage).
+  // (EventSource cannot set headers; the ticket avoids URL token leakage and
+  // ZWUI-061 makes it single-use — reconnects fetch a fresh one).
   // ZWUI-008 v2: numbered events, Last-Event-ID replay, explicit ticket-expiry
   // and terminal `done` re-delivery.
   const eventsMatch = route.match(/^\/api\/events\/([0-9a-f-]+)$/);
   if (eventsMatch && req.method === "GET") {
     const jobId = eventsMatch[1];
     const ticket = url.searchParams.get("ticket");
-    const authed = isAuthorized(req) || validSseTicket(ticket, jobId);
-    if (!authed) {
-      // distinguishable from missing job so clients can re-auth cleanly
+    const bearerOk = isAuthorized(req);
+    // consume on first use — a replayed/expired/foreign ticket is invalid
+    const ticketOk = !bearerOk && consumeSseTicket(ticket, jobId);
+    if (!bearerOk && !ticketOk) {
+      if (ticket) {
+        // distinguishable from missing auth so clients can rotate: a stale,
+        // used, or wrong-job ticket gets a ticket-expired event, then the
+        // stream ends (the client fetches a fresh ticket and reconnects)
+        res.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-store",
+          connection: "keep-alive",
+          "x-accel-buffering": "no",
+        });
+        res.write(`data: ${JSON.stringify({ kind: "ticket-expired", jobId })}\n\n`);
+        return res.end();
+      }
       res.writeHead(401, { "content-type": "application/json; charset=utf-8" });
       return res.end(JSON.stringify({ error: "unauthorized" }));
     }
     const job = jobs.get(jobId);
     if (!job) return sendJson(res, 404, { error: "job not found" });
-    // ticket single-purpose check: an expired/invalid ticket with a valid
-    // shape gets an explicit marker so the client can fetch a new one
-    const ticketExpired =
-      !isAuthorized(req) && ticket && !validSseTicket(ticket, jobId);
 
     res.writeHead(200, {
       "content-type": "text/event-stream",
@@ -1091,10 +1198,6 @@ async function handleApi(req, res, url) {
       if (event.id) res.write(`id: ${event.id}\n`);
       res.write(`data: ${JSON.stringify(event)}\n\n`);
     };
-
-    if (ticketExpired) {
-      write({ kind: "ticket-expired", jobId });
-    }
 
     // replay from the client's cursor (bounded by the job's buffer)
     if (cursor > 0) {

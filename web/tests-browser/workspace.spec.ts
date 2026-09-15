@@ -34,7 +34,9 @@ test("send a message and watch the streamed reply complete", async ({ page }) =>
   // live-run evidence appears (working dots or activity), then the echoed answer
   await expect(page.locator(".working-message, .agent-message").first()).toBeVisible({ timeout: 8000 });
   await expect(page.locator(".agent-message")).toContainText("echo:browser integration hello", { timeout: 20000 });
-  await expect(page.locator(".message-footer, .activity")).toContainText(/Task completed|Plan ready|succeeded|done|completed/, { timeout: 10000 });
+  // ZWUI-063: the terminal footer is truthful — "Run finished", never a
+  // "Plan ready/Task completed" claim the run cannot prove
+  await expect(page.locator(".message-footer, .activity")).toContainText(/Run finished/, { timeout: 10000 });
   // a fresh chat adopts its session: the URL gains /s/<sessionId> while the
   // stream keeps rendering
   await expect(page).toHaveURL(/\/s\/sess_[A-Za-z0-9-]+/, { timeout: 10_000 });
@@ -222,8 +224,8 @@ test("timeline separators render like the desktop transcript", async ({ page }) 
   await expect(page.getByText("answer body")).toBeVisible();
   // user-message attachments render as chips/thumbnails under the message
   await expect(page.locator(".user-message-block .file-cards")).toHaveCount(1);
-  // failed turns: desktop-style footer, no raw error inline; detail is collapsed
-  await expect(page.locator(".task-completed").last()).toHaveText(/Worked for 5s/);
+  // failed turns: failure indicator (never a success checkmark), duration kept
+  await expect(page.locator(".task-completed").last()).toHaveText(/Turn failed · after 5s/);
   await expect(page.locator(".agent-message", { hasText: "answer body" }).locator(".danger-text")).toHaveCount(0);
   // raw error stays collapsed inside the details toggle
   await expect(page.getByText("Usage limit reached")).toBeHidden();

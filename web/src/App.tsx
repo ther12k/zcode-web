@@ -4,16 +4,16 @@
 // State ownership (ZWUI-006): runs live in a registry keyed by jobId —
 // navigating never retargets or cancels a job.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
-  Archive, ArrowDownWideNarrow, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, CloudCheck, Eye, EyeOff, KeyRound,
+  Archive, ArrowDownWideNarrow, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Eye, EyeOff, KeyRound,
   FolderClosed, FolderOpen, History, Keyboard, LoaderCircle, Menu, MoreHorizontal, PanelLeft, PanelRight, Pin, PinOff, Plus,
   Search, Settings2, SquarePen, Unplug, WandSparkles, X, GitBranch,
 } from "lucide-react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useWorkspace } from "./workspace";
 import { ZLogo, IconButton, relativeTime, useMediaQuery, useDialogA11y } from "./ui";
-import { loadPrefs, savePrefs } from "./state/prefs";
+import { loadPrefs } from "./state/prefs";
 import type * as prefsMod from "./state/prefs";
 import { ChatPanel } from "./components/ChatPanel";
 import { RightPanel } from "./components/RightPanel";
@@ -23,6 +23,7 @@ import { ShortcutsDialog, SkillsDialog, ToolsDialog } from "./components/InfoDia
 import { AnalyticsDialog } from "./components/AnalyticsDialog";
 import type { IssueIdentity, ScannedIssueRef } from "./lib/issueRefs";
 import { effectivePanelWidth } from "./lib/layout";
+import { activeRunCount, subscribeRuns } from "./state/runManager";
 
 type SessionRow = {
   id: string; title: string; directory: string; updatedAt: number;
@@ -30,10 +31,9 @@ type SessionRow = {
 };
 
 export function App() {
-  const { client, caps, token, setToken } = useWorkspace();
+  const { client, caps, capsError, token, setToken, logout, reloadCaps, prefs, updatePrefs } = useWorkspace();
   const params = useParams({ strict: false }) as { workspace?: string; sessionId?: string };
   const navigate = useNavigate();
-  const prefs = loadPrefs();
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     (() => { try { return localStorage.getItem("zcode-sidebar-collapsed") === "1"; } catch { return false; } })()
@@ -159,6 +159,9 @@ export function App() {
   const isPane = useMediaQuery("(max-width: 820px)");
   // chat text scale (device-local; changed from Settings → Text size)
   const [fontSize, setFontSizeState] = useState<prefsMod.FontSize>(() => loadPrefs().fontSize);
+  useEffect(() => {
+    setFontSizeState(prefs.fontSize);
+  }, [prefs.fontSize]);
   useEffect(() => {
     const onCustom = (e: Event) => { const fs = (e as CustomEvent<string>).detail as prefsMod.FontSize; if (fs) setFontSizeState(fs); };
     const onStorage = () => setFontSizeState(loadPrefs().fontSize);
@@ -338,14 +341,14 @@ export function App() {
   // statusbar branch chip (only when the read-only git capability is enabled)
   useEffect(() => {
     let alive = true;
-    void fetch(`/api/git/status?cwd=${encodeURIComponent(cwd)}`, { headers: { authorization: `Bearer ${localStorage.getItem("zcode-web-token") || ""}` } })
+    void fetch(`/api/git/status?cwd=${encodeURIComponent(cwd)}`, { headers: { authorization: `Bearer ${token}` } })
       // always consume the body: an unread fetch body keeps the request
       // in-flight in Chromium and breaks networkidle-based waits
       .then((r) => r.json().catch(() => null))
       .then((j) => { if (!alive) return; setBranch(j?.branch || null); setGitRemote(j?.remote ?? null); })
       .catch(() => {});
     return () => { alive = false; };
-  }, [cwd]);
+  }, [cwd, token]);
 
   const renameSession = useCallback(async () => {
     if (!activeSessionId || !renaming?.title.trim() || renaming.busy) return;
@@ -353,7 +356,7 @@ export function App() {
     try {
       const r = await fetch(`/api/sessions/${activeSessionId}/rename`, {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${loadTokenSafe()}` },
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
         body: JSON.stringify({ title: renaming.title.trim() }),
       });
       const j = await r.json();
@@ -365,7 +368,7 @@ export function App() {
       notify((e as Error).message, "error");
       setRenaming((r2) => (r2 ? { ...r2, busy: false } : r2));
     }
-  }, [activeSessionId, renaming, notify, refreshSessions]);
+  }, [activeSessionId, renaming, notify, refreshSessions, token]);
   const listed = sessions.find((s) => s.id === activeSessionId) || null;
   const activeSession = listed
     || (activeSessionId && sessionTitles[activeSessionId]
@@ -382,7 +385,7 @@ export function App() {
     if (!cwd || sidebarView !== "sessions") return;
     const load = () => {
       void fetch("/api/sessions/recent?limit=50", {
-        headers: { authorization: `Bearer ${loadTokenSafe()}` },
+        headers: { authorization: `Bearer ${token}` },
       })
         .then((r) => r.json())
         .then((j) => { if (alive) setRecent(j.sessions || []); })
@@ -396,6 +399,35 @@ export function App() {
     }, 30_000);
     return () => { alive = false; clearInterval(poll); };
   }, [cwd, sidebarView, token]);
+
+  // ZWUI-067: a pinned session older than the latest-50 window must stay
+  // reachable — resolve its title/directory on demand instead of dropping it
+  const [pinnedDirs, setPinnedDirs] = useState<Record<string, string>>({});
+  const failedPinned = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!client || sidebarView !== "sessions") return;
+    let alive = true;
+    for (const id of prefs.pinnedSessions) {
+      // skip ids already resolved, in-window, or known-unavailable — the 30s
+      // recency poll re-runs this effect and must not re-probe failures forever
+      if (recent.some((r) => r.id === id) || sessionTitles[id] || failedPinned.current.has(id)) continue;
+      void client.session(id)
+        .then((s) => {
+          if (alive && s?.session) {
+            setSessionTitles((m) => (m[id] === s.session.title ? m : { ...m, [id]: s.session.title }));
+            setPinnedDirs((m) => (m[id] === s.session.directory ? m : { ...m, [id]: s.session.directory }));
+          } else if (alive) {
+            failedPinned.current.add(id);
+          }
+        })
+        .catch(() => { failedPinned.current.add(id); });
+    }
+    return () => { alive = false; };
+  }, [client, sidebarView, prefs.pinnedSessions, recent, sessionTitles]);
+
+  // ZWUI-067: the statusbar count is the true number of live runs across ALL
+  // conversations (background runs included), not "the open one"
+  const runningCount = useSyncExternalStore(subscribeRuns, activeRunCount, () => 0);
 
   // Chrome occasionally rasterizes the sidebar session rows as a BLANK list
   // on first paint (rows are in the DOM and laid out, but painted empty until
@@ -432,6 +464,19 @@ export function App() {
   }, [runBusy]);
 
   if (!caps) {
+    // ZWUI-065: a failed bootstrap must not hang on an infinite loader —
+    // server unreachable gets an explicit retry, auth problems fall through
+    // to the token prompt below
+    if (capsError) {
+      return (
+        <main className="workspace-loading">
+          <div className="loading-brand"><ZLogo size={35} /><span>zcode</span></div>
+          <p>Can&apos;t reach this zcode-web server.</p>
+          <p className="muted">{capsError}</p>
+          <button className="primary-button" onClick={reloadCaps}><LoaderCircle size={13} />Retry</button>
+        </main>
+      );
+    }
     return <main className="workspace-loading"><div className="loading-brand"><ZLogo size={35} /><span>zcode</span></div><span className="loading-line" /><p>Opening your workspace…</p></main>;
   }
 
@@ -475,7 +520,9 @@ export function App() {
           {activeSessionId && prefs.pinnedSessions.includes(activeSessionId) && <span className="mini-badge pinned-badge"><Pin size={8} />Pinned</span>}
         </div>
         <div className="topbar-actions">
-          <span className="save-status">{runBusy ? <LoaderCircle size={12} className="spin" /> : <CloudCheck size={14} />}<span>{runBusy ? "Working…" : "All changes saved"}</span></span>
+          {/* ZWUI-067: no unbacked "All changes saved" — this chip reports
+              run activity, which IS known */}
+          <span className="save-status">{runBusy ? <LoaderCircle size={12} className="spin" /> : null}<span>{runBusy ? "Working…" : ""}</span></span>
           <IconButton label={rightCollapsed ? "Show preview panel" : "Hide preview panel"} className="desktop-pane-button" onClick={() => setRightCollapsed(!rightCollapsed)}><PanelRight size={16} /></IconButton>
           <IconButton
             label={mobilePreview ? "Back to chat" : "Open preview panel"}
@@ -488,13 +535,13 @@ export function App() {
             {taskMenu && activeSessionId && (
               <div className="popover task-popover">
                 <div className="popover-label">SESSION ACTIONS</div>
-                <button onClick={() => { const pinned = !prefs.pinnedSessions.includes(activeSessionId); savePrefs({ pinnedSessions: pinned ? [...prefs.pinnedSessions, activeSessionId] : prefs.pinnedSessions.filter((x) => x !== activeSessionId) }); notify(pinned ? "Pinned to the top of your sidebar." : "Removed from pinned."); setTaskMenu(false); }}>
+                <button onClick={() => { const pinned = !prefs.pinnedSessions.includes(activeSessionId); updatePrefs({ pinnedSessions: pinned ? [...prefs.pinnedSessions, activeSessionId] : prefs.pinnedSessions.filter((x) => x !== activeSessionId) }); notify(pinned ? "Pinned to the top of your sidebar." : "Removed from pinned."); setTaskMenu(false); }}>
                   {prefs.pinnedSessions.includes(activeSessionId) ? <PinOff size={14} /> : <Pin size={14} />}{prefs.pinnedSessions.includes(activeSessionId) ? "Unpin session" : "Pin session"}
                 </button>
                 <button onClick={() => { setRenaming({ title: activeSession?.title || "", busy: false }); setTaskMenu(false); }}>
                   <SquarePen size={14} />Rename session
                 </button>
-                <button onClick={() => { savePrefs({ hiddenSessions: prefs.hiddenSessions.includes(activeSessionId) ? prefs.hiddenSessions.filter((x) => x !== activeSessionId) : [...prefs.hiddenSessions, activeSessionId] }); notify("Hidden on this device."); setTaskMenu(false); }}>
+                <button onClick={() => { updatePrefs({ hiddenSessions: prefs.hiddenSessions.includes(activeSessionId) ? prefs.hiddenSessions.filter((x) => x !== activeSessionId) : [...prefs.hiddenSessions, activeSessionId] }); notify("Hidden on this device."); setTaskMenu(false); }}>
                   <Archive size={14} />{prefs.hiddenSessions.includes(activeSessionId) ? "Unhide on this device" : "Hide on this device"}
                 </button>
                 <div className="popover-divider" />
@@ -551,15 +598,19 @@ export function App() {
             <div className="sessions-list">
               {prefs.pinnedSessions.length > 0 && (
                 <div className="pinned-section">
-                  <div className="pinned-heading"><Pin size={11} /><span>PINNED</span><span className="pinned-count">{prefs.pinnedSessions.filter((id) => recent.some((r) => r.id === id)).length}</span></div>
+                  <div className="pinned-heading"><Pin size={11} /><span>PINNED</span><span className="pinned-count">{prefs.pinnedSessions.length}</span></div>
                   {prefs.pinnedSessions.map((id) => {
+                    // ZWUI-067: pinned stays reachable even when it fell out
+                    // of the latest-50 window — title/directory resolve on
+                    // demand (see the pinned-titles effect above)
                     const row = recent.find((r) => r.id === id);
-                    if (!row) return null;
+                    const title = row?.title ?? sessionTitles[id] ?? id;
+                    const directory = row?.directory ?? pinnedDirs[id] ?? "";
                     return (
-                      <button key={id} className={`pinned-row ${id === activeSessionId ? "active" : ""}`} onClick={() => selectSession(id, row.directory)} title={row.title}>
+                      <button key={id} className={`pinned-row ${id === activeSessionId ? "active" : ""}`} onClick={() => selectSession(id, directory || undefined)} title={title}>
                         <span className={`task-dot ${id === activeSessionId ? "current" : ""}`} />
-                        <span>{prefs.displayAliases[id] || row.title || id}</span>
-                        <span className="pinned-kind">{row.directory.split("/").filter(Boolean).pop()}</span>
+                        <span>{prefs.displayAliases[id] || title}</span>
+                        <span className="pinned-kind">{directory.split("/").filter(Boolean).pop() || "…"}</span>
                       </button>
                     );
                   })}
@@ -575,8 +626,8 @@ export function App() {
                     active={s.id === activeSessionId}
                     prefs={prefs}
                     onSelect={() => selectSession(s.id, s.directory)}
-                    onPin={(pin) => savePrefs({ pinnedSessions: pin ? [...prefs.pinnedSessions, s.id] : prefs.pinnedSessions.filter((x) => x !== s.id) })}
-                    onHide={() => savePrefs({ hiddenSessions: [...prefs.hiddenSessions, s.id] })}
+                    onPin={(pin) => updatePrefs({ pinnedSessions: pin ? [...prefs.pinnedSessions, s.id] : prefs.pinnedSessions.filter((x) => x !== s.id) })}
+                    onHide={() => updatePrefs({ hiddenSessions: [...prefs.hiddenSessions, s.id] })}
                   />
                 ))}
               {!recent.length && <p className="no-tasks">No sessions yet.</p>}
@@ -710,12 +761,13 @@ export function App() {
           <span className="status-brand"><ZLogo size={12} /><span>Zcode for web</span></span>
           <span className="status-divider" />
           {branch && <span className="branch-chip" title="git branch (read-only)"><GitBranch size={11} />{branch}</span>}
-          <span className="status-db"><span className={`tiny-dot ${caps.dbPresent ? "green" : ""}`} />{caps.dbPresent ? "Workspace synced" : "No session DB"}</span>
+          <span className="status-db"><span className={`tiny-dot ${caps.dbPresent ? "green" : ""}`} />{caps.dbPresent ? "Session store connected" : "No session DB"}</span>
         </div>
         <div>
           <button onClick={() => setModal("settings")}>{providerLive ? "Z.AI enabled" : "No provider"}</button>
           <button onClick={() => setModal("analytics")} title="Workspace analytics">Analytics</button>
-          <span>{runBusy ? "1 running" : "idle"}</span>
+          {/* ZWUI-067: the true count of live runs across all conversations */}
+          <span>{runningCount > 0 ? `${runningCount} running` : "idle"}</span>
           <button className="shortcut-button" aria-label="Keyboard shortcuts" onClick={() => setModal("shortcuts")}><Keyboard size={12} /></button>
         </div>
       </footer>
@@ -732,7 +784,7 @@ export function App() {
         />
       )}
       {modal === "settings" && (
-        <SettingsDialog caps={caps} onClose={() => setModal(null)} onLogout={() => { clearTokenSafe(); setToken(""); }} />
+        <SettingsDialog caps={caps} onClose={() => setModal(null)} onLogout={logout} />
       )}
       {renaming && activeSessionId && (
         <RenameDialog
@@ -747,7 +799,7 @@ export function App() {
       {modal === "analytics" && (
         <AnalyticsDialog
           open
-          token={loadTokenSafe()}
+          token={token}
           onClose={() => setModal(null)}
           onSelectSession={(id, directory) => selectSession(id, directory)}
         />
@@ -774,25 +826,18 @@ export function App() {
       )}
       {needsToken() && (
         <TokenPrompt
-          isInvalid={Boolean(caps?.authRequired && token && !caps.workspaceRoot)}
+          isInvalid={caps.authState === "unauthorized" && Boolean(token)}
           onSubmit={(t) => setToken(t)}
         />
       )}
     </main>
   );
 
+  // ZWUI-065: the verdict is the server's own answer (401 probe →
+  // authState "unauthorized"), not a guess from missing capability fields
   function needsToken() {
-    return Boolean(caps?.authRequired) && (!token || !caps?.workspaceRoot);
-  }
-  function updatePrefs(patch: Parameters<typeof savePrefs>[0]) {
-    savePrefs(patch);
-  }
-  function loadTokenSafe() {
-    try { return localStorage.getItem("zcode-web-token") || ""; } catch { return ""; }
-  }
-  function clearTokenSafe() {
-    try { localStorage.removeItem("zcode-web-token"); } catch {}
-    location.reload();
+    if (!caps) return false;
+    return caps.authRequired && (!token || caps.authState === "unauthorized");
   }
 }
 

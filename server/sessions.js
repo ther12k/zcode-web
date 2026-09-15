@@ -232,19 +232,75 @@ export class SessionStore {
   // LAST 5 turns (the ones shown when opening a session); offset=5 returns
   // the 5 before those, etc.
   //
-  // The part window keeps the NEWEST parts: long-running sessions (hourly
-  // automations) exceed any fixed cap, and an ascending LIMIT would silently
-  // hide the latest turns — the ones both the UI and the desktop show. The
-  // rows are fetched newest-first and re-reversed for the turn builder.
+  // ZWUI-062: pages VISIBLE messages directly instead of a fixed part window.
+  // The old newest-6000-part window ran BEFORE the CLI-internal filter, so
+  // busy sessions could truncate visible history mid-turn and report a
+  // window-local total. Here the visibility and content predicates live in
+  // SQL (mirroring the JS filter exactly — json_type 'true' ↔ JS true, and
+  // JSON null excluded for summary so it behaves like JS null), so total,
+  // hasMore and the page agree by construction and each page fetches parts
+  // only for its own messages.
   transcript(sessionId, { limit = 400, offset = 0 } = {}) {
-    const rows = this.query(
-      `SELECT m.id AS mid, m.data AS mdata, m.sequence AS mseq, p.sequence AS pseq, p.data AS pdata
-         FROM part p JOIN message m ON m.id = p.message_id
-        WHERE p.session_id = ?
-        ORDER BY m.sequence DESC, p.sequence DESC
-        LIMIT 6000`,
-      [sessionId]
-    ).reverse();
+    // "renderable turn" parity with the JS content filter below: a message
+    // turns into a chat turn when it carries an error or any text/reasoning/
+    // tool/file/timeline part (step-start/step-finish alone render nothing).
+    // The CTE materializes the content-message set ONCE — a correlated EXISTS
+    // is O(messages × parts) here because CLI stores carry no index on
+    // part.message_id (measured 425ms vs 9ms at 2100 messages).
+    const contentCte = `
+      WITH content_msgs AS (
+        SELECT DISTINCT message_id AS mid FROM part
+         WHERE session_id = ? AND json_extract(data, '$.type') IN ('text','reasoning','tool','file','timeline','compaction')
+      )`;
+    const visibleSql = `
+      json_type(m.data, '$.synthetic') IS NOT 'true'
+      AND json_extract(m.data, '$.semantics.transcriptVisibility') IS NOT 'hidden'
+      AND json_extract(m.data, '$.visibility') IS NOT 'model-only'
+      AND NOT (
+        json_extract(m.data, '$.role') = 'user'
+        AND json_extract(m.data, '$.summary') IS NOT NULL
+        AND json_type(m.data, '$.summary') != 'null'
+      )`;
+    const contentSql = `(
+      json_type(m.data, '$.error') = 'object'
+      OR m.id IN (SELECT mid FROM content_msgs)
+    )`;
+
+    const total = Number(this.query(
+      `${contentCte} SELECT COUNT(*) AS n FROM message m
+        WHERE m.session_id = ? AND ${visibleSql} AND ${contentSql}`,
+      [sessionId, sessionId]
+    )[0]?.n) || 0;
+
+    // One context message before the window so the page's first assistant
+    // turn can still carry its exchange footer (prevUserMsgId).
+    const ctx = offset > 0 ? 1 : 0;
+    const msgRows = this.query(
+      `${contentCte} SELECT m.id AS mid, m.data AS mdata, m.sequence AS mseq
+         FROM message m
+        WHERE m.session_id = ? AND ${visibleSql} AND ${contentSql}
+        ORDER BY m.sequence DESC
+        LIMIT ? OFFSET ?`,
+      [sessionId, sessionId, limit + ctx, Math.max(0, offset - ctx)]
+    );
+    const contextRow = ctx ? msgRows.shift() || null : null;
+    const pageAsc = msgRows.reverse(); // chronological for the turn builder
+
+    const partsByMid = new Map();
+    if (pageAsc.length) {
+      const placeholders = pageAsc.map(() => "?").join(",");
+      for (const p of this.query(
+        `SELECT p.message_id AS mid, p.data AS pdata
+           FROM part p
+          WHERE p.session_id = ? AND p.message_id IN (${placeholders})
+          ORDER BY p.sequence`,
+        [sessionId, ...pageAsc.map((r) => r.mid)]
+      )) {
+        if (!partsByMid.has(p.mid)) partsByMid.set(p.mid, []);
+        partsByMid.get(p.mid).push(p);
+      }
+    }
+
     // Per-turn duration/status live in turn_usage, keyed by the turn's user
     // message — the same rows the desktop's "Worked for Xs" footers come from.
     // Older CLI stores may not have the table; treat as "no durations".
@@ -257,57 +313,48 @@ export class SessionStore {
         ).map((u) => [u.user_message_id, { status: u.status, durationMs: Number(u.duration_ms) || 0 }])
       );
     } catch { /* table missing */ }
+
     const turns = [];
-    for (const r of rows) {
+    for (const r of pageAsc) {
       let msg = {};
-      let part = {};
       try { msg = JSON.parse(r.mdata); } catch { /* keep {} */ }
-      try { part = JSON.parse(r.pdata); } catch { /* keep {} */ }
-      // CLI-internal messages must not surface as chat turns: synthetic
-      // runtime reminders (model-only context), hidden-transcript messages,
-      // and compaction summary markers. The visible "context compacted"
-      // separator still renders from the compaction TIMELINE part.
+      // Defense in depth: the SQL predicates above mirror this filter, but a
+      // drift must never surface a CLI-internal message as a chat turn.
       if (
         msg.synthetic === true ||
         msg.semantics?.transcriptVisibility === "hidden" ||
         msg.visibility === "model-only" ||
         (msg.role === "user" && msg.summary != null)
       ) continue;
-      // reasoning parts carry .text too — the desktop keeps them out of the
-      // rendered answer (collapsible "Thinking"), so must we
-      const text = typeof part.text === "string" && part.type !== "reasoning" ? part.text : "";
-      const reasoning = part.type === "reasoning" && typeof part.text === "string" ? part.text : "";
-      const stepTokens = part.type === "step-finish" ? Number(part.tokens?.total) || 0 : 0;
-      const timelineEntry = part.type === "timeline" || part.type === "compaction" ? timelineSummary(part) : null;
-      const last = turns[turns.length - 1];
-      if (last && last.mseq === r.mseq) {
-        if (text.trim()) last.texts.push(text);
-        if (reasoning) last.reasonings.push(reasoning);
-        last.tokens += stepTokens;
+      const turn = {
+        role: msg.role || "?", mseq: r.mseq, mid: r.mid,
+        texts: [], reasonings: [], tokens: 0, timeline: [], tools: [], files: [],
+        error: msg.error?.data?.message || msg.error?.message || msg.error?.name || null,
+        msgCompleted: Number(msg.time?.completed) || 0,
+        msgCreated: Number(msg.time?.created) || 0,
+      };
+      for (const pr of partsByMid.get(r.mid) || []) {
+        let part = {};
+        try { part = JSON.parse(pr.pdata); } catch { /* keep {} */ }
+        // reasoning parts carry .text too — the desktop keeps them out of the
+        // rendered answer (collapsible "Thinking"), so must we
+        const text = typeof part.text === "string" && part.type !== "reasoning" ? part.text : "";
+        const reasoning = part.type === "reasoning" && typeof part.text === "string" ? part.text : "";
+        const stepTokens = part.type === "step-finish" ? Number(part.tokens?.total) || 0 : 0;
+        const timelineEntry = part.type === "timeline" || part.type === "compaction" ? timelineSummary(part) : null;
+        if (text.trim()) turn.texts.push(text);
+        if (reasoning) turn.reasonings.push(reasoning);
+        turn.tokens += stepTokens;
         // a compaction is stored twice (timeline part + compaction part);
         // one row per operationId
-        if (timelineEntry && !last.timeline.some((e) => e.op === part.operationId)) last.timeline.push(timelineEntry);
-        if (part.type === "tool") last.tools.push(toolSummary(part));
-        else if (part.type === "file") last.files.push(fileSummary(part));
-      } else {
-        const errMsg =
-          msg.error?.data?.message || msg.error?.message || msg.error?.name || null;
-        const completed = Number(msg.time?.completed) || 0;
-        turns.push({
-          role: msg.role || "?", mseq: r.mseq, mid: r.mid,
-          texts: text.trim() ? [text] : [],
-          reasonings: reasoning ? [reasoning] : [],
-          tokens: stepTokens,
-          timeline: timelineEntry ? [timelineEntry] : [],
-          tools: part.type === "tool" ? [toolSummary(part)] : [],
-          files: part.type === "file" ? [fileSummary(part)] : [],
-          error: errMsg,
-          msgCompleted: completed,
-          msgCreated: Number(msg.time?.created) || 0,
-        });
+        if (timelineEntry && !turn.timeline.some((e) => e.op === part.operationId)) turn.timeline.push(timelineEntry);
+        if (part.type === "tool") turn.tools.push(toolSummary(part));
+        else if (part.type === "file") turn.files.push(fileSummary(part));
+        if (timelineEntry) timelineEntry.op = part.operationId || undefined;
       }
-      if (timelineEntry) timelineEntry.op = part.operationId || undefined;
+      turns.push(turn);
     }
+
     // Attach each agentic turn's usage to the LAST substantive assistant
     // message of its exchange (the desktop shows one footer per answer, after
     // the final text). Separator-only messages (timeline/model-change rows)
@@ -316,6 +363,11 @@ export class SessionStore {
     const substantive = (t) =>
       !!(t.texts.length || t.reasonings.length || (t.tools && t.tools.length) || (t.files && t.files.length) || t.error);
     let lastUserMsgId = null;
+    if (contextRow) {
+      try {
+        if (JSON.parse(contextRow.mdata)?.role === "user") lastUserMsgId = contextRow.mid;
+      } catch { /* malformed context row: no inherited footer anchor */ }
+    }
     for (const t of turns) {
       if (t.role === "user") lastUserMsgId = t.mid;
       t.prevUserMsgId = lastUserMsgId;
@@ -354,9 +406,6 @@ export class SessionStore {
           incomplete: !t.msgCompleted && !t.durationMs && t.role === "assistant",
         };
       });
-    const total = all.length;
-    const end = Math.max(0, total - offset);
-    const start = Math.max(0, end - limit);
     // pagination-independent token total for the WHOLE session — the web UI's
     // telemetry must not redefine "session total" as the reader pages back
     let tokensTotal = null;
@@ -367,7 +416,7 @@ export class SessionStore {
         [sessionId]
       )[0]?.n) || 0;
     } catch { /* older stores without step tokens: null */ }
-    return { turns: all.slice(start, end), total, hasMore: start > 0, tokensTotal };
+    return { turns: all, total, hasMore: offset + limit < total, tokensTotal };
   }
 
   // Is a turn currently running in this session from ANY writer (desktop,
@@ -500,6 +549,10 @@ export class ContentSearchIndex {
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
         CREATE VIRTUAL TABLE IF NOT EXISTS parts_fts USING fts5(text, session_id UNINDEXED, message_id UNINDEXED);
       `);
+      // ZWUI-059: search joins the SOURCE session table for scoping — the
+      // sidecar only holds the FTS parts, so attach the CLI DB (read path
+      // only; nothing here writes to src.*)
+      db.exec(`ATTACH DATABASE '${this.sourceDbPath.replace(/'/g, "''")}' AS src`);
       this.db = db;
       this.ready = true;
     }
@@ -519,6 +572,9 @@ export class ContentSearchIndex {
   // Index at most `chunk` source parts (rowid-ordered) or `budgetMs` of work.
   // Returns { indexedThrough, total } — total = the source's max rowid.
   indexChunk(roots, { chunk = 20_000, budgetMs = 400 } = {}) {
+    // ZWUI-059: a missing source DB is a normal condition (fresh install),
+    // not a crash — report an empty index instead of throwing ENOENT.
+    if (!existsSync(this.sourceDbPath)) return { indexedThrough: 0, total: 0 };
     const source = new DatabaseSync(this.sourceDbPath, { readOnly: true });
     try {
       if (!this.#open()) return { indexedThrough: 0, total: 0 };
@@ -537,7 +593,9 @@ export class ContentSearchIndex {
                 AND (${scope.sql})
               ORDER BY p.rowid LIMIT ?`
           )
-          .all(through, through + chunk, scope.params, chunk);
+          // node:sqlite binds anonymous parameters positionally — the scope
+          // params must be spread, not passed as a single array argument
+          .all(through, through + chunk, ...scope.params, chunk);
         const ins = this.db.prepare("INSERT INTO parts_fts (text, session_id, message_id) VALUES (?, ?, ?)");
         this.db.exec("BEGIN");
         for (const r of rows) {
@@ -564,7 +622,7 @@ export class ContentSearchIndex {
     return this.db
       .prepare(
         `SELECT DISTINCT s.id, s.title, s.directory, s.time_updated
-           FROM parts_fts f JOIN session s ON s.id = f.session_id
+           FROM parts_fts f JOIN src.session s ON s.id = f.session_id
           WHERE parts_fts MATCH ?
             AND ${scope.sql}
           ORDER BY s.time_updated DESC LIMIT ?`

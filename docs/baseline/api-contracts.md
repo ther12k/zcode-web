@@ -1,7 +1,25 @@
 # API contract inventory (ZWUI-001)
 
-All routes under the bearer token (except static and ticketed SSE, see below).
+All routes under the bearer token, with these exceptions:
+- **static assets** and the SPA shell (no auth);
+- **`GET /api/bootstrap`** — public by design; returns only
+  `{authRequired, serverVersion}` so a client can learn the auth contract
+  before it has a token. No workspace or session data is exposed;
+- **`GET /api/events/:jobId`** — bearer **or** a short-lived ticket from
+  `POST /api/sse-ticket` (EventSource cannot set headers). Tickets are
+  job-scoped, expire with the job, and are **single-use**: the first
+  successful connection consumes the ticket, and a replayed/foreign ticket
+  receives an SSE `ticket-expired` event (not a bare 401) so clients rotate
+  cleanly. The long-lived bearer token must never appear in a URL.
+
 Errors: JSON `{ "error": string, ...? }` with 400/401/404/405/409/413/429/500/503/504.
+
+**Read-only policy and its one exception:** the CLI's session database is
+opened read-only everywhere. The single documented write is
+`POST /api/sessions/:id/rename`, which sets `title` and
+`title_source='user'` on the session row — the same fields the CLI's own
+rename writes. The content-search index is a separate sidecar SQLite file;
+the CLI's database is never written for search.
 
 | Method & path | Request | Response | Notes |
 |---|---|---|---|
@@ -16,8 +34,9 @@ Errors: JSON `{ "error": string, ...? }` with 400/401/404/405/409/413/429/500/50
 | GET /api/uploads/:file | — | file bytes, typed by ext | GET/HEAD; traversal blocked; images render inline |
 | POST /api/chat | `{text, sessionId?, cwd?, mode?, model?, attachments?[]}` | 202 `{jobId, sessionId, cwd, mode, model}` | attachment-only defaults to "Analyze the attached file(s)."; model must match /api/models ref; cwd must be under an allowed root |
 | GET /api/events/:jobId | — | SSE stream | auth: bearer **or** ?ticket= from /api/sse-ticket; events below |
-| POST /api/sse-ticket | `{jobId}` | `{ticket}` | short-lived, job-scoped |
-| POST /api/jobs/:id/cancel | — | `{canceled:true}` / 404 | SIGTERM then SIGKILL |
+| POST /api/sse-ticket | `{jobId}` | `{ticket}` | short-lived, job-scoped, single-use |
+| POST /api/jobs/:id/cancel | — | `{canceled:true}` / 404 | SIGTERM then SIGKILL to the whole process tree |
+| POST /api/sessions/:id/rename | `{title}` | `{ok, title}` / 404 / 403 | the ONE documented write to the CLI DB (session row title) |
 
 ## SSE event kinds (server → browser)
 

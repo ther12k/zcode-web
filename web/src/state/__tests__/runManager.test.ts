@@ -53,14 +53,20 @@ describe("run manager", () => {
     unsubscribe();
   });
 
-  it("acceptance rekeys new:<nonce> to the session, aliasing the old key", async () => {
+  it("acceptance rekeys new:<nonce> to the session, aliasing the old key while subscribed", async () => {
     const client = fakeClient();
     client.chat.mockResolvedValue({ jobId: "j2", sessionId: "sess_rekey" });
     client.job.mockResolvedValue({ status: "running" });
+    // ZWUI-072: the old key aliases the entry ONLY while a subscriber still
+    // uses it — with no listeners the alias would leak forever
+    const unsubscribe = subscribeRun("new:7", () => {});
     await submitRun("new:7", submission({ requestId: "req-2" }), client as unknown as ApiClient);
     expect(getRun("new:7").jobId).toBe("j2");
     expect(getRun("sess_rekey").jobId).toBe("j2");
     expect(getRun("new:7")).toBe(getRun("sess_rekey"));
+    // once nobody listens through the old key it stops resolving the entry
+    unsubscribe();
+    expect(getRun("new:7").jobId).toBeNull();
   });
 
   it("a busy conversation refuses a second submission", async () => {

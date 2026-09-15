@@ -42,9 +42,13 @@ type RunEntry = {
   gcTimer: ReturnType<typeof setTimeout> | null;
   /** the entry already moved to (and aliases under) its session key */
   rekeyed: boolean;
+  /** alias keys that still map to this entry while subscribers hold them */
+  aliases: Set<RunKey>;
 };
 
 const entries = new Map<RunKey, RunEntry>();
+// ZWUI-067: app-wide run-count subscribers (statusbar "N running")
+const globalListeners = new Set<() => void>();
 const MAX_ENTRIES = 40;
 const TERMINAL_RETENTION_MS = 30 * 60_000;
 // the live event list mirrors the server's bounded replay buffer
@@ -57,6 +61,7 @@ function entry(key: RunKey): RunEntry {
       run: initialRun(),
       client: null, controller: null, poll: null, pollStop: null,
       request: null, listeners: new Set(), gcTimer: null, rekeyed: false,
+      aliases: new Set(),
     };
     entries.set(key, e);
     evictIfNeeded();
@@ -79,11 +84,18 @@ function destroy(key: RunKey, e: RunEntry) {
   if (e.pollStop) clearTimeout(e.pollStop);
   if (e.gcTimer) clearTimeout(e.gcTimer);
   entries.delete(key);
+  // ZWUI-072: alias keys pointed at this very entry — leaving them in the
+  // map leaked (and let a later destroy() through an alias yank the live key)
+  for (const alias of e.aliases) entries.delete(alias);
+  e.aliases.clear();
 }
 
 function notify(e: RunEntry) {
   for (const cb of e.listeners) {
     try { cb(); } catch { /* a dead subscriber must not break the run */ }
+  }
+  for (const cb of globalListeners) {
+    try { cb(); } catch { /* same */ }
   }
 }
 
@@ -172,7 +184,17 @@ let POLL_MS = RUN_POLL_MS;
 export function subscribeRun(key: RunKey, onChange: () => void): () => void {
   const e = entry(key);
   e.listeners.add(onChange);
-  return () => e.listeners.delete(onChange);
+  return () => {
+    e.listeners.delete(onChange);
+    // ZWUI-072: once nobody listens through this entry, its alias keys stop
+    // resolving it — otherwise a rekeyed conversation leaks two map slots
+    if (e.listeners.size === 0 && e.aliases.size > 0) {
+      for (const alias of e.aliases) {
+        if (entries.get(alias) === e) entries.delete(alias);
+      }
+      e.aliases.clear();
+    }
+  };
 }
 
 export function getRun(key: RunKey): RunState {
@@ -182,6 +204,22 @@ export function getRun(key: RunKey): RunState {
 export function isRunBusy(key: RunKey): boolean {
   const { run } = entry(key);
   return run.phase !== "idle" && !isTerminal(run.phase);
+}
+
+// ZWUI-067: how many runs are live across ALL conversations (background runs
+// included) — the statusbar count must reflect reality, not just the open one.
+export function activeRunCount(): number {
+  let n = 0;
+  for (const e of entries.values()) {
+    if (e.run.phase !== "idle" && !isTerminal(e.run.phase)) n++;
+  }
+  return n;
+}
+
+/** Subscribe to app-wide run-count changes (useSyncExternalStore). */
+export function subscribeRuns(onChange: () => void): () => void {
+  globalListeners.add(onChange);
+  return () => globalListeners.delete(onChange);
 }
 
 /** The last submission attempt for this conversation — the retry source of truth. */
@@ -260,6 +298,10 @@ export function rekeyRun(fromKey: RunKey, toKey: RunKey) {
   if (!existing || (isTerminal(existing.run.phase) && existing.listeners.size === 0)) {
     if (existing) destroy(toKey, existing);
     entries.set(toKey, e);
+    // ZWUI-072: the old key aliases the entry only while someone still
+    // subscribes through it — with no listeners it would just leak
+    if (e.listeners.size === 0) entries.delete(fromKey);
+    else e.aliases.add(fromKey);
   }
 }
 

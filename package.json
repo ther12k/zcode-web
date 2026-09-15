@@ -10,7 +10,11 @@
   },
   "scripts": {
     "start": "node server/index.js",
-    "serve:test": "mkdir -p .e2e-home/cli && cp tests/fixtures/cli-config.json .e2e-home/cli/config.json && ZCODE_WEB_TOKEN=e2e-token ZCODE_CLI_ENTRY=$PWD/scripts/fake-cli.mjs ZCODE_WORKSPACE_ROOT=$PWD/.e2e-ws ZCODE_HOME=$PWD/.e2e-home PORT=3472 HOST=127.0.0.1 node server/index.js"
+    "serve:test": "mkdir -p .e2e-home/cli && cp tests/fixtures/cli-config.json .e2e-home/cli/config.json && ZCODE_WEB_TOKEN=e2e-token ZCODE_CLI_ENTRY=$PWD/scripts/fake-cli.mjs ZCODE_WORKSPACE_ROOT=$PWD/.e2e-ws ZCODE_HOME=$PWD/.e2e-home ZCODE_ENABLE_FILES=1 ZCODE_ENABLE_GIT=1 PORT=3472 HOST=127.0.0.1 node server/index.js",
+    "typecheck": "tsc -b web/tsconfig.json --force",
+    "test:unit": "vitest run --root web",
+    "test:server": "node --test tests/server.test.mjs",
+    "test:e2e": "npm --prefix web run build && npx --prefix web playwright test --config web/playwright.config.ts"
   },
   "dependencies": {}
 }

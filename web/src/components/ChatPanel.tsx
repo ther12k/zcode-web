@@ -547,7 +547,13 @@ export function ChatPanel({
     const delta = el ? el.scrollTop - anchorTop : 0;
     try {
       const d = await client.session(sessionId, HISTORY_PAGE, history.turns.length);
-      setHistory((h) => ({ turns: [...d.transcript, ...h.turns], total: d.total, hasMore: d.hasMore }));
+      setHistory((h) => {
+        // ZWUI-062: prepend by stable id — a shifted page (new turns landed
+        // server-side between loads) must not duplicate rows already held
+        const known = new Set(h.turns.map((t) => t.id));
+        const fresh = d.transcript.filter((t) => !known.has(t.id));
+        return { turns: [...fresh, ...h.turns], total: d.total, hasMore: d.hasMore };
+      });
       // restore after the prepend COMMITS: double-rAF puts the first read
       // past React's commit, then the loop only writes while off-target and
       // exits after settling (covers late layout shifts like the button
@@ -741,12 +747,31 @@ export function ChatPanel({
   const visibleTerminalEntries = terminalClearedSig === terminalSignature ? [] : terminalEntries;
 
   // derived live message bits
-  const liveTools = run.events
-    .filter((e) => e.kind === "line" && (e.line as { type?: string })?.type?.startsWith("tool.call."))
-    .map((e) => {
-      const line = e.line as { type: string; payload: Record<string, unknown> };
-      return { name: String(line.payload.toolName || "tool"), status: line.type.split(".").pop() || "", detail: String(line.payload.input || "").slice(0, 400) };
-    });
+  // ZWUI-064: live tool evidence is keyed by TOOL-CALL IDENTITY (callID) —
+  // one card per call that progresses through statuses, not one card per
+  // event (the terminal drawer below already uses this keying; both views
+  // now agree). Events without a callID get a synthetic key but stay stable.
+  const liveTools = useMemo(() => {
+    const byCall = new Map<string, { name: string; status: string; detail: string }>();
+    for (const e of run.events) {
+      if (e.kind !== "line") continue;
+      const line = e.line as { type?: string; payload?: { toolName?: string; callID?: string; input?: unknown } };
+      if (!line?.type?.startsWith("tool.call.")) continue;
+      const callId = String(line.payload?.callID || `ev-${e.id}`);
+      const status = String(line.type.split(".").pop() || "");
+      const existing = byCall.get(callId);
+      if (existing) {
+        existing.status = status;
+      } else {
+        byCall.set(callId, {
+          name: String(line.payload?.toolName || "tool"),
+          status,
+          detail: normalizeCommand(line.payload?.input, String(line.payload?.toolName || "tool")).slice(0, 400),
+        });
+      }
+    }
+    return [...byCall.values()];
+  }, [run.events]);
   const liveError = run.events.reduce<string | null>((acc, e) => {
     if (e.kind === "line") {
       const line = e.line as { type?: string; payload?: { error?: { message?: string } } };
@@ -754,6 +779,20 @@ export function ChatPanel({
     }
     return acc;
   }, null);
+
+  // ZWUI-063: once the transcript carries the persisted form of the run's
+  // answer, the live block duplicates it below the real turn. Fold ONLY when
+  // a matching persisted assistant turn exists — delayed persistence keeps
+  // the live copy visible; matching is by run answer prefix + created after
+  // submit (persistence may normalize whitespace, exact === is too strict).
+  const liveFolded = useMemo(() => {
+    if (!isTerminal(run.phase) || !run.answer) return false;
+    const prefix = run.answer.trim().slice(0, 60);
+    if (!prefix) return false;
+    return history.turns.some(
+      (t) => t.role === "assistant" && t.text.trim().startsWith(prefix) && (t.createdAt || 0) >= (run.submittedAt || 0) - 2000
+    );
+  }, [run.phase, run.answer, run.submittedAt, history.turns]);
 
   const empty = !sessionId && !history.turns.length && !run.answer && run.phase === "idle";
 
@@ -980,16 +1019,24 @@ export function ChatPanel({
               <Markdown text={t.text} issueResolver={resolveBare} />
               {t.durationMs || t.tokens || t.error ? (
                 <div className="message-footer">
-                  <span className="task-completed" title={t.error || undefined}>
-                    <CheckMark />
-                    {t.durationMs ? `Worked for ${formatDuration(t.durationMs)}` : t.error ? "Turn failed" : "Completed"}
-                    {t.error ? <span className="failed-chip">failed</span> : null}
-                    {t.tokens ? (
-                      <button className="turn-tokens" onClick={() => setTokenDialog(true)} title="Token telemetry">
-                        · {(t.tokens / 1000).toFixed(1)}k tokens
-                      </button>
-                    ) : null}
-                  </span>
+                  {/* ZWUI-063: a failed turn is a failure indicator, never a
+                      success checkmark with "failed" appended */}
+                  {t.error ? (
+                    <span className="task-completed failed-state" title={t.error}>
+                      <X size={12} className="danger-text" />Turn failed
+                      {t.durationMs ? ` · after ${formatDuration(t.durationMs)}` : ""}
+                    </span>
+                  ) : (
+                    <span className="task-completed">
+                      <CheckMark />
+                      {t.durationMs ? `Worked for ${formatDuration(t.durationMs)}` : "Completed"}
+                      {t.tokens ? (
+                        <button className="turn-tokens" onClick={() => setTokenDialog(true)} title="Token telemetry">
+                          · {(t.tokens / 1000).toFixed(1)}k tokens
+                        </button>
+                      ) : null}
+                    </span>
+                  )}
                   <span className="message-footer-actions">
                     <IconButton label="Copy response" onClick={() => void copyText(`h${i}`, t.text)}>
                       {copied === `h${i}` ? <CheckCheck size={13} /> : <Copy size={13} />}
@@ -1031,8 +1078,12 @@ export function ChatPanel({
           </article>
         )}
 
-        {/* live block is for runs attached HERE; external activity has its own row */}
-        {(run.answer || run.reasoning || localBusy || run.error) && (
+        {/* live block is for runs attached HERE; external activity has its own
+            row. ZWUI-063: a folded run (its persisted turn is in the history
+            above) drops its duplicated content — the persisted turn owns the
+            byline, footer and details now. Failures never fold: the error and
+            its retry must stay visible */ }
+        {(run.answer || run.reasoning || localBusy || run.error) && (!liveFolded || run.error) && (
           <article className="agent-message">
             <div className="agent-byline">
 <strong>Zcode</strong>
@@ -1070,7 +1121,7 @@ export function ChatPanel({
                 ))}
               </div>
             )}
-            {!localBusy && !detailsHidden && (run.reasoning || liveTools.length > 0) && (
+            {!localBusy && !detailsHidden && !liveFolded && (run.reasoning || liveTools.length > 0) && (
               <details className="thinking-block history-thinking">
                 <summary className="thinking-heading">
                   <Brain size={13} />
@@ -1090,7 +1141,7 @@ export function ChatPanel({
                 )}
               </details>
             )}
-            {run.answer
+            {run.answer && !liveFolded
               ? <span className="stream-wrap"><Markdown text={run.answer} issueResolver={resolveBare} />{localBusy && <span className="stream-caret" aria-hidden="true" />}</span>
               : null}
             {liveError && <div className="danger-text">{liveError}</div>}
@@ -1108,10 +1159,12 @@ export function ChatPanel({
                 </button>
               </div>
             )}
-            {!busy && run.phase === "succeeded" && (
+            {/* ZWUI-063: neutral completion language — a successful process
+                exit does not prove a plan artifact exists or the task is done */}
+            {!busy && !liveFolded && run.phase === "succeeded" && (
               <div className="message-footer">
                 <span className="task-completed">
-                  <CheckMark />{mode === "plan" ? "Plan ready" : "Task completed"}
+                  <CheckMark />Run finished
                   {liveTokens ? (
                     <button className="turn-tokens" onClick={() => setTokenDialog(true)} title="Token telemetry">
                       · {(liveTokens / 1000).toFixed(1)}k tokens
@@ -1123,6 +1176,11 @@ export function ChatPanel({
                     <SquarePen size={12} />Switch to Build to apply
                   </button>
                 )}
+              </div>
+            )}
+            {!busy && !liveFolded && run.phase === "cancelled" && (
+              <div className="message-footer">
+                <span className="task-completed">Run stopped</span>
               </div>
             )}
           </article>

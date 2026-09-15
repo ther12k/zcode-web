@@ -1,36 +1,17 @@
-// Auth bootstrap: token persistence + capability contract discovery (ZWUI-004).
-
+// Auth bootstrap: capability contract discovery (ZWUI-004). Token
+// persistence lives in ./token — one implementation, no duplicated keys.
 import { ApiClient } from "../api/client";
 
-const TOKEN_KEY = "zcode-web-token";
-
-export function loadToken(): string {
-  try {
-    return localStorage.getItem(TOKEN_KEY) || "";
-  } catch {
-    return "";
-  }
-}
-
-export function saveToken(token: string) {
-  try {
-    localStorage.setItem(TOKEN_KEY, token);
-  } catch {
-    /* private mode: token lives only for this page load */
-  }
-}
-
-export function clearToken() {
-  try {
-    localStorage.removeItem(TOKEN_KEY);
-  } catch {}
-}
+export { loadToken, saveToken, clearToken } from "./token";
 
 // Capability contract: what this deployment supports, discovered from
 // /api/health + /api/config. UI gates (inspector panes, degraded banners)
 // read this instead of guessing.
 export type Capabilities = {
   authRequired: boolean;
+  /** ZWUI-065: why capabilities are degraded — an explicit auth verdict,
+      not a guessed one (the old heuristic read `!workspaceRoot`) */
+  authState: "ok" | "unauthorized" | "unreachable";
   cliPresent: boolean;
   providerConfigured: boolean;
   dbPresent: boolean;
@@ -46,6 +27,7 @@ export async function discoverCapabilities(client: ApiClient): Promise<Capabilit
     const [health, cfg] = await Promise.all([client.health(), client.config()]);
     return {
       authRequired: cfg.authRequired,
+      authState: "ok",
       cliPresent: cfg.cliPresent,
       providerConfigured: cfg.providerConfigured,
       dbPresent: health.db?.present ?? false,
@@ -59,6 +41,7 @@ export async function discoverCapabilities(client: ApiClient): Promise<Capabilit
     if ((err as { status?: number })?.status === 401) {
       return {
         authRequired: true,
+        authState: "unauthorized",
         cliPresent: false,
         providerConfigured: false,
         dbPresent: false,
@@ -72,8 +55,11 @@ export async function discoverCapabilities(client: ApiClient): Promise<Capabilit
     try {
       const b = await fetch("/api/bootstrap").then((r) => r.json());
       if (b && typeof b.authRequired === "boolean") {
+        // the server answers /api/bootstrap but rejected the authed probes:
+        // a token is required and the stored one does not work
         return {
           authRequired: b.authRequired,
+          authState: b.authRequired ? "unauthorized" : "unreachable",
           cliPresent: false,
           providerConfigured: false,
           dbPresent: false,

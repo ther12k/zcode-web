@@ -55,10 +55,10 @@ async function waitForTurnIdle(page, timeoutMs = 180000) {
   return false;
 }
 
-async function sendAndWait(page, text, { stallMs = 150000 } = {}) {
-  const composer = page.getByLabel("Message Zcode");
-  await composer.fill(text);
-  await composer.press("Enter");
+// Wait for the CURRENT turn to finish (no composer interaction). Separated
+// from the send so a turn is never submitted twice (ZWUI-073: the old flow
+// filled+Enter'd turn 1, then called sendAndWait which sent it AGAIN).
+async function waitTurnDone(page, { stallMs = 150000 } = {}) {
   let stalled = false;
   try {
     await page.waitForSelector(".user-message-block.echo", { state: "detached", timeout: stallMs });
@@ -75,6 +75,13 @@ async function sendAndWait(page, text, { stallMs = 150000 } = {}) {
   if (!stalled) await waitForTurnIdle(page);
   const text2 = (await page.locator(".agent-message").last().innerText()).trim();
   return { text: text2, stalled };
+}
+
+async function sendAndWait(page, text) {
+  const composer = page.getByLabel("Message Zcode");
+  await composer.fill(text);
+  await composer.press("Enter");
+  return waitTurnDone(page);
 }
 
 // Small, cheap prompts: turn 1 forces a real file read; turn 2 needs turn 1's
@@ -95,9 +102,11 @@ try {
   await composer.waitFor({ timeout: 20000 });
 
   // ── turn 1: real chat with a real file read ─────────────────────────────
+  // sent EXACTLY once (ZWUI-073: this used to fill+Enter here AND again
+  // inside sendAndWait, submitting the prompt twice)
   await composer.fill(T1);
   await composer.press("Enter");
-  await check("echo appears instantly", await page.waitForSelector(".user-message-block.echo", { timeout: 3000 }).then(() => true).catch(() => false));
+  check("echo appears instantly", await page.waitForSelector(".user-message-block.echo", { timeout: 3000 }).then(() => true).catch(() => false));
 
   // live evidence: working dots, the running-byline, or activity while the provider thinks
   const liveSeen = await page
@@ -110,7 +119,7 @@ try {
   // named "workspace"; models sometimes explore a subproject and answer
   // "zcode"(-web). Any of those is a real, model-produced answer (not the
   // fake-CLI "echo:" prefix, and not empty).
-  const t1 = await sendAndWait(page, T1);
+  const t1 = await waitTurnDone(page);
   const reply = t1.text;
   check(
     "real streamed reply answers (package name)",
@@ -127,7 +136,13 @@ try {
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.getByLabel("Message Zcode").waitFor({ timeout: 20000 });
   const userTurns = await page.locator(".user-message-block .user-message").allInnerTexts();
-  check("sent message visible in history after reload", userTurns.some((t) => t.includes("package.json")), `${userTurns.length} user turn(s)`);
+  // exactly ONE committed user turn after one submitted turn — the old
+  // double-send left two copies of T1 in the history
+  check(
+    "sent message visible in history after reload (exactly once)",
+    userTurns.filter((t) => t.includes("package.json")).length === 1,
+    `${userTurns.length} user turn(s)`
+  );
   const historyReply = await page.locator(".agent-message").last().innerText({ timeout: 15000 });
   check("reply persisted in history", historyReply.trim().length > 0, historyReply.slice(0, 60));
 

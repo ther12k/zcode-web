@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 export const config = {
   cliEntry: process.env.ZCODE_CLI_ENTRY || "/opt/zcode/zcode.cjs",
@@ -99,6 +100,21 @@ class Job {
 }
 
 const TERMINAL = new Set(["succeeded", "failed", "cancelled", "timeout"]);
+
+// ZWUI-072: signal the whole process group (POSIX — spawn runs detached) so
+// tool subprocesses die with the CLI. Falls back to the direct child when
+// the group is gone or on platforms without negative-PID signals.
+function killTree(proc, signal) {
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
+  try {
+    if (process.platform !== "win32" && proc.pid) process.kill(-proc.pid, signal);
+    else proc.kill(signal);
+  } catch {
+    try {
+      proc.kill(signal);
+    } catch { /* already gone */ }
+  }
+}
 
 function requestFingerprint({ text, sessionId, cwd, mode, model, attachments }) {
   return JSON.stringify({
@@ -198,6 +214,10 @@ export class JobManager {
 
     const proc = spawn(config.cliNode, args, {
       cwd,
+      // own process group on POSIX (ZWUI-072): cancellation and timeout can
+      // then signal the whole tree — the CLI shells out to tools whose
+      // grandchildren would otherwise survive a kill of the direct child
+      detached: process.platform !== "win32",
       env: {
         ...process.env,
         ELECTRON_RUN_AS_NODE: "",
@@ -229,31 +249,43 @@ export class JobManager {
       return event;
     };
 
+    // ZWUI-072: streaming UTF-8 decode — naively concatenating chunks splits
+    // multibyte characters at chunk boundaries and corrupts the JSONL
+    const decoder = new StringDecoder("utf8");
+    const handleLine = (line) => {
+      if (!line) return;
+      let parsed = null;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        parsed = { raw: line };
+      }
+      if (parsed.sessionId && !job.sessionId) {
+        job.sessionId = parsed.sessionId;
+        this.bySession.set(job.sessionId, job);
+      }
+      if (parsed.type === "turn.failed") {
+        job.hasTurnFailed = true;
+        if (parsed.payload?.error?.message) job.error = String(parsed.payload.error.message);
+        else if (parsed.payload?.error) job.error = String(parsed.payload.error);
+      }
+      record({ kind: "line", line: parsed });
+    };
     let stdoutBuf = "";
     proc.stdout.on("data", (chunk) => {
-      stdoutBuf += chunk;
+      stdoutBuf += decoder.write(chunk);
       let nl;
       while ((nl = stdoutBuf.indexOf("\n")) !== -1) {
         const line = stdoutBuf.slice(0, nl).trim();
         stdoutBuf = stdoutBuf.slice(nl + 1);
-        if (!line) continue;
-        let parsed = null;
-        try {
-          parsed = JSON.parse(line);
-        } catch {
-          parsed = { raw: line };
-        }
-        if (parsed.sessionId && !job.sessionId) {
-          job.sessionId = parsed.sessionId;
-          this.bySession.set(job.sessionId, job);
-        }
-        if (parsed.type === "turn.failed") {
-          job.hasTurnFailed = true;
-          if (parsed.payload?.error?.message) job.error = String(parsed.payload.error.message);
-          else if (parsed.payload?.error) job.error = String(parsed.payload.error);
-        }
-        record({ kind: "line", line: parsed });
+        handleLine(line);
       }
+    });
+    proc.stdout.on("end", () => {
+      // flush the decoder tail and any final unterminated line
+      stdoutBuf += decoder.end();
+      handleLine(stdoutBuf.trim());
+      stdoutBuf = "";
     });
 
     let stderrBuf = "";
@@ -308,7 +340,7 @@ export class JobManager {
       if (!TERMINAL.has(job.status)) {
         job.timedOut = true;
         record({ kind: "timeout" });
-        proc.kill("SIGKILL");
+        killTree(proc, "SIGKILL");
       }
     }, config.jobTimeoutMs);
     timer.unref();
@@ -332,15 +364,9 @@ export class JobManager {
     if (job.status === "stopping") return true;
     job.cancelRequested = true;
     job.setStatus("stopping");
-    try {
-      job.proc.kill("SIGTERM");
-    } catch {}
+    killTree(job.proc, "SIGTERM");
     setTimeout(() => {
-      if (!TERMINAL.has(job.status) && job.proc) {
-        try {
-          job.proc.kill("SIGKILL");
-        } catch {}
-      }
+      if (!TERMINAL.has(job.status)) killTree(job.proc, "SIGKILL");
     }, 5000).unref();
     return true;
   }

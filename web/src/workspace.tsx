@@ -1,17 +1,14 @@
 // Workspace context: one app-wide instance of the API client + capabilities
-// + the run registry. Runs live OUTSIDE the router so selecting another
-// session never retargets or cancels a job (ZWUI-006 state ownership).
+// + preferences. Runs live OUTSIDE the router (in the run manager's external
+// store) so selecting another session never retargets or cancels a job
+// (ZWUI-006 state ownership).
 
-import { createContext, useContext, useMemo, useReducer } from "react";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { ApiClient } from "./api/client";
-import { loadPrefs, savePrefs, type Preferences } from "./state/prefs";
+import { loadPrefs, savePrefs, PREFS_EVENT, type Preferences } from "./state/prefs";
 import { loadToken, saveToken, clearToken } from "./auth/token";
 import { discoverCapabilities, type Capabilities } from "./auth/bootstrap";
-import { runReducer, initialRun, type RunState } from "./state/run";
-import { useEffect, useState } from "react";
-
-type RunRegistry = Map<string, RunState>; // jobId → run (survives navigation)
 
 type WorkspaceCtx = {
   client: ApiClient;
@@ -19,10 +16,12 @@ type WorkspaceCtx = {
   setToken: (t: string) => void;
   logout: () => void;
   caps: Capabilities | null;
+  /** set when capability discovery itself failed (server unreachable) —
+      distinct from caps=null-while-loading so the shell can show a retry */
+  capsError: string | null;
   reloadCaps: () => void;
   prefs: Preferences;
   updatePrefs: (patch: Partial<Preferences>) => void;
-  runs: RunRegistry;
 };
 
 const Ctx = createContext<WorkspaceCtx | null>(null);
@@ -30,10 +29,9 @@ const Ctx = createContext<WorkspaceCtx | null>(null);
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [token, setTokenState] = useState(loadToken);
   const [caps, setCaps] = useState<Capabilities | null>(null);
+  const [capsError, setCapsError] = useState<string | null>(null);
   const [capsTick, setCapsTick] = useState(0);
   const [prefsState, setPrefsState] = useState(loadPrefs);
-  const runs = useMemo(() => new Map<string, RunState>() as RunRegistry, []);
-  const [_, force] = useReducer((x: number) => x + 1, 0); // rerun subscribers on registry change
 
   const client = useMemo(
     () => new ApiClient(() => loadToken()),
@@ -42,13 +40,24 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let alive = true;
+    setCapsError(null);
     discoverCapabilities(client)
-      .then((c) => alive && setCaps(c))
-      .catch(() => alive && setCaps(null));
+      .then((c) => { if (alive) { setCaps(c); setCapsError(null); } })
+      .catch((e) => { if (alive) setCapsError(e instanceof Error ? e.message : String(e)); });
     return () => {
       alive = false;
     };
   }, [client, capsTick, token]);
+
+  // prefs are saved from several surfaces — stay current with all of them
+  useEffect(() => {
+    const onPrefs = (e: Event) => {
+      const next = (e as CustomEvent<Preferences>).detail;
+      if (next) setPrefsState(next);
+    };
+    window.addEventListener(PREFS_EVENT, onPrefs);
+    return () => window.removeEventListener(PREFS_EVENT, onPrefs);
+  }, []);
 
   const value = useMemo<WorkspaceCtx>(
     () => ({
@@ -63,16 +72,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         setTokenState("");
       },
       caps,
+      capsError,
       reloadCaps: () => setCapsTick((t) => t + 1),
       prefs: prefsState,
-      updatePrefs: (patch) => setPrefsState(savePrefs(patch)),
-      runs,
+      updatePrefs: (patch) => savePrefs(patch),
     }),
-    [client, token, caps, capsTick, prefsState, runs]
+    [client, token, caps, capsError, capsTick, prefsState]
   );
-
-  // expose forceRefresh so reducers can trigger rerenders on registry mutation
-  (value as WorkspaceCtx & { __refresh?: () => void }).__refresh = force;
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
@@ -82,5 +88,3 @@ export function useWorkspace() {
   if (!ctx) throw new Error("useWorkspace outside provider");
   return ctx;
 }
-
-export { initialRun, runReducer };

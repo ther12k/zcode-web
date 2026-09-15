@@ -91,7 +91,7 @@ export function SettingsDialog({ caps, onClose, onLogout }: {
               <div className="provider-icon"><ZLogo size={27} /></div>
               <div><h3>Z.AI</h3><p>GLM models, made for building.</p></div>
               <span className={`connection-badge ${caps?.providerConfigured ? "connected" : ""}`}>
-                <span className="tiny-dot" />{caps?.providerConfigured ? "API enabled" : "Demo mode"}
+                <span className="tiny-dot" />{caps?.providerConfigured ? "API enabled" : "Not configured"}
               </span>
             </div>
             <div className="provider-description">

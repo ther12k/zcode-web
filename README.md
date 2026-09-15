@@ -32,7 +32,6 @@ Browser ──HTTP/SSE──> zcode-web server (this repo, zero-dep Node 24)
 - **Image & File Uploads**: attach local files or images directly via the paperclip
   button; securely saved and forwarded to the agent using `--attach`.
 - **Zero npm dependencies**; Node's built-in `http`, `child_process`, `sqlite`.
-- **Zero npm dependencies**; Node's built-in `http`, `child_process`, `sqlite`.
 
 > ⚠️ **This is an agent with shell access.** Anyone who can reach the server
 > and token can run commands inside it (in `yolo` mode without asking). Set
@@ -143,26 +142,37 @@ or an auth error against the wrong endpoint.
 
 ## API
 
-All routes sit behind the bearer token when `ZCODE_WEB_TOKEN` is set. The
-inspector groups are additionally flag-gated and restricted to allowed roots.
+All routes sit behind the bearer token when `ZCODE_WEB_TOKEN` is set
+(one exception: `GET /api/bootstrap`, which only reports whether auth is
+required — no workspace data). The inspector groups are additionally
+flag-gated and restricted to allowed roots.
 
 | Method | Path | Description |
 | --- | --- | --- |
+| GET | `/api/bootstrap` | Public: `{authRequired, serverVersion}` — lets a client learn the auth contract before it has a token |
 | GET | `/api/health` | CLI bundle/db/runtime presence, provider config, job slots |
 | GET | `/api/config` | UI bootstrap (modes, allowed roots, auth required) |
 | GET/POST | `/api/projects` | List / create project dirs under the workspace root |
 | GET | `/api/models` | Available model providers from the CLI configuration |
 | GET | `/api/skills` | Real ZCode skills via the CLI (`skills list --json`, 60s cache) |
+| GET | `/api/commands?cwd=…` | Custom slash commands for a workspace (CLI registry) |
 | GET | `/api/sessions?cwd=…` | Sessions the CLI stored for a project |
 | GET | `/api/sessions/recent?root=…` | Recent sessions across a root |
 | GET | `/api/sessions/:id` | Session metadata + text transcript |
-| POST | `/api/chat` | `{text, sessionId?, cwd?, mode?, model?}` → `{jobId}` |
+| POST | `/api/sessions/:id/rename` | Rename a session (the one documented write to the CLI's session DB: `title`, `title_source='user'`) |
+| POST | `/api/chat` | `{text, sessionId?, cwd?, mode?, model?, attachments?[]}` → `{jobId}` (idempotent by `X-Request-Id`) |
 | GET | `/api/events/:jobId` | Ticketed SSE stream of CLI events for a job |
+| POST | `/api/sse-ticket` | Exchange the bearer token for a short-lived, single-use, job-scoped SSE ticket |
 | GET | `/api/jobs/:id` | Job status (reconciliation for dropped streams) |
-| POST | `/api/jobs/:id/cancel` | Kill a running job |
+| POST | `/api/jobs/:id/cancel` | Kill a running job (whole process tree) |
 | POST | `/api/upload` | Upload image or file attachment (base64 JSON body) |
 | GET | `/api/uploads/:file` | Serve an uploaded attachment file |
-| GET | `/api/search?q=…` | Bounded server-wide session search |
+| GET | `/api/artifacts/:sessionId/:uuid` | Desktop tool artifacts (screenshots, PDFs, text) from the session store |
+| GET | `/api/search?q=…` | Bounded server-wide session search (titles + indexed content) |
+| GET | `/api/analytics?days=…` | Workspace analytics from the CLI's own records (202 while building) |
+| GET | `/api/github/capability` | Whether read-only GitHub issue reading is configured |
+| GET | `/api/github/issues/:owner/:repo/:n` | Issue card (allowlisted repos, ETag-cached; `?refresh=1` bypasses) |
+| GET | `/api/github/issues/:owner/:repo/:n/comments` | Paginated issue comments |
 | GET | `/api/files/capability` | Whether read-only file access is on (`ZCODE_ENABLE_FILES=1`) |
 | GET | `/api/files/list?dir=…` | Directory listing inside an allowed root |
 | GET | `/api/files/:path` | Read a text file inside an allowed root |

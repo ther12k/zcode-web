@@ -46,11 +46,18 @@ export function loadPrefs(): Preferences {
   }
 }
 
+// Fired on every successful save so React state (the workspace provider)
+// stays in sync with ANY writer (App menu actions, Settings, other dialogs).
+export const PREFS_EVENT = "zcode-prefs";
+
 export function savePrefs(patch: Partial<Preferences>) {
   const next = { ...loadPrefs(), ...patch, version: PREFS_VERSION };
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(next));
   } catch {}
+  try {
+    window.dispatchEvent(new CustomEvent(PREFS_EVENT, { detail: next }));
+  } catch { /* non-browser context: state sync is best-effort */ }
   return next;
 }
 
