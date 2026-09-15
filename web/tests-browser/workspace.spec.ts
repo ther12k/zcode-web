@@ -740,7 +740,9 @@ test("ZWUI-042: a held job-status response for run A cannot finalize run B", asy
   await page.waitForTimeout(1500);
   // B must STILL be running — A's terminal status never applied to it
   await expect(page.locator(".working-message").first()).toBeVisible();
-  await expect(page.getByLabel("Send message")).toBeDisabled();
+  // the composer's primary action is morphed into Stop while B runs
+  await expect(page.getByLabel("Stop run")).toBeVisible();
+  await expect(page.getByLabel("Send message")).toHaveCount(0);
   // cleanup: free the slow B job so other tests keep their job slots
   await page.request.post(`/api/jobs/${jobIdB}/cancel`, { headers: { authorization: `Bearer ${TOKEN}` } });
   await expect(page.locator(".message-duration")).toHaveText(/cancelled/, { timeout: 15_000 });

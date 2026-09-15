@@ -1053,7 +1053,15 @@ export function ChatPanel({
                 visibly; once terminal, routine details collapse (REF2-03) —
                 failures below always stay visible */}
             {!detailsHidden && localBusy && run.reasoning && (
-              <div className="thinking-block"><Brain size={13} /><p>{run.reasoning}</p></div>
+              <div className="thinking-block live">
+                <div className="thinking-heading">
+                  <Brain size={13} />
+                  <span>Thinking{run.submittedAt ? ` · ${formatDuration(Math.max(1000, (externalTick || run.submittedAt) - run.submittedAt))}` : ""}</span>
+                  <span className="thinking-dots"><i /><i /><i /></span>
+                  <span className="thinking-hint">How I approached this</span>
+                </div>
+                <p>{run.reasoning}</p>
+              </div>
             )}
             {!detailsHidden && localBusy && liveTools.length > 0 && (
               <div className="activity-stack">
@@ -1278,17 +1286,23 @@ export function ChatPanel({
                   </div>
                 )}
               </div>
-              {busy && run.jobId && (
-                <IconButton label="Stop run" onClick={stopRun}><Square size={13} /></IconButton>
-              )}
+              {/* ONE morphing primary action, like the desktop: Send when
+                  idle; once the job is accepted it becomes Stop (a spinner
+                  alone only while the POST is still in flight) */}
               <button
-                className="send-button"
-                disabled={busy || uploading > 0 || !providerLive || (!input.trim() && !attachments.length)}
-                aria-label="Send message"
-                title={!providerLive ? "No model provider is configured on this host" : "Send message (Enter)"}
-                onClick={() => send()}
+                className={`send-button ${busy && run.jobId ? "stop" : ""}`}
+                disabled={busy
+                  ? !run.jobId // accepted → stoppable; submitting → wait
+                  : uploading > 0 || !providerLive || (!input.trim() && !attachments.length)}
+                aria-label={busy && run.jobId ? "Stop run" : "Send message"}
+                title={busy && run.jobId ? "Stop run"
+                  : !providerLive ? "No model provider is configured on this host"
+                  : "Send message (Enter)"}
+                onClick={() => (busy && run.jobId ? stopRun() : send())}
               >
-                {busy ? <LoaderCircle size={16} className="spin" /> : <ArrowUp size={17} strokeWidth={2.2} />}
+                {busy
+                  ? run.jobId ? <Square size={15} /> : <LoaderCircle size={16} className="spin" />
+                  : <ArrowUp size={17} strokeWidth={2.2} />}
               </button>
             </div>
           </div>

@@ -979,9 +979,15 @@ function SessionRow({ row, active, prefs, onSelect, onPin, onHide }: {
     <div className={`task-row ${active ? "active" : ""} ${pinned ? "is-pinned" : ""}`}>
       <button className="task-link" onClick={onSelect} title={`${row.title}${row.directory ? ` — ${row.directory}` : ""}`}>
         <span className={`task-dot ${active ? "current" : ""}`} />
-        <span className="task-title-wrap"><span className="task-title">{prefs.displayAliases[row.id] || row.title || row.id}</span></span>
-        <span className="task-project" title={row.directory}>{baseName(row.directory)}</span>
-        <time>{relativeTime(row.updatedAt)}</time>
+        {/* title owns the line; project + recency sit underneath as metadata
+           — one cramped line truncated titles to ~10 characters */}
+        <span className="task-title-wrap">
+          <span className="task-title">{prefs.displayAliases[row.id] || row.title || row.id}</span>
+          <span className="task-meta">
+            <span className="task-project" title={row.directory}>{baseName(row.directory)}</span>
+            <time>{relativeTime(row.updatedAt)}</time>
+          </span>
+        </span>
       </button>
       <span className="task-row-actions">
         {pinned && <Pin size={10} className="pinned-indicator" />}
