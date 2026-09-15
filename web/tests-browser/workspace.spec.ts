@@ -946,3 +946,68 @@ test.describe("issue inspector", () => {
     await expect(page.locator(".issue-unavailable")).toContainText("Unable to load");
   });
 });
+
+// ZWUI-057 (REF2-02 breakpoint audit): the inspector column is a fixed grid
+// track, so a stored/dragged panel width wider than the row must be clamped
+// at render time — the shell clips overflow, an oversized panel would put
+// most of the inspector off-screen with no way to reach it.
+test.describe("inspector width clamps to the viewport (900px band)", () => {
+  test.use({ viewport: { width: 900, height: 800 } });
+
+  test.beforeEach(async ({ page }) => {
+    await page.evaluate(() => {
+      localStorage.setItem("zcode-right-collapsed", "0");
+      localStorage.setItem("zcode-panel-width", "900");
+    });
+    await page.goto("/w/default");
+    await page.waitForLoadState("domcontentloaded");
+    await expect(page.getByLabel("Message Zcode")).toBeVisible();
+    await page.waitForTimeout(400); // ResizeObserver → applied clamp
+  });
+
+  const probe = (page: { evaluate: (fn: () => Record<string, number>) => Promise<Record<string, number>> }) =>
+    page.evaluate(() => {
+      const doc = document.scrollingElement ?? document.documentElement;
+      const chat = document.querySelector(".chat-panel")!.getBoundingClientRect();
+      const panel = document.querySelector(".preview-panel")!.getBoundingClientRect();
+      return {
+        vw: innerWidth,
+        overflowX: doc.scrollWidth - doc.clientWidth,
+        chatW: Math.round(chat.width),
+        panelRight: Math.round(panel.right),
+        panelW: Math.round(panel.width),
+      };
+    });
+
+  test("a stored 900px panel stays inside the viewport with chat >= 300px", async ({ page }) => {
+    const m = await probe(page);
+    expect(m.overflowX).toBeLessThanOrEqual(1);
+    expect(m.panelRight).toBeLessThanOrEqual(m.vw + 1);
+    expect(m.chatW).toBeGreaterThanOrEqual(300);
+    expect(m.panelW).toBeLessThanOrEqual(m.vw - 60 /* icon rail */ - 300);
+  });
+
+  test("widening the window restores the stored preference", async ({ page }) => {
+    await page.setViewportSize({ width: 1600, height: 800 });
+    await page.waitForTimeout(400);
+    const m = await probe(page);
+    expect(m.panelW).toBeGreaterThanOrEqual(890); // 900 minus rounding
+    expect(m.overflowX).toBeLessThanOrEqual(1);
+  });
+
+  test("dragging the divider to its max never crushes the chat", async ({ page }) => {
+    await page.evaluate(() => localStorage.removeItem("zcode-panel-width"));
+    const handle = page.locator(".panel-resizer");
+    await expect(handle).toBeVisible();
+    const box = (await handle.boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + 200);
+    await page.mouse.down();
+    await page.mouse.move(box.x - 700, box.y + 200, { steps: 12 }); // far left = widest
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+    const m = await probe(page);
+    expect(m.overflowX).toBeLessThanOrEqual(1);
+    expect(m.panelRight).toBeLessThanOrEqual(m.vw + 1);
+    expect(m.chatW).toBeGreaterThanOrEqual(300);
+  });
+});

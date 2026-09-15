@@ -22,6 +22,7 @@ import { SettingsDialog } from "./components/SettingsDialog";
 import { ShortcutsDialog, SkillsDialog, ToolsDialog } from "./components/InfoDialogs";
 import { AnalyticsDialog } from "./components/AnalyticsDialog";
 import type { IssueIdentity, ScannedIssueRef } from "./lib/issueRefs";
+import { effectivePanelWidth } from "./lib/layout";
 
 type SessionRow = {
   id: string; title: string; directory: string; updatedAt: number;
@@ -104,6 +105,25 @@ export function App() {
     (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
     document.body.classList.remove("is-col-resizing");
   }, []);
+  // measured chat+panel row: the APPLIED panel width is clamped against it at
+  // render time (ZWUI-057) — a stored/dragged 900px panel must never push the
+  // inspector off-screen on a narrow window. The stored preference stays raw,
+  // so widening the window restores the user's chosen width. The element is
+  // held as state (not a ref) because the shell renders only after `caps`
+  // loads — a mount effect would run against the loading branch first and
+  // never observe the real element.
+  const [mainEl, setMainEl] = useState<HTMLDivElement | null>(null);
+  const [mainWidth, setMainWidth] = useState(0);
+  useEffect(() => {
+    if (!mainEl || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? 0;
+      setMainWidth((prev) => (Math.abs(prev - w) < 1 ? prev : Math.round(w)));
+    });
+    ro.observe(mainEl);
+    return () => ro.disconnect();
+  }, [mainEl]);
+  const appliedPanelWidth = effectivePanelWidth(panelWidth, mainWidth);
   // keyboard resizing on the splitters (separator pattern): arrows move by
   // 16px (48 with shift), Home/End restore the responsive default width
   const sidebarKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -604,8 +624,9 @@ export function App() {
       {navOpen && <div className="sidebar-scrim" onClick={() => setNavOpen(false)} aria-hidden="true" />}
 
       <div
+        ref={setMainEl}
         className={`workspace-main ${rightCollapsed ? "right-collapsed" : ""} ${mobilePreview ? "preview-active" : ""} ${panelExpanded ? "preview-expanded" : ""}`}
-        style={panelWidth && !rightCollapsed && !panelExpanded ? ({ "--panel-w": `${panelWidth}px` } as React.CSSProperties) : undefined}
+        style={!rightCollapsed && !panelExpanded ? ({ "--panel-w": `${appliedPanelWidth}px` } as React.CSSProperties) : undefined}
       >
         <ChatPanel
           key={cwd}
