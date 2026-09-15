@@ -332,13 +332,15 @@ export function ChatPanel({
     });
   }, [run.answer, run.activity, run.submittedText, history]);
   useEffect(() => {
-    // the desktop's live timer on an in-progress turn
-    if (!externalActive || !externalStartedAt) return;
+    // live elapsed timers: the desktop's in-progress turns AND this view's
+    // own runs — a long provider wait must visibly progress in time instead
+    // of reading as a silent hang
+    if ((!externalActive || !externalStartedAt) && !localBusyRef.current) return;
     const t = setInterval(() => {
       setExternalTick(Date.now());
     }, 1000);
     return () => clearInterval(t);
-  }, [externalActive, externalStartedAt]);
+  }, [externalActive, externalStartedAt, run.phase]);
   useEffect(() => {
     if (!menu) return;
     const close = (e: MouseEvent) => {
@@ -361,6 +363,8 @@ export function ChatPanel({
   // busy either because a run is attached here or because the desktop/CLI is
   // mid-turn on this session — both mean "can't send yet"
   const busy = localBusy || externalActive;
+  const localBusyRef = useRef(false);
+  useEffect(() => { localBusyRef.current = localBusy; }, [localBusy]);
   useEffect(() => { onBusyChange?.(busy); }, [busy]);
 
   // ---- "/" command palette ----
@@ -1033,7 +1037,14 @@ export function ChatPanel({
             <div className="agent-byline">
 <strong>Zcode</strong>
               <span className="agent-model">{(models.find((m) => m.ref === model)?.model || "GLM").split("/").pop()?.toUpperCase()}</span>
-              {run.phase !== "idle" && <span className="message-duration"><Clock3 size={11} />{run.phase}</span>}
+              {run.phase !== "idle" && (
+                <span className="message-duration" title={run.phase}>
+                  <Clock3 size={11} />
+                  {localBusy && run.submittedAt
+                    ? `running · ${formatDuration(Math.max(1000, (externalTick || run.submittedAt) - run.submittedAt))}`
+                    : run.phase}
+                </span>
+              )}
               <button className="message-details-toggle" onClick={() => setDetailsHidden((v) => !v)} aria-expanded={!detailsHidden}>
                 {detailsHidden ? <Eye size={12} /> : <EyeOff size={12} />}<span>{detailsHidden ? "Details" : "Hide"}</span>
               </button>

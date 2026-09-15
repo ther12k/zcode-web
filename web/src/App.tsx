@@ -377,6 +377,18 @@ export function App() {
     return () => { alive = false; clearInterval(poll); };
   }, [cwd, sidebarView, token]);
 
+  // Chrome occasionally rasterizes the sidebar session rows as a BLANK list
+  // on first paint (rows are in the DOM and laid out, but painted empty until
+  // the first scroll). A zero-translate nudge forces the re-raster without
+  // touching scroll position — no-op where the paint was already correct.
+  useEffect(() => {
+    const list = document.querySelector(".project-list") as HTMLElement | null;
+    if (!list) return;
+    list.style.transform = "translateZ(0)";
+    const raf = requestAnimationFrame(() => { list.style.transform = ""; });
+    return () => cancelAnimationFrame(raf);
+  }, [recent.length, sessions.length, sidebarView]);
+
   function selectSession(id: string, directory?: string) {
     const targetDir = directory || recent.find((r) => r.id === id)?.directory || sessions.find((s) => s.id === id)?.directory || cwd;
     setNavOpen(false);

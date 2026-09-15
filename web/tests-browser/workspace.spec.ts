@@ -71,6 +71,15 @@ test("New chat during a pending fresh-chat run detaches it without hijack", asyn
   await expect(page.getByRole("button", { name: "Send message" })).toBeEnabled();
 });
 
+test("ZWUI-055: a live run visibly counts elapsed time instead of hanging silently", async ({ page }) => {
+  const input = page.getByLabel("Message Zcode");
+  // slowfirst delays the first envelope ~5s — the byline must show a
+  // progressing "running · Ns" timer during the wait
+  await input.fill("slowfirst elapsed probe");
+  await input.press("Enter");
+  await expect(page.locator(".agent-message .message-duration")).toHaveText(/running · [0-9]+s/, { timeout: 8000 });
+});
+
 test("cancel affordance: busy composer shows spinner, run reaches terminal", async ({ page }) => {
   const input = page.getByLabel("Message Zcode");
   await input.fill("busy probe");
