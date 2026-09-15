@@ -399,15 +399,40 @@ test("chat affordances: jump-to-latest pill and stable load-older position", asy
   });
   assert.ok(atBottom, "jump pill returns to the bottom");
   await expect(page.locator(".jump-latest")).toBeHidden();
-  // load older keeps the reading position: same first-visible text after prepend
-  await page.evaluate(() => { const el = document.querySelector(".messages-scroll") as HTMLElement; el.scrollTop = el.scrollHeight - 300; });
-  await page.locator("button.load-older").click();
-  await page.waitForTimeout(900);
-  const pos = await page.evaluate(() => {
+  // load older keeps the READING POSITION: the same topmost visible turn
+  // stays at the same viewport offset after the prepend (and the view never
+  // jumps to the top OR chases the bottom)
+  // realistic reader position: scrolled UP so the load-older button is
+  // already in view (a click on an off-screen button would scroll it into
+  // view first — that movement belongs to the click, not the prepend)
+  await page.evaluate(() => { const el = document.querySelector(".messages-scroll") as HTMLElement; el.scrollTop = 0; });
+  await page.waitForTimeout(150);
+  const before = await page.evaluate(() => {
     const el = document.querySelector(".messages-scroll") as HTMLElement;
-    return { scrollTop: el.scrollTop, atTop: el.scrollTop < 10 };
+    const top = el.getBoundingClientRect().top;
+    const anchor = Array.from(el.querySelectorAll("article"))
+      .find((n) => (n as HTMLElement).getBoundingClientRect().bottom > top + 60) as HTMLElement | undefined;
+    return { text: (anchor?.innerText || "").slice(0, 24), offset: anchor ? Math.round(anchor.getBoundingClientRect().top - top) : null };
   });
-  assert.ok(!pos.atTop, "load-older must not yank the viewport to the top");
+  await page.locator("button.load-older").click();
+  await page.waitForTimeout(1200);
+  const after = await page.evaluate((needle) => {
+    const el = document.querySelector(".messages-scroll") as HTMLElement;
+    const top = el.getBoundingClientRect().top;
+    const anchor = Array.from(el.querySelectorAll("article"))
+      .find((n) => (n as HTMLElement).innerText.slice(0, 24) === needle) as HTMLElement | undefined;
+    const distBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    return {
+      offset: anchor ? Math.round(anchor.getBoundingClientRect().top - top) : null,
+      atTop: el.scrollTop < 10,
+      chasedBottom: distBottom < 120 && el.scrollHeight > el.clientHeight + 400,
+    };
+  }, before.text);
+  assert.ok(before.offset !== null && after.offset !== null, "anchor turn found before and after");
+  assert.ok(Math.abs((after.offset as number) - (before.offset as number)) < 24,
+    `reading position must hold (was ${before.offset}px from top, now ${after.offset}px)`);
+  assert.ok(!after.atTop, "load-older must not yank the viewport to the top");
+  assert.ok(!after.chasedBottom, "load-older must not auto-scroll back to the bottom");
 });
 
 // ZPAR-016: responsive shell — navigation drawer below 1100px and the

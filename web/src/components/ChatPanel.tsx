@@ -315,10 +315,20 @@ export function ChatPanel({
   // chat affordance for getting back after reading history
   const [showJumpLatest, setShowJumpLatest] = useState(false);
   const [externalTick, setExternalTick] = useState(0);
+  // first-turn identity of the previous history commit — a CHANGED first id
+  // means turns were PREPENDED (load older), not appended: never chase the
+  // bottom then; the anchor restore in loadOlder owns the scroll position
+  const prevFirstTurnId = useRef<string | null>(null);
   useEffect(() => {
+    const firstId = history.turns[0]?.id ?? null;
+    const isPrepend = prevFirstTurnId.current !== null && firstId !== prevFirstTurnId.current;
+    prevFirstTurnId.current = firstId;
+    if (isPrepend) return;
     requestAnimationFrame(() => {
       const el = scroll.current;
-      if (el && stickToBottom.current) el.scrollTo({ top: el.scrollHeight });
+      // snap, not smooth: an animated stream-scroll fights native scroll
+      // anchoring during prepends and piles up in-flight animations
+      if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
     });
   }, [run.answer, run.activity, run.submittedText, history]);
   useEffect(() => {
@@ -524,31 +534,34 @@ export function ChatPanel({
     if (!sessionId || loadingOlder) return;
     setLoadingOlder(true);
     const el = scroll.current;
-    // anchor the first TURN node (not the load-older button — it unmounts
-    // while loading). Id-stable keys keep this exact node mounted as the
-    // prepend shifts it down.
-    const anchor = (el?.querySelector(".messages-scroll > article, .messages-scroll > .timeline-stack") ??
-      (el?.firstElementChild && el.firstElementChild.tagName !== "BUTTON" ? el.firstElementChild : null)) as HTMLElement | null;
+    // anchor the FIRST turn node (descendant query — el is itself the scroll
+    // container; the load-older button contains no articles so tree order
+    // gives the topmost turn). Keyed by turn id, this exact node survives
+    // the prepend — its offsetTop grows by the prepended height.
+    const anchor = el?.querySelector("article, .timeline-stack") as HTMLElement | null;
     const anchorTop = anchor?.offsetTop ?? 0;
-    const anchorDelta = el && anchor ? el.scrollTop - anchorTop : 0;
-    const settle = (deadline = performance.now() + 3000) => {
-      requestAnimationFrame(() => {
-        if (!el || !anchor || !anchor.isConnected) return;
-        // keep the anchor at the same viewport offset while the prepend
-        // commits and layout settles (real-API fetches can land slower than
-        // a fixed frame budget)
-        el.scrollTop = anchor.offsetTop + anchorDelta;
-        if (performance.now() < deadline) settle(deadline);
-      });
-    };
-    const epoch = sessionEpochRef.current;
+    const delta = el ? el.scrollTop - anchorTop : 0;
     try {
       const d = await client.session(sessionId, HISTORY_PAGE, history.turns.length);
-      // the reader may have switched conversations while the page was in
-      // flight — a stale prepend must never land in the new view
-      if (sessionEpochRef.current !== epoch) return;
       setHistory((h) => ({ turns: [...d.transcript, ...h.turns], total: d.total, hasMore: d.hasMore }));
-      settle();
+      // restore after the prepend COMMITS: double-rAF puts the first read
+      // past React's commit, then the loop only writes while off-target and
+      // exits after settling (covers late layout shifts like the button
+      // re-render — without fighting anything: scroll-behavior is instant)
+      let frames = 0;
+      let stable = 0;
+      const restore = () => {
+        if (!el || !anchor || !anchor.isConnected || frames++ > 90 || stable >= 3) return;
+        const target = anchor.offsetTop + delta;
+        if (Math.abs(el.scrollTop - target) > 1) {
+          el.scrollTop = target;
+          stable = 0;
+        } else {
+          stable += 1;
+        }
+        requestAnimationFrame(restore);
+      };
+      requestAnimationFrame(() => requestAnimationFrame(restore));
     } catch (e) {
       onNotify(e instanceof ApiError ? e.message : String(e), "error");
     } finally {

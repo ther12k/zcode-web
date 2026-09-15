@@ -187,6 +187,18 @@ export function App() {
     toastTimer.current = setTimeout(() => setToast(null), type === "error" ? 6000 : 3500);
   }, []);
 
+  // ZWUI-054: a phone whose layout viewport is ~980px is rendering Chrome's
+  // "Desktop site" mode (or a tab from before an update) — the mobile shell
+  // cannot apply there. Say so once, instead of leaving a zoomed-out desktop.
+  useEffect(() => {
+    const coarse = window.matchMedia?.("(pointer: coarse)")?.matches ?? false;
+    const phone = /Android|iPhone/.test(navigator.userAgent);
+    if (coarse && phone && window.innerWidth >= 900 && window.innerWidth <= 1180) {
+      notify("Zoomed-out view — turn off Chrome's ⋮ 'Desktop site' and reload for the mobile layout.", "error");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     try { localStorage.setItem("zcode-sidebar-collapsed", sidebarCollapsed ? "1" : "0"); } catch {}
   }, [sidebarCollapsed]);
