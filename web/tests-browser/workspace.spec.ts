@@ -1011,3 +1011,119 @@ test.describe("inspector width clamps to the viewport (900px band)", () => {
     expect(m.chatW).toBeGreaterThanOrEqual(300);
   });
 });
+
+// ZWUI-058 coverage additions: settings persistence, attachment upload wire
+// format, clipboard copy, and the two-line session row shape (ZWUI-056).
+test("ZWUI-058: text size chosen in Settings applies to the shell and survives reload", async ({ page }) => {
+  await page.locator(".profile-button").click();
+  await expect(page.locator(".font-size-row")).toBeVisible();
+  const shell = () => page.locator(".app-shell");
+  const classBefore = await shell().getAttribute("class");
+  await page.locator(".font-size-option").last().click();
+  await expect(shell()).toHaveClass(/fs-l/);
+  expect(classBefore).not.toContain("fs-l");
+  await page.reload();
+  await page.waitForLoadState("domcontentloaded");
+  await expect(page.getByLabel("Message Zcode")).toBeVisible();
+  await expect(page.locator(".app-shell")).toHaveClass(/fs-l/);
+  // restore so other tests (fresh contexts) are unaffected anyway; also
+  // verifies switching back works
+  await page.locator(".profile-button").click();
+  await page.locator(".font-size-option").first().click();
+  await expect(page.locator(".app-shell")).toHaveClass(/fs-xs/);
+});
+
+test("ZWUI-058: attaching a file uploads it and sends uploadRef+name in /api/chat", async ({ page }) => {
+  let uploadHit = 0;
+  await page.route(/\/api\/upload$/, async (route) => {
+    uploadHit += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ path: "/e2e-uploads/hello.txt", name: "hello.txt", size: 5 }),
+    });
+  });
+  // accept the chat locally: the real server would reject the mocked upload
+  // path (it must live under the server's uploads dir); this test pins the
+  // wire shape and the accepted→clear behavior, not server validation
+  await page.route(/\/api\/chat$/, async (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ jobId: "job_att1", sessionId: "sess_att1", cwd: "/w", mode: "plan", model: null }),
+    })
+  );
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "hello.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("hello"),
+  });
+  const chip = page.locator(".attached-file", { hasText: "hello.txt" });
+  await expect(chip).toBeVisible();
+  await expect(chip).not.toContainText("uploading");
+  expect(uploadHit).toBe(1);
+  // removing works too, then re-attach for the send assertion
+  await chip.getByLabel("Remove hello.txt").click();
+  await expect(page.locator(".attached-files")).toHaveCount(0);
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "hello.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("hello"),
+  });
+  await expect(page.locator(".attached-file", { hasText: "hello.txt" })).toBeVisible();
+  const input = page.getByLabel("Message Zcode");
+  await input.fill("here is the file");
+  const chatResponse = page.waitForResponse(
+    (r) => r.url().includes("/api/chat") && r.request().method() === "POST"
+  );
+  await input.press("Enter");
+  const req = (await chatResponse).request();
+  const body = req.postDataJSON();
+  expect(body.text).toBe("here is the file");
+  // wire contract: server validates plain upload paths (resolved under the
+  // uploads dir) — see server/index.js /api/chat
+  expect(body.attachments).toEqual(["/e2e-uploads/hello.txt"]);
+  // sending clears the composer's pending chips
+  await expect(page.locator(".attached-files")).toHaveCount(0);
+});
+
+test.describe("ZWUI-058: clipboard copy", () => {
+  test.use({ permissions: ["clipboard-read", "clipboard-write"] });
+
+  test("copy button puts the exact code text on the clipboard", async ({ page }) => {
+    const input = page.getByLabel("Message Zcode");
+    await input.fill("show me code");
+    await input.press("Enter");
+    await expect(page.locator(".code-block").first()).toBeVisible({ timeout: 20_000 });
+    await page.locator(".code-block-copy").first().click();
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    // the gutter renders line numbers as separate cells — expected clipboard
+    // content is the code text only, line by line
+    const expected = await page.evaluate(() => {
+      const lines = Array.from(document.querySelectorAll(".code-block .code-line-text"));
+      return lines.map((el) => (el.textContent ?? "").replace(/\u00A0$/, "")).join("\n");
+    });
+    expect(copied).toBe(expected);
+  });
+});
+
+test("ZWUI-056: session rows render title + project/time meta (two-line shape)", async ({ page }) => {
+  await page.route(/\/api\/sessions\/recent\?.*/, async (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ sessions: [
+        { id: "sess_row1", title: "row shape probe", directory: "/home/ther12k/Workspace/proj", updatedAt: 1735689600000, createdAt: 1735689600000 },
+      ] }),
+    })
+  );
+  await page.goto("/w/default");
+  await page.waitForLoadState("domcontentloaded");
+  await page.getByRole("tab", { name: /Sessions/ }).click();
+  const row = page.locator(".task-row", { hasText: "row shape probe" });
+  await expect(row.locator(".task-title")).toHaveText("row shape probe");
+  await expect(row.locator(".task-meta .task-project")).toHaveText("proj");
+  await expect(row.locator(".task-meta time")).toHaveCount(1);
+  const box = (await row.locator(".task-link").boundingBox())!;
+  expect(box.height).toBeGreaterThanOrEqual(44);
+});

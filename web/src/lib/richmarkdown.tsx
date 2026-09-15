@@ -33,7 +33,7 @@ const KEYWORDS =
 
 // light, line-local tinting: comments, strings, numbers, keywords. Tokens are
 // rendered as plain text — this is cosmetic, not a parser.
-function highlightLine(line: string): React.ReactNode[] {
+export function highlightLine(line: string): React.ReactNode[] {
   const master =
     /(\/\/[^\n]*|#[^\n]*|\/\*[\s\S]*?\*\/)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_$][\w$]*)/g;
   const out: React.ReactNode[] = [];

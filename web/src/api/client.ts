@@ -162,7 +162,10 @@ export class ApiClient {
     if (token) headers.authorization = `Bearer ${token}`;
     const res = await fetch(this.baseUrl + path, { ...init, headers });
     const payload = await res.json().catch(() => ({}));
-    if (!res.ok) throw new ApiError(res.status, (payload as { error?: string })?.error || res.statusText, payload);
+    if (!res.ok) {
+      const message = (payload as { error?: string })?.error || res.statusText || `HTTP ${res.status}`;
+      throw new ApiError(res.status, message, payload);
+    }
     return payload as T;
   }
 

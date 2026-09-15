@@ -401,6 +401,60 @@ describe("SessionStore.transcript newest-parts window", async () => {
   });
 });
 
+// ZWUI-058: CLI-internal messages must never surface as chat turns —
+// synthetic runtime reminders (model-only context replay), hidden-transcript
+// messages, and compaction summary markers. The visible "context compacted"
+// separator still renders from the compaction timeline part.
+describe("SessionStore.transcript hides CLI-internal messages", async () => {
+  const { SessionStore } = await import("../server/sessions.js");
+  const { DatabaseSync } = await import("node:sqlite");
+
+  it("skips synthetic, model-only, hidden, and compaction-summary messages", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zc-store-"));
+    const dbPath = join(dir, "db.sqlite");
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT);
+      CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, sequence INTEGER);
+      CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT, sequence INTEGER);
+    `);
+    db.prepare("INSERT INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)")
+      .run("sess_int", "t", "/tmp", 1, 2);
+    const insMsg = db.prepare("INSERT INTO message (id, session_id, data, sequence) VALUES (?,?,?,?)");
+    const insPart = db.prepare("INSERT INTO part (id, message_id, session_id, data, sequence) VALUES (?,?,?,?,?)");
+    const rows = [
+      { seq: 0, msg: { role: "user" }, part: { type: "text", text: "what is the port" } },
+      // assistant answer (visible)
+      { seq: 1, msg: { role: "assistant", time: { completed: 99 } }, part: { type: "text", text: "port 3000" } },
+      // synthetic model-only reminder replaying context (ZWUI-058 leak)
+      { seq: 2, msg: { role: "user", synthetic: true, visibility: "model-only",
+          semantics: { transcriptVisibility: "hidden" } },
+        part: { type: "text", text: "Called the Read tool with input SECRET-INTERNAL" } },
+      // compaction summary marker (mid-turn auto-compaction)
+      { seq: 3, msg: { role: "user", summary: { title: "Compact summary", body: "Summary: internal" } },
+        part: { type: "text", text: "Summary: internal" } },
+      // a follow-up that must still render after the hidden rows
+      { seq: 4, msg: { role: "user" }, part: { type: "text", text: "thanks" } },
+    ];
+    rows.forEach((r, i) => {
+      const mid = `m${i}`;
+      insMsg.run(mid, "sess_int", JSON.stringify(r.msg), r.seq);
+      insPart.run(`p${i}`, mid, "sess_int", JSON.stringify(r.part), 0);
+    });
+    db.close();
+
+    const store = new SessionStore(dbPath);
+    const page = store.transcript("sess_int", { limit: 50 });
+    const texts = page.turns.map((t) => t.text).join("\n");
+    assert.ok(!texts.includes("SECRET-INTERNAL"), "synthetic model-only reminder must be hidden");
+    assert.ok(!texts.includes("Summary: internal"), "compaction summary marker must be hidden");
+    assert.ok(texts.includes("what is the port"), "real user turn kept");
+    assert.ok(texts.includes("port 3000"), "real answer kept");
+    assert.ok(texts.includes("thanks"), "follow-up after hidden rows kept");
+    assert.equal(page.turns.length, 3);
+  });
+});
+
 // Desktop parity: timeline separators (model switches, compactions, forks,
 // goal verification) interleave with the transcript instead of vanishing.
 describe("SessionStore.transcript timeline separators", async () => {

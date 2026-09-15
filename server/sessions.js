@@ -263,6 +263,16 @@ export class SessionStore {
       let part = {};
       try { msg = JSON.parse(r.mdata); } catch { /* keep {} */ }
       try { part = JSON.parse(r.pdata); } catch { /* keep {} */ }
+      // CLI-internal messages must not surface as chat turns: synthetic
+      // runtime reminders (model-only context), hidden-transcript messages,
+      // and compaction summary markers. The visible "context compacted"
+      // separator still renders from the compaction TIMELINE part.
+      if (
+        msg.synthetic === true ||
+        msg.semantics?.transcriptVisibility === "hidden" ||
+        msg.visibility === "model-only" ||
+        (msg.role === "user" && msg.summary != null)
+      ) continue;
       // reasoning parts carry .text too — the desktop keeps them out of the
       // rendered answer (collapsible "Thinking"), so must we
       const text = typeof part.text === "string" && part.type !== "reasoning" ? part.text : "";
