@@ -692,8 +692,46 @@ test("ZWUI-074: Enter queues a follow-up while the current turn runs", async ({ 
   await expect(page.locator(".agent-message")).toContainText("echo:pause before finishing first", { timeout: 20_000 });
   // The queue flushes only after the first authoritative success, then the
   // second prompt runs through the ordinary job/stream path.
-  await expect(page.locator(".agent-message")).toContainText("echo:queued follow-up", { timeout: 20_000 });
+  await expect(page.locator(".agent-message").filter({ hasText: "echo:queued follow-up" }).first()).toBeVisible({ timeout: 20_000 });
   await expect(page.locator(".queued-prompts")).toHaveCount(0);
+});
+
+test("ZWUI-075b: queued follow-ups can be removed individually", async ({ page }) => {
+  const input = page.getByLabel("Message Zcode");
+  await input.fill("wait a while before finishing");
+  await input.press("Enter");
+  await expect(page.getByLabel("Stop run")).toBeVisible({ timeout: 8000 });
+
+  await input.fill("item one to remove");
+  await input.press("Enter");
+  await input.fill("item two to keep");
+  await input.press("Enter");
+  await expect(page.locator(".queued-prompt-chip")).toHaveCount(2);
+
+  // remove the first one
+  await page.getByLabel("Remove queued follow-up: item one to remove").click();
+  await expect(page.locator(".queued-prompt-chip")).toHaveCount(1);
+  await expect(page.locator(".queued-prompt-chip")).toContainText("item two to keep");
+
+  // clean up by stopping the long run
+  await page.getByLabel("Stop run").click();
+});
+
+test("ZWUI-075: reload mid-run reattaches to the in-flight job stream", async ({ page }) => {
+  const input = page.getByLabel("Message Zcode");
+  await input.fill("wait a while before finishing");
+  await input.press("Enter");
+  await expect(page.getByLabel("Stop run")).toBeVisible({ timeout: 8000 });
+  await expect(page).toHaveURL(/\/s\/sess_[A-Za-z0-9-]+/, { timeout: 10_000 });
+
+  // reload the browser while the job is still active
+  await page.reload();
+  await page.waitForLoadState("domcontentloaded");
+
+  // after reload, the client adopts the running job (Stop run visible)
+  await expect(page.getByLabel("Stop run")).toBeVisible({ timeout: 12_000 });
+  await page.getByLabel("Stop run").click();
+  await expect(page.locator(".message-duration")).toHaveText(/cancelled/, { timeout: 15_000 });
 });
 
 test("ZWUI-074: Escape interrupts the active turn without clicking Stop", async ({ page }) => {

@@ -1,7 +1,7 @@
 // ZWUI-050: the run manager owns transports and schedules reducer actions.
 // These tests pin the ownership rules the browser tests exercise end-to-end.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { submitRun, retryDelivery, retryFailedRun, cancelRun, getRun, subscribeRun, isRunBusy, lastSubmission, __setPollIntervalForTests } from "../runManager";
+import { submitRun, retryDelivery, retryFailedRun, cancelRun, getRun, subscribeRun, isRunBusy, lastSubmission, adoptRunningJob, __setPollIntervalForTests } from "../runManager";
 import type { ApiClient, ChatAccepted, JobStatus } from "../../api/client";
 
 function fakeClient(overrides: Partial<ApiClient> = {}) {
@@ -138,5 +138,18 @@ describe("run manager", () => {
     // the entry's own poll drove its correct terminal state; a late response
     // captured for a DIFFERENT job cannot even reach dispatch (manager guard)
     expect(lastSubmission("sess_live")?.requestId).toBe("req-1");
+  });
+
+  it("adoptRunningJob attaches to an in-flight job without submitting a new prompt (ZWUI-075)", async () => {
+    const client = fakeClient();
+    client.job.mockResolvedValue({ status: "running" as const, jobId: "jAdopt" } as JobStatus);
+    adoptRunningJob("sess_adopt", "jAdopt", "sess_adopt", client as unknown as ApiClient);
+    expect(getRun("sess_adopt").jobId).toBe("jAdopt");
+    expect(isRunBusy("sess_adopt")).toBe(true);
+    await vi.waitFor(() => expect(getRun("sess_adopt").phase).toBe("running"));
+    expect(client.chat).not.toHaveBeenCalled();
+    // reconciliation poll finalizes once the server finishes
+    client.job.mockResolvedValue({ status: "succeeded" as const, jobId: "jAdopt" } as JobStatus);
+    await vi.waitFor(() => expect(getRun("sess_adopt").phase).toBe("succeeded"));
   });
 });

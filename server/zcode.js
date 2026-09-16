@@ -148,6 +148,15 @@ export class JobManager {
     return this.jobs.get(jobId) || null;
   }
 
+  // Active (non-terminal) job currently running for a session, if any.
+  // Used by /api/sessions/:id so a reloaded browser can adopt the live
+  // run instead of falling back to a polling-only "working" state.
+  activeJobForSession(sessionId) {
+    if (!sessionId) return null;
+    const job = this.bySession.get(sessionId);
+    return job && !TERMINAL.has(job.status) ? job : null;
+  }
+
   findByIdempotencyKey(requestId, payload) {
     if (!requestId) return null;
     const entry = this.byRequest.get(requestId);

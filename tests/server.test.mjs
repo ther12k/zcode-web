@@ -842,6 +842,13 @@ describe("ZPAR-001 & ZPAR-002: Canonical session directory & auth bootstrap", as
     // 5. Matching directory succeeds
     const rMatch = await chat({ text: "matching test", sessionId: "sess_other", cwd: otherProj });
     assert.equal(rMatch.status, 202);
+    const jMatch = await rMatch.json();
+
+    // 6. Detail route reports activeJobId for in-flight jobs on this server (ZWUI-075)
+    const rDetailLive = await fetch(`${BASE}/api/sessions/sess_other`, { headers: auth });
+    assert.equal(rDetailLive.status, 200);
+    const jDetailLive = await rDetailLive.json();
+    assert.equal(jDetailLive.activeJobId, jMatch.jobId, "reports active job id for reload adoption");
   });
 });
 

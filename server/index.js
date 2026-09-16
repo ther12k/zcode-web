@@ -578,16 +578,33 @@ async function handleApi(req, res, url) {
     let runInfo = { active: false, startedAt: null };
     try {
       session = store.get(sessionMatch[1]);
-      if (!session) return sendJson(res, 404, { error: "session not found" });
-      // ZWUI-060: containment verdict on the REAL path (symlink-aware)
-      if (!insideAllowedRoots(realpathOf(session.directory))) {
-        return sendJson(res, 403, { error: "session outside allowed roots" });
+      // A fresh CLI turn can announce its session before the CLI has committed
+      // the session row. Keep a reload in that short window on the live job
+      // instead of returning 404 and losing the run's stream identity.
+      const liveJob = jobs.activeJobForSession(sessionMatch[1]);
+      if (!session && liveJob) {
+        session = {
+          id: sessionMatch[1],
+          title: String(liveJob.text || "New chat").slice(0, 200),
+          directory: liveJob.cwd,
+          createdAt: liveJob.createdAt,
+          updatedAt: liveJob.createdAt,
+          goal: null,
+        };
+        page = { turns: [], total: 0, hasMore: false, tokensTotal: null, contextTokens: null };
+        runInfo = { active: true, startedAt: liveJob.startedAt || liveJob.createdAt };
+      } else {
+        if (!session) return sendJson(res, 404, { error: "session not found" });
+        // ZWUI-060: containment verdict on the REAL path (symlink-aware)
+        if (!insideAllowedRoots(realpathOf(session.directory))) {
+          return sendJson(res, 403, { error: "session outside allowed roots" });
+        }
+        session.goal = store.goal(session.id);
+        const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 5, 1), 400);
+        const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0);
+        page = store.transcript(session.id, { limit, offset });
+        runInfo = store.runInfo(session.id);
       }
-      session.goal = store.goal(session.id);
-      const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 5, 1), 400);
-      const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0);
-      page = store.transcript(session.id, { limit, offset });
-      runInfo = store.runInfo(session.id);
     } catch (e) {
       const status = e.code === "DB_MISSING" ? 503 : 500;
       return sendJson(res, status, { error: e.message, code: e.code });
@@ -605,6 +622,10 @@ async function handleApi(req, res, url) {
       // progress and blocks sending while this is true
       runActive: runInfo.active,
       runStartedAt: runInfo.startedAt,
+      // ZWUI-075: if the running turn was spawned by THIS server instance,
+      // report its job id so a reloaded browser can adopt the live stream
+      // instead of degrading to store polling.
+      activeJobId: jobs.activeJobForSession(session.id)?.id ?? null,
     });
   }
 

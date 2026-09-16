@@ -176,7 +176,12 @@ export function ChatPanel({
     setExternalActive(!!d.runActive);
     setExternalStartedAt(d.runStartedAt ?? null);
     if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory });
-  }, [onSessionMeta]);
+    // ZWUI-075: if the server reports an active job spawned by its own process,
+    // adopt the live stream directly so a reload doesn't degrade to poll-only
+    if (d.activeJobId && d.session?.id && (!run.jobId || isTerminal(run.phase))) {
+      runs.adoptRunningJob(`${cwd}::${d.session.id}`, d.activeJobId, d.session.id, client);
+    }
+  }, [onSessionMeta, run.jobId, run.phase, cwd, client]);
   // incremental refresh: match turns by message id — known turns update in
   // place (streaming text grows), new ones append. Older pages the reader
   // paged in are preserved; no loader flash, no scroll jump.
@@ -202,7 +207,10 @@ export function ChatPanel({
     if (d.tokensTotal != null) setSessionTokensTotal(d.tokensTotal);
     if (d.contextTokens != null) setContextTokens(d.contextTokens);
     if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory });
-  }, [onSessionMeta]);
+    if (d.activeJobId && d.session?.id && (!run.jobId || isTerminal(run.phase))) {
+      runs.adoptRunningJob(`${cwd}::${d.session.id}`, d.activeJobId, d.session.id, client);
+    }
+  }, [onSessionMeta, run.jobId, run.phase, cwd, client]);
   // initial load — full replace only when the session (or an explicit
   // re-select reload) changes
   useEffect(() => {
@@ -643,23 +651,38 @@ export function ChatPanel({
   }, [cwd, client, draftKey, touchDraft, onSessionCreated]);
 
   const submitQueued = useCallback((sub: Submission) => {
-    submitWith(sub, { clearDraft: false, submitView: runKey });
-  }, [submitWith, runKey]);
+    // A follow-up may have been queued before a fresh chat received its
+    // session id. Bind it to the now-authoritative conversation at flush time
+    // rather than accidentally opening a second session.
+    const bound = sub.sessionId ? sub : { ...sub, sessionId };
+    submitWith(bound, { clearDraft: false, submitView: runKey });
+  }, [submitWith, runKey, sessionId]);
 
   // Once this turn reaches a terminal state, send exactly one queued item.
   // Failed/cancelled turns retain the queue so the user can retry deliberately.
   // External desktop/CLI turns have no local phase, so their busy transition is
   // part of the same flush signal.
   const previousBusy = useRef(busy);
+  const flushingQueue = useRef(false);
   useEffect(() => {
     const wasBusy = previousBusy.current;
     previousBusy.current = busy;
-    if (!wasBusy || busy || !queuedSubmissions.length) return;
+    if (!queuedSubmissions.length || flushingQueue.current) return;
+    // A locally attached job is authoritative for this view. The shared
+    // session store can remain "active" briefly after the same job has
+    // completed, so waiting for the aggregate busy flag would strand the
+    // follow-up indefinitely during that commit window.
+    const localFinished = !!run.jobId && isTerminal(run.phase);
+    if ((!localFinished && (!wasBusy || busy))) return;
     const picked = dequeueAfterSuccess(queuedSubmissions, run.phase === "idle" ? "succeeded" : run.phase);
     if (!picked.next) return;
+    flushingQueue.current = true;
     setQueuedSubmissions([...picked.rest]);
-    queueMicrotask(() => submitQueued(picked.next!));
-  }, [busy, run.phase, queuedSubmissions.length, submitQueued]);
+    queueMicrotask(() => {
+      flushingQueue.current = false;
+      submitQueued(picked.next!);
+    });
+  }, [busy, run.jobId, run.phase, queuedSubmissions.length, submitQueued]);
 
   const guard = uploading > 0 || !providerLive;
 
@@ -1322,13 +1345,30 @@ export function ChatPanel({
         <div className={`composer ${busy ? "composer-working" : ""}`}>
           {queuedSubmissions.length > 0 && (
             <div className="queued-prompts" aria-live="polite">
-              <span className="queued-prompts-label"><Clock3 size={12} />{queuedSubmissions.length} queued follow-up{queuedSubmissions.length === 1 ? "" : "s"}</span>
+              <span className="queued-prompts-label">
+                <Clock3 size={12} />
+                {queuedSubmissions.length} queued follow-up{queuedSubmissions.length === 1 ? "" : "s"}
+              </span>
+              <div className="queued-prompts-list">
+                {queuedSubmissions.map((q, idx) => (
+                  <span className="queued-prompt-chip" key={q.requestId} title={q.text}>
+                    <Clock3 size={11} />
+                    <span className="queued-prompt-text">{q.text.slice(0, 48)}{q.text.length > 48 ? "…" : ""}</span>
+                    <button
+                      type="button"
+                      className="queued-item-remove"
+                      aria-label={`Remove queued follow-up: ${q.text.slice(0, 20)}`}
+                      onClick={() => setQueuedSubmissions((all) => all.filter((_, i) => i !== idx))}
+                    >✕</button>
+                  </span>
+                ))}
+              </div>
               <button
                 className="queued-clear"
                 type="button"
                 onClick={() => setQueuedSubmissions([])}
-                title="Clear queued follow-ups"
-              >Clear</button>
+                title="Clear all queued follow-ups"
+              >Clear all</button>
             </div>
           )}
           {attachments.length > 0 && (

@@ -101,6 +101,8 @@ export type SessionDetail = {
   runActive?: boolean;
   /** when that externally-running turn started (ms epoch), for the live timer */
   runStartedAt?: number | null;
+  /** server-side active job id (ZWUI-075) for in-flight reattachment */
+  activeJobId?: string | null;
 };
 
 export type JobStatus = {

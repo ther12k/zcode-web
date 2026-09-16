@@ -29,7 +29,7 @@ the CLI's database is never written for search.
 | GET /api/projects | — | `{roots: [{path, projects[]}]}` | dirs under each allowed root, dotfiles excluded |
 | POST /api/projects | `{name, rootIndex?}` | 201 `{name, directory}`; 409 exists; 400 invalid name | `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` |
 | GET /api/sessions?cwd&limit? | — | `{cwd, sessions: [{id,title,directory,taskType,createdAt,updatedAt}]}` | excludes `sess_subagent_*` |
-| GET /api/sessions/:id?limit&offset | — | `{session, transcript:[{role,text,tools?[],files?[]}], total, hasMore}` | logical-message pagination; offset counts from newest |
+| GET /api/sessions/:id?limit&offset | — | `{session, transcript:[{role,text,tools?[],files?[]}], total, hasMore, runActive, runStartedAt, activeJobId}` | logical-message pagination; offset counts from newest; `activeJobId` is present only for an in-flight job owned by this server instance, including a just-created session before persistence catches up |
 | POST /api/upload | `{name, data(base64)}` | 201 `{path,name,size}`; 400 invalid/empty/corrupt; 413 too large | ≤ ZCODE_MAX_UPLOAD_BYTES (15MB), name sanitized, stored under ZCODE_HOME/uploads |
 | GET /api/uploads/:file | — | file bytes, typed by ext | GET/HEAD; traversal blocked; images render inline |
 | POST /api/chat | `{text, sessionId?, cwd?, mode?, model?, attachments?[]}` | 202 `{jobId, sessionId, cwd, mode, model}` | attachment-only defaults to "Analyze the attached file(s)."; model must match /api/models ref; cwd must be under an allowed root |
