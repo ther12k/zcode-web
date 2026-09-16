@@ -4,12 +4,12 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   CheckCircle2, ChevronDown, CircleDot, Code2, Eye, FileCode2, FileDiff, FolderClosed, GitBranch,
-  Globe, ListTree, LoaderCircle, Maximize2, Minimize2, Monitor, PanelBottom, Play, RefreshCw, Smartphone, Target,
+  Globe, ListChecks, ListTree, LoaderCircle, Maximize2, Minimize2, Monitor, PanelBottom, Play, RefreshCw, Smartphone, Target,
 } from "lucide-react";
 import { IconButton, relativeTime } from "../ui";
 import { IssueInspector, useGithubIssue } from "./IssueInspector";
 import { issueKey, type IssueIdentity, type ScannedIssueRef } from "../lib/issueRefs";
-import type { ApiClient } from "../api/client";
+import type { ApiClient, TodoItem } from "../api/client";
 import { DiffViewerModal, parseUnifiedDiff, type ParsedDiff } from "./DiffViewer";
 
 type Tab = "overview" | "preview" | "code" | "changes" | "issues";
@@ -44,7 +44,7 @@ function gitStatusLabel(code: string, long: boolean): string {
   return raw || "changed";
 }
 
-export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleExpanded, refreshKey = 0, runBusy = false, runStartedAt = null, sessionTitle, branch: branchProp, client, issues = [], selectedIssue = null, onAddToPrompt }: {
+export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleExpanded, refreshKey = 0, runBusy = false, runStartedAt = null, sessionTitle, branch: branchProp, client, issues = [], selectedIssue = null, onAddToPrompt, todos }: {
   cwd: string;
   onCollapse: () => void;
   goal?: Goal;
@@ -52,6 +52,8 @@ export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleEx
   runBusy?: boolean;
   /** when the current busy period started (ms epoch) — live goal timer */
   runStartedAt?: number | null;
+  /** the agent's todo checklist for this session (ZWUI-078) */
+  todos?: TodoItem[];
   sessionTitle?: string;
   branch?: string | null;
   /** authenticated client — issue reads go through it, never bare fetches */
@@ -114,7 +116,7 @@ export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleEx
         </div>
       </div>
       {tab === "overview" && (
-        <OverviewTab cwd={cwd} branch={branchProp} goal={goal} runBusy={runBusy} runStartedAt={runStartedAt} sessionTitle={sessionTitle}
+        <OverviewTab cwd={cwd} branch={branchProp} goal={goal} runBusy={runBusy} runStartedAt={runStartedAt} sessionTitle={sessionTitle} todos={todos}
           goChanges={() => setTab("changes")} goFiles={() => setTab("code")} />
       )}
       {tab === "preview" && previewCap?.enabled && <PreviewTab cwd={cwd} mobile={mobile} onMobile={setMobile} cap={previewCap} />}
@@ -199,13 +201,14 @@ function IssueListRow({ client, ref_, active, onSelect }: {
 // next" from REAL state — conversation identity, run status, goal — and
 // routes to Changes/Files. Selection-driven details open from there.
 
-function OverviewTab({ cwd, branch, goal, runBusy, runStartedAt, sessionTitle, goChanges, goFiles }: {
+function OverviewTab({ cwd, branch, goal, runBusy, runStartedAt, sessionTitle, todos, goChanges, goFiles }: {
   cwd: string;
   branch?: string | null;
   goal: Goal;
   runBusy: boolean;
   runStartedAt: number | null;
   sessionTitle?: string;
+  todos?: TodoItem[];
   goChanges: () => void;
   goFiles: () => void;
 }) {
@@ -225,6 +228,7 @@ function OverviewTab({ cwd, branch, goal, runBusy, runStartedAt, sessionTitle, g
         {branch && <small className="overview-sub"><GitBranch size={11} /> {branch}</small>}
       </div>
       <GoalPanel goal={goal} runBusy={runBusy} runStartedAt={runStartedAt} />
+      <ProgressPanel todos={todos} runBusy={runBusy} />
       <div className="overview-links">
         <button onClick={goChanges}><FileDiff size={14} /><span><b>Review changes</b><small>Working-tree diff, unified or split</small></span></button>
         <button onClick={goFiles}><FolderClosed size={14} /><span><b>Browse files</b><small>Read-only project files</small></span></button>
@@ -487,6 +491,38 @@ function ChangesTab({ cwd, refreshKey = 0 }: { cwd: string; refreshKey?: number 
 }
 
 
+// ZWUI-078: the agent's todo checklist — the desktop's Progress list, fed by
+// the CLI store's todo table (rows update in place, so this is live state).
+// Hidden entirely for sessions that never created todos.
+function ProgressPanel({ todos, runBusy }: { todos?: TodoItem[]; runBusy?: boolean }) {
+  if (!todos || todos.length === 0) return null;
+  const done = todos.filter((t) => t.status === "completed").length;
+  const allDone = done === todos.length;
+  return (
+    <div className="progress-panel" aria-label="Agent progress">
+      <div className="progress-heading">
+        <ListChecks size={13} />
+        <strong>Progress</strong>
+        <span className={`goal-state ${allDone ? "is-complete" : ""}`}>{done}/{todos.length}</span>
+        {runBusy && !allDone && <LoaderCircle size={12} className="spin progress-live" />}
+      </div>
+      <ul className="progress-list">
+        {todos.map((t, i) => (
+          <li key={i} className={`progress-item is-${t.status}`}>
+            {t.status === "completed"
+              ? <CheckCircle2 size={13} className="success-text" />
+              : t.status === "in_progress"
+                ? <LoaderCircle size={13} className="spin" />
+                : <span className="unchecked-step" />}
+            <span className="progress-text">{t.content}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+// ZWUI-077: while a run is busy the time figure ticks live (stored cumulative
+// time + the current busy period's elapsed), mirroring the desktop's card.
 // Goal panel — reference structure, fed by the CLI's real session_target row.
 // ZWUI-077: while a run is busy the time figure ticks live (stored cumulative
 // time + the current busy period's elapsed), mirroring the desktop's card.

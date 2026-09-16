@@ -60,6 +60,9 @@ export type SessionInfo = {
   goal?: { objective: string; status: string; tokensUsed: number; timeUsedSeconds: number; updatedAt: number } | null;
 };
 
+/** One row of the agent's todo checklist (the desktop's Progress list). */
+export type TodoItem = { content: string; status: string; priority: string };
+
 export type ToolCard = { name: string; status: string; detail: string };
 export type FileCard = { mime: string; url: string; size: number | null; storageKind: string };
 // Desktop timeline separators interleaved with turns (model switches,
@@ -105,6 +108,8 @@ export type SessionDetail = {
   activeJobId?: string | null;
   /** completed-turn working time (turn_usage sum) — desktop's "Worked for" */
   workedMs?: number | null;
+  /** the agent's todo checklist (todo table) — the desktop's Progress list */
+  todos?: TodoItem[] | null;
 };
 
 export type JobStatus = {

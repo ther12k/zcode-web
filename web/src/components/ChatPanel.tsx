@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { ArrowLeftRight, ArrowUp, ArrowUpRight, BadgeCheck, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Coins, Copy, Eye, EyeOff, FileText, FoldVertical, FolderClosed, GitBranch, LoaderCircle, MessageSquare, MoreHorizontal, Plus, RotateCcw, ShieldCheck, SlidersHorizontal, Sparkles, Square, SquarePen, SquareTerminal, Terminal, Unplug, Wrench, X, Zap } from "lucide-react";
 import { ZLogo, IconButton, Markdown, CheckMark, useDialogA11y, overlayOpen, relativeTime } from "../ui";
 import { randomUUID } from "../lib/uuid";
-import { ApiError, type ApiClient, type CommandInfo, type FileCard, type ModelInfo, type SessionDetail, type SessionInfo, type TimelineEvent, type TranscriptTurn } from "../api/client";
+import { ApiError, type ApiClient, type CommandInfo, type FileCard, type ModelInfo, type SessionDetail, type SessionInfo, type TimelineEvent, type TodoItem, type TranscriptTurn } from "../api/client";
 import { isTerminal } from "../state/run";
 import * as runs from "../state/runManager";
 import { snapshotSubmission, mayClearDraft, dequeueAfterSuccess, type Submission } from "../lib/submission";
@@ -64,7 +64,7 @@ export function ChatPanel({
   /** app-level slash actions (open dialogs, new chat) — true when handled */
   onSlashAction?: (action: string) => boolean;
   /** session metadata from transcript fetches (title lift for deep links) */
-  onSessionMeta?: (s: { id: string; title: string; directory?: string; goal?: SessionInfo["goal"] }) => void;
+  onSessionMeta?: (s: { id: string; title: string; directory?: string; goal?: SessionInfo["goal"]; todos?: TodoItem[] }) => void;
   /** GitHub repo bound to this project (origin remote) — bare #N resolves here */
   repoBinding?: { host: string; owner: string; repo: string } | null;
   /** an issue reference was clicked in the conversation */
@@ -191,7 +191,7 @@ export function ChatPanel({
     setExternalActive(!!d.runActive);
     setExternalStartedAt(d.runStartedAt ?? null);
     setWorkedMs(d.workedMs ?? 0);
-    if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory, goal: d.session.goal ?? undefined });
+    if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory, goal: d.session.goal ?? undefined, todos: d.todos ?? [] });
     considerAdoption(d);
   }, [onSessionMeta, considerAdoption]);
   // incremental refresh: match turns by message id — known turns update in
@@ -219,7 +219,7 @@ export function ChatPanel({
     if (d.workedMs != null) setWorkedMs(d.workedMs);
     if (d.tokensTotal != null) setSessionTokensTotal(d.tokensTotal);
     if (d.contextTokens != null) setContextTokens(d.contextTokens);
-    if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory, goal: d.session.goal ?? undefined });
+    if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory, goal: d.session.goal ?? undefined, todos: d.todos ?? [] });
     considerAdoption(d);
   }, [onSessionMeta, considerAdoption]);
   // initial load — full replace only when the session (or an explicit

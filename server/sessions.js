@@ -225,6 +225,26 @@ export class SessionStore {
     }
   }
 
+  // The agent's todo list for a session — the desktop's Progress checklist
+  // (status: pending | in_progress | completed, ordered by position). Rows are
+  // updated in place, so the current rows ARE the live plan state. Older CLI
+  // stores without the table contribute an empty list, never an error.
+  todos(sessionId) {
+    try {
+      return this.query(
+        `SELECT content, status, priority, position FROM todo
+          WHERE session_id = ? ORDER BY position ASC`,
+        [sessionId]
+      ).map((r) => ({
+        content: String(r.content || ""),
+        status: String(r.status || "pending"),
+        priority: String(r.priority || ""),
+      }));
+    } catch {
+      return [];
+    }
+  }
+
   get(sessionId) {
     const rows = this.query(
       `SELECT id, title, directory, time_created, time_updated FROM session WHERE id = ?`,

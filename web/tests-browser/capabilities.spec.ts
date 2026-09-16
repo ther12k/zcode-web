@@ -128,12 +128,14 @@ test("goal card and worked-time chip render from real session_target/turn_usage 
     CREATE TABLE IF NOT EXISTS part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT, sequence INTEGER);
     CREATE TABLE IF NOT EXISTS turn_usage (session_id TEXT, turn_id TEXT, user_message_id TEXT, status TEXT, started_at INTEGER, completed_at INTEGER, duration_ms INTEGER);
     CREATE TABLE IF NOT EXISTS session_target (id TEXT PRIMARY KEY, session_id TEXT, objective TEXT, status TEXT, tokens_used INTEGER, time_used_seconds INTEGER, time_created INTEGER, time_updated INTEGER);
+    CREATE TABLE IF NOT EXISTS todo (session_id TEXT, content TEXT, status TEXT, priority TEXT, position INTEGER, time_created INTEGER, time_updated INTEGER, PRIMARY KEY (session_id, position));
   `);
   const sid = "sess_goal_e2e_00000000000000000000000000";
   // idempotent seed: the e2e store persists across runs and turn_usage has no
   // unique key — re-inserting would stack durations and skew "Worked for"
   db.prepare("DELETE FROM turn_usage WHERE session_id = ?").run(sid);
   db.prepare("DELETE FROM session_target WHERE session_id = ?").run(sid);
+  db.prepare("DELETE FROM todo WHERE session_id = ?").run(sid);
   db.prepare("DELETE FROM part WHERE session_id = ?").run(sid);
   db.prepare("DELETE FROM message WHERE session_id = ?").run(sid);
   db.prepare("DELETE FROM session WHERE id = ?").run(sid);
@@ -147,6 +149,10 @@ test("goal card and worked-time chip render from real session_target/turn_usage 
     .run(sid, "t_goal_1", "msg_goal_e2e", "completed", 1, 2, 75_000);
   db.prepare("INSERT INTO session_target (id, session_id, objective, status, tokens_used, time_used_seconds, time_created, time_updated) VALUES (?,?,?,?,?,?,?,?)")
     .run("target_goal_e2e", sid, "make this zcode web ui ux as close as possible to zcode desktop", "active", 318_822, 40_000, 1, Date.now());
+  const insTodo = db.prepare("INSERT INTO todo (session_id, content, status, priority, position, time_created, time_updated) VALUES (?,?,?,?,?,?,?)");
+  insTodo.run(sid, "wire goal data through", "completed", "high", 0, 1, 1);
+  insTodo.run(sid, "surface the progress list", "in_progress", "high", 1, 1, 2);
+  insTodo.run(sid, "polish panel styles", "pending", "medium", 2, 1, 1);
   db.close();
 
   await page.goto("/w/" + encodeURIComponent(WS) + "/s/" + sid);
@@ -158,6 +164,15 @@ test("goal card and worked-time chip render from real session_target/turn_usage 
   await expect(goalPanel).toBeVisible();
   await expect(goalPanel).toContainText("make this zcode web ui ux as close as possible to zcode desktop");
   await expect(goalPanel).toContainText("In progress");
+  // ZWUI-078: the agent's todo checklist renders as the desktop's Progress
+  // list — count badge plus per-item status (done / active spinner / pending)
+  const progress = page.locator(".progress-panel");
+  await expect(progress).toBeVisible();
+  await expect(progress).toContainText("1/3");
+  await expect(progress).toContainText("surface the progress list");
+  await expect(progress.locator(".progress-item.is-completed")).toHaveCount(1);
+  await expect(progress.locator(".progress-item.is-in_progress")).toHaveCount(1);
+  await expect(progress.locator(".progress-item.is-pending")).toHaveCount(1);
   // and the chat context strip carries the session-level "Worked for" figure
   // (75s of completed turns; the desktop phrasing, not a bare minute count)
   await expect(page.locator(".worked-chip")).toContainText(/Worked for (1m|75s)/);

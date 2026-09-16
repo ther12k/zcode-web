@@ -683,6 +683,32 @@ describe("SessionStore turn durations + runActive", async () => {
     assert.equal(store.workedMs("sess_missing"), 0);
   });
 
+  it("todos returns the checklist ordered by position and tolerates a missing table (ZWUI-078)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zc-store-"));
+    const dbPath = join(dir, "db.sqlite");
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT);
+      CREATE TABLE todo (session_id text not null, content text not null, status text not null, priority text not null, position integer not null, time_created integer not null, time_updated integer not null, primary key(session_id, position));
+    `);
+    const ins = db.prepare("INSERT INTO todo (session_id, content, status, priority, position, time_created, time_updated) VALUES (?,?,?,?,?,?,?)");
+    ins.run("sess_todos", "first step", "completed", "high", 0, 1, 1);
+    ins.run("sess_todos", "current step", "in_progress", "high", 1, 1, 2);
+    ins.run("sess_todos", "later step", "pending", "medium", 2, 1, 1);
+    db.close();
+    const store = new SessionStore(dbPath);
+    const todos = store.todos("sess_todos");
+    assert.deepEqual(todos.map((t) => [t.content, t.status]), [
+      ["first step", "completed"],
+      ["current step", "in_progress"],
+      ["later step", "pending"],
+    ]);
+    // a store without the todo table answers empty, never throws
+    const bareDir = mkdtempSync(join(tmpdir(), "zc-store-"));
+    const bare = new SessionStore(join(bareDir, "db.sqlite"));
+    assert.deepEqual(bare.todos("sess_any"), []);
+  });
+
   it("separator-only messages never take the turn footer", () => {
     const dir = mkdtempSync(join(tmpdir(), "zc-store-"));
     const dbPath = join(dir, "db.sqlite");
