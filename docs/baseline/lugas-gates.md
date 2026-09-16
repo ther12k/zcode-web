@@ -6,6 +6,11 @@ endpoints, upload → chat → SSE ticket pipeline all green under the pre-trans
 distribution (beta.5 ships dist/ instead of src/; root imports unaffected, verified under
 Bun 1.4.0 = the declared engines.bun floor; FRAMEWORK_VERSION now correctly reports
 0.1.0-beta.5, fixing the CF-1 "0.0.0" stamp).
+
+Additional hardening re-verified 2026-09-16: `server-lugas/security.test.ts` passes 4/4
+under Bun 1.4.0, covering separator-aware containment, symlink escape rejection, safe cwd,
+and session-context mismatch classification. Lugas now serves the modern Vite SPA shell and
+no longer copies the legacy `public/` UI into the experimental image.
 Env: `ZCODE_CLI_NODE` = nvm node v24.11.0, `ZCODE_CLI_ENTRY` = host zcode.cjs 0.16.5,
 `ZCODE_ALLOWED_ROOTS` = ~/.zcode/workspace:/tmp/zc-lugas-ws, token auth on.
 

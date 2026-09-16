@@ -214,7 +214,7 @@ export function saveUpload(name, b64) {
   }
   const dir = uploadsDir();
   mkdirSync(dir, { recursive: true });
-  const fname = `${Date.now()}-${safeName}`;
+  const fname = `${Date.now()}-${randomBytes(4).toString("hex")}-${safeName}`;
   writeFileSync(join(dir, fname), data);
   return { path: join(dir, fname), name: fname, size: data.length };
 }

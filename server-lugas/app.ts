@@ -11,6 +11,7 @@ import {
   JobManager, SessionStoreProxy, TicketStore, bearerOk, config, saveUpload, uploadsDir,
 } from "./shared.js";
 import { SessionStore } from "./db.js";
+import { insideAllowedRoots, safeCwd, sessionContextMismatch } from "./security.ts";
 
 const jobs = new JobManager();
 const tickets = new TicketStore();
@@ -34,18 +35,6 @@ const auth = guard({
   name: "auth",
   handler: ({ request }) => (bearerOk(request) ? { authed: true } : json(401, { error: "unauthorized" })),
 });
-
-function safeCwd(input) {
-  const base = (input || "").trim();
-  if (!base) return resolve(config.allowedRoots[0]);
-  const dir = resolve(base);
-  for (const root of config.allowedRoots) {
-    if (dir === root || dir.startsWith(root + sep)) return dir;
-  }
-  const rel = resolve(config.allowedRoots[0], "." + sep + dir.replace(/^\/+/, ""));
-  if (config.allowedRoots.some((root) => rel === root || rel.startsWith(root + sep))) return rel;
-  throw Object.assign(new Error("cwd must be inside an allowed root: " + config.allowedRoots.join(", ")), { status: 400 });
-}
 
 function listModels() {
   try {
@@ -149,6 +138,7 @@ function apiRoutes() {
         const rootIdx = Number.isInteger(body.rootIndex) ? body.rootIndex : 0;
         const root = config.allowedRoots[rootIdx] || config.allowedRoots[0];
         const dir = join(root, name);
+        if (!insideAllowedRoots(dir, [root])) return json(400, { error: "project outside allowed root" });
         if (existsSync(dir)) return json(409, { error: "project already exists" });
         mkdirSync(dir, { recursive: true });
         return json(201, { name, directory: dir });
@@ -168,6 +158,9 @@ function apiRoutes() {
       GET: route({ before: [auth], handler: ({ params, query }) => {
         const session = store.get(params.id);
         if (!session) return json(404, { error: "session not found" });
+        if (!insideAllowedRoots(session.directory, config.allowedRoots)) {
+          return json(403, { error: "session outside allowed roots" });
+        }
         const limit = Math.min(Math.max(Number(query?.limit) || 5, 1), 400);
         const offset = Math.max(Number(query?.offset) || 0, 0);
         const { turns, total, hasMore } = store.transcript(session.id, { limit, offset });
@@ -190,7 +183,7 @@ function apiRoutes() {
     "/api/uploads/:file": {
       GET: route({ before: [auth], handler: ({ params }) => {
         const file = normalize(join(upDir, String(params.file)));
-        if (!file.startsWith(upDir + sep) || !existsSync(file)) return json(404, { error: "not found" });
+        if (!file.startsWith(upDir + sep) || !existsSync(file) || !insideAllowedRoots(file, [upDir])) return json(404, { error: "not found" });
         return new Response(readFileSync(file), {
           status: 200,
           headers: { "content-type": MIME[extname(file)] || "application/octet-stream", "cache-control": "private, max-age=3600" },
@@ -248,11 +241,27 @@ function apiRoutes() {
         try { cwd = safeCwd(body.cwd); mkdirSync(cwd, { recursive: true }); }
         catch (e) { return json(e.status || 400, { error: e.message }); }
         const sessionId = body.sessionId && /^sess_[A-Za-z0-9-]+$/.test(body.sessionId) ? body.sessionId : null;
+        if (sessionId) {
+          const session = store.get(sessionId);
+          if (session) {
+            const mismatch = sessionContextMismatch(session.directory, cwd, config.allowedRoots);
+            if (mismatch) {
+              return json(mismatch.code === "SESSION_CONTEXT_MISMATCH" ? 409 : 403, {
+                error: mismatch.code === "SESSION_CONTEXT_MISMATCH" ? "session directory mismatch" : "session directory outside allowed roots",
+                code: mismatch.code,
+                ...(mismatch.canonicalDirectory ? { canonicalDirectory: mismatch.canonicalDirectory } : {}),
+              });
+            }
+          }
+        }
         const mode = config.allowedModes.includes(body.mode) ? body.mode : "plan";
         const { entryMap } = listModels();
         const modelEntry = entryMap[String(body.model)] || null;
         const requested = (Array.isArray(body.attachments) ? body.attachments : []).map((p) => resolve(String(p)));
-        const bad = requested.filter((p) => !p.startsWith(upDir + sep) || !existsSync(p));
+        if (requested.length > 5) {
+          return json(400, { error: "too many attachments (max 5)", rejected: requested.slice(5) });
+        }
+        const bad = requested.filter((p) => !p.startsWith(upDir + sep) || !existsSync(p) || !insideAllowedRoots(p, [upDir]));
         if (bad.length) return json(400, { error: "attachments must be uploaded via /api/upload first", rejected: bad });
         try {
           const job = jobs.start({
@@ -278,19 +287,25 @@ function apiRoutes() {
   };
 }
 
-// Legacy vanilla UI is served until the Vite app replaces it (ZWUI-003).
-const PUBLIC_DIR = join(import.meta.dir, "..", "public");
+// Serve the same built Vite shell as the supported Node backend. The legacy
+// vanilla surface remains in the repository for historical reference, but must
+// not be selected as the Lugas runtime UI because it diverges from desktop UX.
+const WEB_DIST = join(import.meta.dir, "..", "web", "dist");
 
 export default defineApp({
   routes: apiRoutes(),
+  spa: {
+    shell: join(WEB_DIST, "index.html"),
+    navigations: ["/", "/w/*"],
+  },
   assets: {
+    dirs: {
+      "/assets/*": join(WEB_DIST, "assets"),
+      "/fonts/*": join(WEB_DIST, "fonts"),
+    },
     files: {
-      "/": join(PUBLIC_DIR, "index.html"),
-      "/index.html": join(PUBLIC_DIR, "index.html"),
-      "/app.js": join(PUBLIC_DIR, "app.js"),
-      "/style.css": join(PUBLIC_DIR, "style.css"),
-      "/vendor/marked.min.js": join(PUBLIC_DIR, "vendor", "marked.min.js"),
-      "/vendor/purify.min.js": join(PUBLIC_DIR, "vendor", "purify.min.js"),
+      "/favicon.svg": join(WEB_DIST, "favicon.svg"),
+      "/icons.svg": join(WEB_DIST, "icons.svg"),
     },
   },
   notFound: () => json(404, { error: "not found" }),

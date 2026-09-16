@@ -38,7 +38,6 @@ COPY package.json ./
 COPY server-lugas/package.json server-lugas/package-lock.json ./server-lugas/
 RUN cd server-lugas && bun install --frozen-lockfile --production
 COPY server-lugas ./server-lugas
-COPY public ./public
 COPY --from=webbuild /web/dist ./web/dist
 
 RUN mkdir -p /opt/zcode /data/zcode /data/workspace
