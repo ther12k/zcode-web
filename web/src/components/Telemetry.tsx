@@ -3,7 +3,7 @@
 // invented pricing), and the terminal drawer is read-only evidence of what
 // the agent actually executed — not a shell.
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDownRight, ArrowUpRight, Check, Coins, Copy, Download, Layers, LoaderCircle, SquareTerminal, Terminal, Trash2, X } from "lucide-react";
+import { ArrowDownRight, ArrowUpRight, Check, Coins, Copy, Download, Layers, LoaderCircle, SquareTerminal, Terminal, Trash2, X, Zap } from "lucide-react";
 import { Dialog, IconButton } from "../ui";
 import type { TranscriptTurn } from "../api/client";
 
@@ -28,7 +28,7 @@ function fmtDuration(ms: number): string {
 // LOADED transcript page. When the server provides a pagination-independent
 // session total it is shown as the headline number; otherwise the label says
 // exactly what the number covers.
-export function TokenTelemetryDialog({ sessionId, title, turns, totalTurns, sessionTotal, liveTokens, onClose }: {
+export function TokenTelemetryDialog({ sessionId, title, turns, totalTurns, sessionTotal, contextTokens, liveTokens, onClose }: {
   sessionId: string;
   title: string;
   turns: TranscriptTurn[];
@@ -36,6 +36,10 @@ export function TokenTelemetryDialog({ sessionId, title, turns, totalTurns, sess
   totalTurns: number;
   /** server-side token sum over ALL messages, independent of pagination */
   sessionTotal: number | null;
+  /** latest step usage ≈ the context the next call re-feeds (the desktop's
+      "current context"); each agentic step re-feeds the whole context, so
+      cumulative sums are billing figures, not sizes */
+  contextTokens?: number | null;
   liveTokens: number | null;
   onClose: () => void;
 }) {
@@ -69,7 +73,8 @@ export function TokenTelemetryDialog({ sessionId, title, turns, totalTurns, sess
     const lines = [
       `Session token audit: ${title}`,
       `Session: ${sessionId}`,
-      `Total tokens: ${headlineTotal.toLocaleString()} (scope: ${scopeLabel})`,
+      contextTokens != null ? `Current context: ${contextTokens.toLocaleString()} (what the next call re-feeds)` : "",
+      `Cumulative usage — all steps: ${headlineTotal.toLocaleString()} (scope: ${scopeLabel}; each step re-feeds the context)`,
       `Loaded-turn tokens: ${stats.totalTokens.toLocaleString()}${stats.liveIncluded ? ` (${stats.loadedTotal.toLocaleString()} committed + live turn in flight)` : ""}`,
       `Turns with telemetry: ${stats.measured.length} of ${totalTurns} in session`,
       `Total agent time: ${fmtDuration(stats.totalTimeMs)}`,
@@ -119,9 +124,15 @@ export function TokenTelemetryDialog({ sessionId, title, turns, totalTurns, sess
     <Dialog title="Token telemetry." subtitle="Measured usage — per turn, from the CLI's own records." onClose={onClose} wide>
       <div className="dialog-body token-telemetry">
         <div className="token-metrics">
+          {contextTokens != null && (
+            <div className="token-metric">
+              <span><Zap size={13} className="amber-text" />Current context<b className="right">{fmtTokens(contextTokens)}</b></span>
+              <small>what the next call re-feeds — the desktop's context figure</small>
+            </div>
+          )}
           <div className="token-metric">
-            <span><Coins size={13} className="amber-text" />Total tokens<b className="right">{fmtTokens(headlineTotal)}</b></span>
-            <small>{scopeLabel}</small>
+            <span><Coins size={13} className="amber-text" />Cumulative usage — all steps<b className="right">{fmtTokens(headlineTotal)}</b></span>
+            <small>{scopeLabel} · every agentic step re-feeds the context, so this grows by ~one context per step (a billing figure, not a size)</small>
           </div>
           <div className="token-metric">
             <span><ArrowDownRight size={13} className="cyan-text" />Turns measured<b className="right">{stats.measured.length}</b></span>

@@ -93,6 +93,10 @@ export type SessionDetail = {
   hasMore: boolean;
   /** token sum over ALL messages of the session — independent of pagination */
   tokensTotal?: number | null;
+  /** latest step usage ≈ the context size the next call re-feeds (the
+      desktop's "current context"; NOT a conversation size — cumulative
+      sums across steps are billing figures, see TokenTelemetryDialog) */
+  contextTokens?: number | null;
   /** a turn is running in this session from any writer (desktop/CLI/web) */
   runActive?: boolean;
   /** when that externally-running turn started (ms epoch), for the live timer */

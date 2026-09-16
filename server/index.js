@@ -599,6 +599,8 @@ async function handleApi(req, res, url) {
       hasMore: page.hasMore,
       // session-wide token sum, independent of transcript pagination
       tokensTotal: page.tokensTotal ?? null,
+      // latest step usage ≈ the current context window the next call re-feeds
+      contextTokens: page.contextTokens ?? null,
       // a turn is running from ANY writer (desktop/CLI/web) — the UI shows
       // progress and blocks sending while this is true
       runActive: runInfo.active,

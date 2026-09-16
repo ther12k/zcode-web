@@ -108,7 +108,8 @@
 .task-meta time{font-size:11px;color:#6a7367;font-variant-numeric:tabular-nums;margin-left:auto}
 .task-project{font-size:11px;color:#78827a;border:1px solid #363a35;border-radius:3px;padding:1px 4px;white-space:nowrap;flex-shrink:0;max-width:88px;overflow:hidden;text-overflow:ellipsis}
 .task-row-actions{display:none;align-items:center;gap:1px;flex-shrink:0}
-.task-row:hover .task-row-actions{display:flex}
+.task-row:hover .task-row-actions,.task-row:focus-within .task-row-actions{display:flex;position:absolute;right:6px;top:50%;transform:translateY(-50%);width:max-content;background:inherit;padding:2px 3px;border-radius:6px;z-index:1}
+.task-row-actions .icon-button{flex-shrink:0}
 .task-row-actions .icon-button{width:23px;height:23px}
 .task-row-actions .task-pin{color:#7d8b74}
 .pinned-indicator{color:#a9c48e;flex-shrink:0}
@@ -756,3 +757,17 @@ body.is-col-resizing .workspace-main{pointer-events:none}
 .hidden-session-chip>.mono{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#9a9aa4;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .hidden-session-chip .secondary-button{min-height:24px;padding:3px 8px;font-size:11px}
 .hidden-sessions-list>.secondary-button{min-height:26px;padding:4px 9px;font-size:11.5px}
+/* ZWUI-067 (live QA): the archive button used to be position:absolute at the
+   row's right edge, landing ON TOP of the in-flow pin at the default sidebar
+   width — clicking Pin hid the session instead. Both actions now flow in the
+   hover toolbar; the toolbar overlays the row's right side. */
+.task-row-actions .task-archive{position:static;display:none}
+.task-row:hover .task-row-actions .task-archive,
+.task-row:focus-within .task-row-actions .task-archive{display:flex}
+/* ZWUI-067: pinned rows keep an unpin control on hover — the row is filtered
+   out of the main list while pinned, so this is the only unpin affordance */
+.pinned-row{position:relative}
+.pinned-row .pinned-row-link{display:flex;align-items:center;gap:8px;flex:1;min-width:0;width:100%;padding:0;background:transparent;border:0;text-align:left;font:inherit;color:inherit;cursor:pointer}
+.pinned-row .pinned-row-link>span:nth-child(2){flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pinned-unpin{display:none;width:24px;height:24px;flex-shrink:0}
+.pinned-row:hover .pinned-unpin,.pinned-row:focus-within .pinned-unpin{display:inline-flex}

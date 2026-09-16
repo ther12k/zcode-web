@@ -409,14 +409,26 @@ export class SessionStore {
     // pagination-independent token total for the WHOLE session — the web UI's
     // telemetry must not redefine "session total" as the reader pages back
     let tokensTotal = null;
+    let contextTokens = null;
     try {
       tokensTotal = Number(this.query(
         `SELECT COALESCE(SUM(json_extract(data, '$.tokens.total')), 0) AS n
            FROM part WHERE session_id = ? AND json_extract(data, '$.type') = 'step-finish'`,
         [sessionId]
       )[0]?.n) || 0;
+      // ZWUI-067 (live QA): each agentic step RE-FEEDS the context, so
+      // step-finish tokens.total is that step's input+output usage — summing
+      // 1800 steps reads as "358M session tokens", which is billing-true but
+      // meaningless as a size. The LATEST total is the desktop's "current
+      // context" and is what the context chip should show.
+      contextTokens = Number(this.query(
+        `SELECT json_extract(data, '$.tokens.total') AS n
+           FROM part WHERE session_id = ? AND json_extract(data, '$.type') = 'step-finish'
+          ORDER BY rowid DESC LIMIT 1`,
+        [sessionId]
+      )[0]?.n) || null;
     } catch { /* older stores without step tokens: null */ }
-    return { turns: all, total, hasMore: offset + limit < total, tokensTotal };
+    return { turns: all, total, hasMore: offset + limit < total, tokensTotal, contextTokens };
   }
 
   // Is a turn currently running in this session from ANY writer (desktop,

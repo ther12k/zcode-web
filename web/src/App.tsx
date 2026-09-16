@@ -608,16 +608,27 @@ export function App() {
                   {prefs.pinnedSessions.map((id) => {
                     // ZWUI-067: pinned stays reachable even when it fell out
                     // of the latest-50 window — title/directory resolve on
-                    // demand (see the pinned-titles effect above)
+                    // demand (see the pinned-titles effect above). The row is
+                    // filtered out of the main list while pinned, so the ONLY
+                    // unpin affordance must live right here.
                     const row = recent.find((r) => r.id === id);
                     const title = row?.title ?? sessionTitles[id] ?? id;
                     const directory = row?.directory ?? pinnedDirs[id] ?? "";
                     return (
-                      <button key={id} className={`pinned-row ${id === activeSessionId ? "active" : ""}`} onClick={() => selectSession(id, directory || undefined)} title={title}>
-                        <span className={`task-dot ${id === activeSessionId ? "current" : ""}`} />
-                        <span>{prefs.displayAliases[id] || title}</span>
-                        <span className="pinned-kind">{directory.split("/").filter(Boolean).pop() || "…"}</span>
-                      </button>
+                      <div key={id} className={`pinned-row ${id === activeSessionId ? "active" : ""}`}>
+                        <button className="pinned-row-link" onClick={() => selectSession(id, directory || undefined)} title={title}>
+                          <span className={`task-dot ${id === activeSessionId ? "current" : ""}`} />
+                          <span>{prefs.displayAliases[id] || title}</span>
+                          <span className="pinned-kind">{directory.split("/").filter(Boolean).pop() || "…"}</span>
+                        </button>
+                        <IconButton
+                          label={`Unpin ${prefs.displayAliases[id] || title}`}
+                          className="pinned-unpin"
+                          onClick={() => updatePrefs({ pinnedSessions: prefs.pinnedSessions.filter((x) => x !== id) })}
+                        >
+                          <PinOff size={12} />
+                        </IconButton>
+                      </div>
                     );
                   })}
                 </div>

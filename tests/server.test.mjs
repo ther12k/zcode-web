@@ -640,7 +640,7 @@ describe("SessionStore turn durations + runActive", async () => {
     insMsg.run("mu2", "sess_du", JSON.stringify({ role: "user", time: { created: 6000 } }), 3);
     insPart.run("mu2_p", "mu2", "sess_du", JSON.stringify({ type: "text", text: "again" }), 0);
     insMsg.run("ma3", "sess_du", JSON.stringify({ role: "assistant", time: { created: 7000, completed: 12391 }, error: { data: { message: "[1308][Usage limit reached]" } } }), 4);
-    insPart.run("ma3_f", "ma3", "sess_du", JSON.stringify({ type: "step-finish", tokens: { total: 0 } }), 0);
+    insPart.run("ma3_f", "ma3", "sess_du", JSON.stringify({ type: "step-finish", tokens: { total: 44 } }), 0);
     db.prepare("INSERT INTO turn_usage (session_id, turn_id, user_message_id, status, started_at, completed_at, duration_ms) VALUES (?,?,?,?,?,?,?)")
       .run("sess_du", "t1", "mu", "completed", 1000, 5500, 4500);
     db.prepare("INSERT INTO turn_usage (session_id, turn_id, user_message_id, status, started_at, completed_at, duration_ms) VALUES (?,?,?,?,?,?,?)")
@@ -653,6 +653,10 @@ describe("SessionStore turn durations + runActive", async () => {
     assert.equal(lastAssistant.durationMs, 4500, "turn_usage duration attaches to the exchange's last assistant turn");
     const firstAssistant = page.turns.find((t) => t.role === "assistant" && (t.tools || []).length);
     assert.ok(!firstAssistant.durationMs, "mid-exchange assistant turns carry no footer duration");
+    // ZWUI-067: contextTokens is the LATEST step-finish total (each step
+    // re-feeds the context) — the chip's "current context", not the sum
+    assert.equal(page.contextTokens, 44, "latest step-finish total wins over the sum");
+    assert.equal(page.tokensTotal, 1544, "tokensTotal remains the all-steps sum");
     const failed = page.turns.find((t) => t.error);
     assert.ok(failed, "failed turn present");
     assert.equal(failed.text, "", "failed turn renders no inline text");

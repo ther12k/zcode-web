@@ -168,6 +168,7 @@ export function ChatPanel({
   const applySessionPage = useCallback((d: SessionDetail) => {
     setHistory({ turns: d.transcript, total: d.total, hasMore: d.hasMore });
     setSessionTokensTotal(d.tokensTotal ?? null);
+    setContextTokens(d.contextTokens ?? null);
     setExternalActive(!!d.runActive);
     setExternalStartedAt(d.runStartedAt ?? null);
     if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory });
@@ -195,6 +196,7 @@ export function ChatPanel({
     setExternalActive(!!d.runActive);
     setExternalStartedAt(d.runStartedAt ?? null);
     if (d.tokensTotal != null) setSessionTokensTotal(d.tokensTotal);
+    if (d.contextTokens != null) setContextTokens(d.contextTokens);
     if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory });
   }, [onSessionMeta]);
   // initial load — full replace only when the session (or an explicit
@@ -709,10 +711,19 @@ export function ChatPanel({
   // session-wide token count for the context-bar chip: the server's
   // pagination-independent total when available, else the loaded turns
   const [sessionTokensTotal, setSessionTokensTotal] = useState<number | null>(null);
-  const sessionTokens = useMemo(
-    () => (sessionTokensTotal ?? history.turns.reduce((a, t) => a + (t.tokens || 0), 0)) + (liveTokens && !isTerminal(run.phase) ? liveTokens : 0),
-    [sessionTokensTotal, history.turns, liveTokens, run.phase]
-  );
+  // ZWUI-067 (live QA): step-finish tokens.total is per-STEP usage (each call
+  // re-feeds the context), so the sum across a long session is a billing
+  // figure, not a size. The chip shows the CURRENT CONTEXT — freshest
+  // source first: the live stream's turn.completed usage, then the last
+  // loaded turn's step total, then the server's store-level latest. The
+  // cumulative figure stays in the token audit dialog, labeled honestly.
+  const [contextTokens, setContextTokens] = useState<number | null>(null);
+  const contextNow = useMemo(() => {
+    if (liveTokens && !isTerminal(run.phase)) return liveTokens;
+    const lastWithTokens = [...history.turns].reverse().find((t) => (t.tokens || 0) > 0);
+    return lastWithTokens?.tokens ?? contextTokens ?? null;
+  }, [liveTokens, run.phase, history.turns, contextTokens]);
+  const sessionTokens = contextNow;
 
   // ZWUI-046: Bash evidence keyed by TOOL-CALL IDENTITY (callID) — repeated
   // commands stay distinct entries, object inputs are never stringified into
@@ -858,10 +869,12 @@ export function ChatPanel({
           <span>{busy ? `Agent active · ${(models.find((m) => m.ref === model)?.model || "GLM").split("/").pop()?.toUpperCase()}` : "Idle"}</span>
         </span>
         {/* the single usage entry point — REF2-06 keeps detailed numbers here,
-            not repeated across composer and messages */}
-        <button className="details-toggle token-chip" onClick={() => setTokenDialog(true)} title="Token telemetry — totals cover every message of this session">
+            not repeated across composer and messages. Shows the CURRENT
+            CONTEXT (what the next call re-feeds), matching the desktop; the
+            cumulative all-steps figure lives in the audit dialog */}
+        <button className="details-toggle token-chip" onClick={() => setTokenDialog(true)} title="Current context size — open the token audit for cumulative usage">
           <Coins size={12} />
-          <span>{sessionTokens ? `${sessionTokens >= 10_000 ? `${Math.round(sessionTokens / 1000)}k` : sessionTokens.toLocaleString()} tokens` : "Tokens"}</span>
+          <span>{sessionTokens != null ? `${sessionTokens >= 10_000 ? `${Math.round(sessionTokens / 1000)}k` : sessionTokens.toLocaleString()} context` : "Context"}</span>
         </button>
         <div className="composer-menu-wrap context-menu-wrap">
           <button
@@ -1397,6 +1410,7 @@ export function ChatPanel({
             turns={history.turns}
             totalTurns={history.total}
             sessionTotal={sessionTokensTotal}
+            contextTokens={contextNow}
             liveTokens={liveTokens && !isTerminal(run.phase) ? liveTokens : null}
             onClose={() => setTokenDialog(false)}
           />
