@@ -680,6 +680,35 @@ test("analytics dialog shows honest aggregates from /api/analytics", async ({ pa
 
 // ---- ZWUI-040/041/042: run-identity correctness ----
 
+test("ZWUI-074: Enter queues a follow-up while the current turn runs", async ({ page }) => {
+  const input = page.getByLabel("Message Zcode");
+  await input.fill("pause before finishing first");
+  await input.press("Enter");
+  await expect(page.getByLabel("Stop run")).toBeVisible({ timeout: 8000 });
+
+  await input.fill("queued follow-up");
+  await input.press("Enter");
+  await expect(page.locator(".queued-prompts")).toContainText("1 queued follow-up", { timeout: 3000 });
+  await expect(page.locator(".agent-message")).toContainText("echo:pause before finishing first", { timeout: 20_000 });
+  // The queue flushes only after the first authoritative success, then the
+  // second prompt runs through the ordinary job/stream path.
+  await expect(page.locator(".agent-message")).toContainText("echo:queued follow-up", { timeout: 20_000 });
+  await expect(page.locator(".queued-prompts")).toHaveCount(0);
+});
+
+test("ZWUI-074: Escape interrupts the active turn without clicking Stop", async ({ page }) => {
+  const input = page.getByLabel("Message Zcode");
+  await input.fill("wait a while before finishing");
+  await input.press("Enter");
+  await expect(page.getByLabel("Stop run")).toBeVisible({ timeout: 8000 });
+  const cancelResponse = page.waitForResponse(
+    (r) => /\/api\/jobs\/[0-9a-f-]+\/cancel$/.test(r.url()) && r.request().method() === "POST"
+  );
+  await page.keyboard.press("Escape");
+  await expect((await cancelResponse).status()).toBe(200);
+  await expect(page.getByLabel("Send message")).toBeVisible({ timeout: 15_000 });
+});
+
 test("ZWUI-040: Stop shows cancelled in the browser AND /api/jobs agrees", async ({ page }) => {
   const input = page.getByLabel("Message Zcode");
   const chatRespPromise = page.waitForResponse(

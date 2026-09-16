@@ -38,6 +38,8 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
     { label: "Send your message", keys: ["↵"] },
     { label: "A new line in your message", keys: ["Shift", "↵"] },
     { label: "Browse slash commands", keys: ["/"] },
+    { label: "Queue a follow-up while working", keys: ["↵"] },
+    { label: "Interrupt the running turn", keys: ["Esc"] },
     { label: "Close a dialog", keys: ["Esc"] },
   ];
   return (

@@ -5,12 +5,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, lazy, Suspense } from "react";
 import { ArrowLeftRight, ArrowUp, ArrowUpRight, BadgeCheck, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Coins, Copy, Eye, EyeOff, FileText, FoldVertical, FolderClosed, GitBranch, LoaderCircle, MessageSquare, MoreHorizontal, Plus, RotateCcw, ShieldCheck, SlidersHorizontal, Sparkles, Square, SquarePen, SquareTerminal, Terminal, Unplug, Wrench, X, Zap } from "lucide-react";
-import { ZLogo, IconButton, Markdown, CheckMark, useDialogA11y, relativeTime } from "../ui";
+import { ZLogo, IconButton, Markdown, CheckMark, useDialogA11y, overlayOpen, relativeTime } from "../ui";
 import { randomUUID } from "../lib/uuid";
 import { ApiError, type ApiClient, type CommandInfo, type FileCard, type ModelInfo, type SessionDetail, type TimelineEvent, type TranscriptTurn } from "../api/client";
 import { isTerminal } from "../state/run";
 import * as runs from "../state/runManager";
-import { snapshotSubmission, mayClearDraft, type Submission } from "../lib/submission";
+import { snapshotSubmission, mayClearDraft, dequeueAfterSuccess, type Submission } from "../lib/submission";
 import { scanIssueRefs, issueKey, parseIssueKey, type IssueIdentity, type ScannedIssueRef } from "../lib/issueRefs";
 import { loadDraft, saveDraft, loadPrefs, savePrefs } from "../state/prefs";
 import type { TerminalEntry } from "./Telemetry";
@@ -131,6 +131,10 @@ export function ChatPanel({
   }, [exactTimes]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [uploading, setUploading] = useState(0);
+  // Desktop keeps follow-up prompts in a small client-side queue while the
+  // current turn owns the session. They are immutable snapshots, so edits to
+  // the next draft cannot mutate work that will be sent later.
+  const [queuedSubmissions, setQueuedSubmissions] = useState<Submission[]>([]);
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [history, setHistory] = useState<{ turns: TranscriptTurn[]; total: number; hasMore: boolean }>({ turns: [], total: 0, hasMore: false });
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -367,7 +371,8 @@ export function ChatPanel({
     history.turns.some((t) => t.role === "user" && t.text === run.submittedText && (t.createdAt || 0) >= run.submittedAt - 2000)
   );
   // busy either because a run is attached here or because the desktop/CLI is
-  // mid-turn on this session — both mean "can't send yet"
+  // mid-turn on this session. The composer remains editable while busy: Enter
+  // adds an immutable follow-up to the desktop-style client queue.
   const busy = localBusy || externalActive;
   const localBusyRef = useRef(false);
   useEffect(() => { localBusyRef.current = localBusy; }, [localBusy]);
@@ -591,6 +596,33 @@ export function ChatPanel({
   }, [run.jobId, cwd, runKey]);
   stopRunRef.current = stopRun;
 
+  useEffect(() => {
+    const interrupt = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || !busy || overlayOpen() || menu || turnMenu || cmdQuery != null) return;
+      e.preventDefault();
+      stopRunRef.current?.();
+    };
+    window.addEventListener("keydown", interrupt);
+    return () => window.removeEventListener("keydown", interrupt);
+  }, [busy, menu, turnMenu, cmdQuery]);
+
+  const queueCurrentDraft = useCallback(() => {
+    const text = input.trim();
+    if ((!text && !attachments.length) || uploading > 0 || !providerLive) return false;
+    const sub = snapshotSubmission({
+      draftKey, revision: draftRevRef.current,
+      projectKey: cwd, cwd, sessionId,
+      text, model: model || "", mode,
+      attachments: attachments.map((a) => ({ uploadRef: a.path, name: a.name })),
+    }, randomUUID());
+    setQueuedSubmissions((q) => [...q, sub]);
+    setInput("");
+    setAttachments([]);
+    touchDraft();
+    saveDraft(draftKey, "");
+    return true;
+  }, [input, attachments, uploading, providerLive, draftKey, cwd, sessionId, model, mode, touchDraft]);
+
   // ZWUI-050: the manager owns the POST, the stream and the poll; this panel
   // only supplies view concerns. Submissions are immutable snapshots built
   // from the composer AT CALL TIME (ZWUI-041) — retries/reruns never re-read
@@ -610,20 +642,41 @@ export function ChatPanel({
     });
   }, [cwd, client, draftKey, touchDraft, onSessionCreated]);
 
-  const guard = busy || uploading > 0 || !providerLive;
+  const submitQueued = useCallback((sub: Submission) => {
+    submitWith(sub, { clearDraft: false, submitView: runKey });
+  }, [submitWith, runKey]);
 
-  // composer send: the submitted record IS the draft
+  // Once this turn reaches a terminal state, send exactly one queued item.
+  // Failed/cancelled turns retain the queue so the user can retry deliberately.
+  // External desktop/CLI turns have no local phase, so their busy transition is
+  // part of the same flush signal.
+  const previousBusy = useRef(busy);
+  useEffect(() => {
+    const wasBusy = previousBusy.current;
+    previousBusy.current = busy;
+    if (!wasBusy || busy || !queuedSubmissions.length) return;
+    const picked = dequeueAfterSuccess(queuedSubmissions, run.phase === "idle" ? "succeeded" : run.phase);
+    if (!picked.next) return;
+    setQueuedSubmissions([...picked.rest]);
+    queueMicrotask(() => submitQueued(picked.next!));
+  }, [busy, run.phase, queuedSubmissions.length, submitQueued]);
+
+  const guard = uploading > 0 || !providerLive;
+
+  // composer send: the submitted record IS the draft, or a queued follow-up
+  // when the current turn still owns the session.
   const send = useCallback(() => {
-    if (guard) return;
     const text = input.trim();
     if (!text && !attachments.length) return;
+    if (busy) { queueCurrentDraft(); return; }
+    if (guard) return;
     submitWith(snapshotSubmission({
       draftKey, revision: draftRevRef.current,
       projectKey: cwd, cwd, sessionId,
       text, model: model || "", mode,
       attachments: attachments.map((a) => ({ uploadRef: a.path, name: a.name })),
     }, randomUUID()), { clearDraft: true, submitView: runKey });
-  }, [guard, input, attachments, draftKey, cwd, sessionId, mode, model, runKey, submitWith]);
+  }, [guard, busy, queueCurrentDraft, input, attachments, draftKey, cwd, sessionId, mode, model, runKey, submitWith]);
 
   // ambiguous delivery: the POST threw, so the server may have already
   // accepted the request. Reuse the SAME request id and exact payload — the
@@ -1267,6 +1320,17 @@ export function ChatPanel({
           </div>
         )}
         <div className={`composer ${busy ? "composer-working" : ""}`}>
+          {queuedSubmissions.length > 0 && (
+            <div className="queued-prompts" aria-live="polite">
+              <span className="queued-prompts-label"><Clock3 size={12} />{queuedSubmissions.length} queued follow-up{queuedSubmissions.length === 1 ? "" : "s"}</span>
+              <button
+                className="queued-clear"
+                type="button"
+                onClick={() => setQueuedSubmissions([])}
+                title="Clear queued follow-ups"
+              >Clear</button>
+            </div>
+          )}
           {attachments.length > 0 && (
             <div className="attached-files">
               {attachments.map((a) => (
@@ -1306,7 +1370,8 @@ export function ChatPanel({
                 if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); pickCommand(cmdMatches[cmdIndex] || cmdMatches[0]); return; }
                 if (e.key === "Escape") { e.preventDefault(); setCmdDismissed(true); return; }
               }
-              // Shift+Tab stays native (reverse focus navigation); IME-safe Enter
+              // Shift+Tab stays native (reverse focus navigation); IME-safe Enter.
+              // While busy this is a queue action, not a disabled composer.
               if (e.key === "Enter" && !e.shiftKey && !(e.nativeEvent as KeyboardEvent).isComposing) { e.preventDefault(); send(); }
             }}
           />
@@ -1366,20 +1431,28 @@ export function ChatPanel({
               {/* ONE morphing primary action, like the desktop: Send when
                   idle; once the job is accepted it becomes Stop (a spinner
                   alone only while the POST is still in flight) */}
+              {busy && run.jobId && (input.trim() || attachments.length > 0) && (
+                <button className="composer-stop-button" type="button" aria-label="Stop run" title="Stop run (Escape)" onClick={stopRun}>
+                  <Square size={13} />
+                </button>
+              )}
               <button
-                className={`send-button ${busy && run.jobId ? "stop" : ""}`}
+                className={`send-button ${busy && run.jobId && !input.trim() && !attachments.length ? "stop" : ""}`}
                 disabled={busy
-                  ? !run.jobId // accepted → stoppable; submitting → wait
+                  ? !run.jobId && (!input.trim() && !attachments.length) // submitting: queue once text exists
                   : uploading > 0 || !providerLive || (!input.trim() && !attachments.length)}
-                aria-label={busy && run.jobId ? "Stop run" : "Send message"}
-                title={busy && run.jobId ? "Stop run"
+                aria-label={busy && run.jobId && !input.trim() && !attachments.length ? "Stop run" : busy ? "Queue message" : "Send message"}
+                title={busy && run.jobId && !input.trim() && !attachments.length ? "Stop run (Escape)"
+                  : busy ? "Queue follow-up (Enter)"
                   : !providerLive ? "No model provider is configured on this host"
                   : "Send message (Enter)"}
-                onClick={() => (busy && run.jobId ? stopRun() : send())}
+                onClick={() => (busy && run.jobId && !input.trim() && !attachments.length ? stopRun() : send())}
               >
-                {busy
-                  ? run.jobId ? <Square size={15} /> : <LoaderCircle size={16} className="spin" />
-                  : <ArrowUp size={17} strokeWidth={2.2} />}
+                {busy && run.jobId && !input.trim() && !attachments.length
+                  ? <Square size={15} />
+                  : busy && !run.jobId
+                    ? <LoaderCircle size={16} className="spin" />
+                    : <ArrowUp size={17} strokeWidth={2.2} />}
               </button>
             </div>
           </div>

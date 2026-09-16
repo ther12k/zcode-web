@@ -100,6 +100,10 @@ const timer = (ms) => new Promise((r) => setTimeout(r, ms));
   // SIGTERM (node's default disposition ends it) → close(null, SIGTERM)
   if (/\bwait a while\b/i.test(prompt)) {
     await timer(30_000);
+  } else if (/\bpause before finishing\b/i.test(prompt)) {
+    // deterministic enough for browser tests to type a follow-up and verify
+    // that it is queued rather than rejected while this turn is active
+    await timer(1_200);
   }
   if (mode === "fail") {
     emit("session.updated", { type: "model_request_failed" });

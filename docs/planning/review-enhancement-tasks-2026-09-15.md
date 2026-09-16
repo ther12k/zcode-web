@@ -28,6 +28,7 @@ Most of this plan has since been implemented in the working tree (uncommitted). 
 | ZWUI-071 | Done — README route table + auth exceptions, api-contracts rewrite, web/README replaced |
 | ZWUI-072 | 072a–c done (alias lifecycle, StringDecoder, process-group kill, upload names, attachment cap); 072d done — snapshot ids are content hashes (same-size edits no longer serve stale previews, identical rebuilds reuse the snapshot), active-content stripping extended (unclosed script tags, unquoted handlers, srcdoc, `javascript:` URLs) with `sandbox` CSP asserted; preview remains disabled by default |
 | ZWUI-073 | Done — smoke sends once (asserts exactly one committed user turn); JS budget measures gzipped response bodies and fails on zero observations |
+| ZWUI-074 | Done — desktop-parity composer queue accepts Enter while a turn is active, flushes one immutable follow-up after success, retains queued work after cancellation/failure, and Escape interrupts the active run without closing shell state; browser coverage added |
 
 Sections 1–9 below are the original review, kept for the reasoning and the still-open acceptance criteria.
 

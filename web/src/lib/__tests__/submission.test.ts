@@ -1,6 +1,6 @@
 // REF2-01: contracts for honest metrics, run ownership and draft protection.
 import { describe, it, expect } from "vitest";
-import { metricLabel, sameOwner, snapshotSubmission, mayClearDraft, type DraftInput } from "../submission";
+import { metricLabel, sameOwner, snapshotSubmission, mayClearDraft, dequeueAfterSuccess, type DraftInput } from "../submission";
 
 const draft = (): DraftInput => ({
   draftKey: "instance/project/session", revision: 4,
@@ -59,5 +59,12 @@ describe("submission snapshots", () => {
     expect(mayClearDraft({ draftKey: accepted.draftKey, revision: 5 }, accepted)).toBe(false);
     // or switched conversations mid-flight
     expect(mayClearDraft({ draftKey: "instance/other/session", revision: 4 }, accepted)).toBe(false);
+  });
+
+  it("dequeues only after a successful turn and preserves failures", () => {
+    expect(dequeueAfterSuccess(["a", "b"], "running")).toEqual({ next: null, rest: ["a", "b"] });
+    expect(dequeueAfterSuccess(["a", "b"], "cancelled")).toEqual({ next: null, rest: ["a", "b"] });
+    expect(dequeueAfterSuccess(["a", "b"], "succeeded")).toEqual({ next: "a", rest: ["b"] });
+    expect(dequeueAfterSuccess([], "succeeded")).toEqual({ next: null, rest: [] });
   });
 });

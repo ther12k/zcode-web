@@ -70,3 +70,13 @@ export function snapshotSubmission(input: DraftInput, requestId: string): Submis
 export function mayClearDraft(current: Pick<DraftInput, "draftKey" | "revision">, accepted: Submission): boolean {
   return current.draftKey === accepted.draftKey && current.revision === accepted.revision;
 }
+
+/**
+ * Choose the next queued prompt only after a successful turn. A terminal
+ * failure/cancellation leaves the queue intact so the user can retry instead
+ * of silently losing follow-up work.
+ */
+export function dequeueAfterSuccess<T>(queue: readonly T[], phase: string): { next: T | null; rest: readonly T[] } {
+  if (phase !== "succeeded" || queue.length === 0) return { next: null, rest: queue };
+  return { next: queue[0] ?? null, rest: queue.slice(1) };
+}
