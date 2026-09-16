@@ -169,6 +169,21 @@ export function ChatPanel({
   const [externalStartedAt, setExternalStartedAt] = useState<number | null>(null);
   const externalActiveRef = useRef(false);
   useEffect(() => { externalActiveRef.current = externalActive; }, [externalActive]);
+  // ZWUI-075: server-reported in-flight job for this session. The loaders
+  // only RECORD it (they must stay identity-stable — the initial history load
+  // depends on applySessionPage and must not re-run on every run phase
+  // change); the adoption itself runs in a dedicated effect below.
+  const pendingAdoptionRef = useRef<{ jobId: string; sessionId: string } | null>(null);
+  const [adoptTick, setAdoptTick] = useState(0);
+  const considerAdoption = useCallback((d: SessionDetail) => {
+    // record the server-reported job — and CLEAR a stale record when the
+    // server no longer reports one: a finished follow-up must never be
+    // hijacked back onto the previous (dead) job id
+    const next = d.activeJobId && d.session?.id ? { jobId: d.activeJobId, sessionId: d.session.id } : null;
+    if (next?.jobId === pendingAdoptionRef.current?.jobId) return;
+    pendingAdoptionRef.current = next;
+    if (next) setAdoptTick((t) => t + 1);
+  }, []);
   const applySessionPage = useCallback((d: SessionDetail) => {
     setHistory({ turns: d.transcript, total: d.total, hasMore: d.hasMore });
     setSessionTokensTotal(d.tokensTotal ?? null);
@@ -176,12 +191,8 @@ export function ChatPanel({
     setExternalActive(!!d.runActive);
     setExternalStartedAt(d.runStartedAt ?? null);
     if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory });
-    // ZWUI-075: if the server reports an active job spawned by its own process,
-    // adopt the live stream directly so a reload doesn't degrade to poll-only
-    if (d.activeJobId && d.session?.id && (!run.jobId || isTerminal(run.phase))) {
-      runs.adoptRunningJob(`${cwd}::${d.session.id}`, d.activeJobId, d.session.id, client);
-    }
-  }, [onSessionMeta, run.jobId, run.phase, cwd, client]);
+    considerAdoption(d);
+  }, [onSessionMeta, considerAdoption]);
   // incremental refresh: match turns by message id — known turns update in
   // place (streaming text grows), new ones append. Older pages the reader
   // paged in are preserved; no loader flash, no scroll jump.
@@ -207,10 +218,8 @@ export function ChatPanel({
     if (d.tokensTotal != null) setSessionTokensTotal(d.tokensTotal);
     if (d.contextTokens != null) setContextTokens(d.contextTokens);
     if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory });
-    if (d.activeJobId && d.session?.id && (!run.jobId || isTerminal(run.phase))) {
-      runs.adoptRunningJob(`${cwd}::${d.session.id}`, d.activeJobId, d.session.id, client);
-    }
-  }, [onSessionMeta, run.jobId, run.phase, cwd, client]);
+    considerAdoption(d);
+  }, [onSessionMeta, considerAdoption]);
   // initial load — full replace only when the session (or an explicit
   // re-select reload) changes
   useEffect(() => {
@@ -229,6 +238,22 @@ export function ChatPanel({
       .finally(() => { if (alive) setHistoryLoading(false); });
     return () => { alive = false; };
   }, [sessionId, client, onNotify, reloadKey, applySessionPage]);
+  // a session switch invalidates any recorded adoption — it belonged to the
+  // previous conversation and must never attach a stream to another one
+  useEffect(() => { pendingAdoptionRef.current = null; }, [sessionId]);
+  // ZWUI-075: adopt the server-reported in-flight job once this view has no
+  // live locally-known run for the session (fresh reload, or the previous
+  // local job already reached a terminal state). adoptRunningJob itself is
+  // idempotent for a job this conversation already owns.
+  useEffect(() => {
+    const pending = pendingAdoptionRef.current;
+    if (!pending) return;
+    // a local submission supersedes any recorded adoption — the POST that is
+    // in flight will attach its own job; adopting here would race it
+    if (run.phase === "submitting") { pendingAdoptionRef.current = null; return; }
+    if (run.phase !== "idle" && !isTerminal(run.phase)) return;
+    runs.adoptRunningJob(`${cwd}::${pending.sessionId}`, pending.jobId, pending.sessionId, client);
+  }, [adoptTick, run.jobId, run.phase, cwd, client]);
   // visibility refresh merges instead of reloading — coming back to the tab
   // must not clear the view or drop paged-in history
   useEffect(() => {

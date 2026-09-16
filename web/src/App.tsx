@@ -435,6 +435,13 @@ export function App() {
   // conversations (background runs included), not "the open one"
   const runningCount = useSyncExternalStore(subscribeRuns, activeRunCount, () => 0);
 
+  // Desktop parity for background work: the app badge/dock icon shows agent
+  // activity; a browser tab only has its title. Prefix it while any run is
+  // live so a user in another tab knows the agent is (still) working.
+  useEffect(() => {
+    document.title = runningCount > 0 ? `● ${runningCount} running — zcode` : "zcode";
+  }, [runningCount]);
+
   // Chrome occasionally rasterizes the sidebar session rows as a BLANK list
   // on first paint (rows are in the DOM and laid out, but painted empty until
   // the first scroll). A zero-translate nudge forces the re-raster without

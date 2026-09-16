@@ -322,17 +322,21 @@ export function releaseView(key: RunKey) {
  */
 export function adoptRunningJob(key: RunKey, jobId: string, sessionId: string, client: ApiClient) {
   const e = entry(key);
-  // already attached to this job
-  if (e.run.jobId === jobId && e.controller && !isTerminal(e.run.phase)) return;
+  // this conversation already owns this job — attached or finished, adoption
+  // is done (re-attaching a terminal job would only replay a dead stream)
+  if (e.run.jobId === jobId) return;
+  // a submission POST is in flight for this conversation — it will attach its
+  // own job; adopting now would race it and poison the replay cursor
+  if (e.run.phase === "submitting") return;
   // another active job is locally known — do not clobber it
-  if (e.run.jobId && e.run.jobId !== jobId && !isTerminal(e.run.phase)) return;
+  if (e.run.jobId && !isTerminal(e.run.phase)) return;
 
   e.client = client;
-  // A terminal or stale local entry may refer to an earlier job for this
-  // session. Reset its reducer identity before adopting the server's live job;
-  // otherwise events for the new job are rejected by the reducer's job-id
-  // guard and the reloaded view stays idle forever.
-  if (e.run.jobId && e.run.jobId !== jobId) dispatch(key, e, { type: "reset" });
-  if (e.run.jobId !== jobId) dispatch(key, e, { type: "accepted", jobId, sessionId });
+  // A terminal local entry refers to an EARLIER job for this session. Reset
+  // its reducer identity before adopting the server's live job; otherwise
+  // events for the new job are rejected by the reducer's job-id guard and
+  // the reloaded view stays idle forever.
+  if (e.run.jobId) dispatch(key, e, { type: "reset" });
+  dispatch(key, e, { type: "accepted", jobId, sessionId });
   startTransport(key, e, jobId);
 }

@@ -30,6 +30,7 @@ Most of this plan has since been implemented in the working tree (uncommitted). 
 | ZWUI-073 | Done — smoke sends once (asserts exactly one committed user turn); JS budget measures gzipped response bodies and fails on zero observations |
 | ZWUI-074 | Done — desktop-parity composer queue accepts Enter while a turn is active, flushes one immutable follow-up after success, retains queued work after cancellation/failure, and Escape interrupts the active run without closing shell state; browser coverage added |
 | ZWUI-075 | Done — reload-safe active-run continuity: the server exposes an in-flight job id (including the short pre-persistence session window), the client reattaches to SSE without resubmitting, and queued follow-ups show text previews with individual removal; browser and unit coverage added |
+| ZWUI-076 | Done — post-075 review fixes and polish: session loaders are identity-stable again (a locally attached run no longer refetches/flashes the transcript on phase changes), adoption records clear when the server stops reporting a job and never race an in-flight submission (which previously poisoned the replay cursor and rendered the previous job's output), and document.title shows a live "● N running" background-tab signal; unit + browser coverage added |
 
 Sections 1–9 below are the original review, kept for the reasoning and the still-open acceptance criteria.
 

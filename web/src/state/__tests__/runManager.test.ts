@@ -152,4 +152,25 @@ describe("run manager", () => {
     client.job.mockResolvedValue({ status: "succeeded" as const, jobId: "jAdopt" } as JobStatus);
     await vi.waitFor(() => expect(getRun("sess_adopt").phase).toBe("succeeded"));
   });
+
+  it("adoptRunningJob is idempotent for an owned job and replaces a stale terminal identity (ZWUI-075)", async () => {
+    const client = fakeClient();
+    // an earlier job finished in this conversation
+    client.chat.mockResolvedValue({ jobId: "jOld", sessionId: "sess_re" });
+    client.job.mockResolvedValue({ status: "succeeded" as const, jobId: "jOld" } as JobStatus);
+    await submitRun("sess_re", submission({ requestId: "req-old", sessionId: "sess_re" }), client as unknown as ApiClient);
+    await vi.waitFor(() => expect(getRun("sess_re").phase).toBe("succeeded"));
+
+    // the server now runs a NEW job for the same session — adoption must
+    // reset the stale identity and attach to the live one
+    client.job.mockResolvedValue({ status: "running" as const, jobId: "jNew" } as JobStatus);
+    adoptRunningJob("sess_re", "jNew", "sess_re", client as unknown as ApiClient);
+    expect(getRun("sess_re").jobId).toBe("jNew");
+    await vi.waitFor(() => expect(getRun("sess_re").phase).toBe("running"));
+    // re-adoption of the same job is a no-op: no reset, no second transport
+    const before = getRun("sess_re");
+    adoptRunningJob("sess_re", "jNew", "sess_re", client as unknown as ApiClient);
+    expect(getRun("sess_re")).toBe(before);
+    expect(client.chat).toHaveBeenCalledTimes(1);
+  });
 });

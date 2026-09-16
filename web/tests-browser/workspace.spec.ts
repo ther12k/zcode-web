@@ -734,6 +734,38 @@ test("ZWUI-075: reload mid-run reattaches to the in-flight job stream", async ({
   await expect(page.locator(".message-duration")).toHaveText(/cancelled/, { timeout: 15_000 });
 });
 
+test("ZWUI-076: a follow-up on an existing session never re-fetches the transcript", async ({ page }) => {
+  const input = page.getByLabel("Message Zcode");
+  await input.fill("browser integration hello");
+  await input.press("Enter");
+  await expect(page).toHaveURL(/\/s\/sess_[A-Za-z0-9-]+/, { timeout: 10_000 });
+  await expect(page.locator(".agent-message")).toContainText("echo:browser integration hello", { timeout: 20_000 });
+  await expect(page.getByLabel("Send message")).toBeVisible({ timeout: 15_000 });
+
+  // the initial load fetched the transcript once; a locally attached run must
+  // not re-trigger it on phase changes (loader flash + wasted refetch)
+  const detailRequests: string[] = [];
+  page.on("request", (r) => { if (/\/api\/sessions\/sess_/.test(r.url())) detailRequests.push(r.url()); });
+  await input.fill("wait a while while history stays");
+  await input.press("Enter");
+  await expect(page.getByLabel("Stop run")).toBeVisible({ timeout: 8000 });
+  await page.waitForTimeout(2_500);
+  expect(detailRequests).toHaveLength(0);
+  await page.getByLabel("Stop run").click();
+  await expect(page.getByLabel("Send message")).toBeVisible({ timeout: 15_000 });
+});
+
+test("ZWUI-076: document.title reflects live runs (background-tab signal)", async ({ page }) => {
+  await expect(page).toHaveTitle("zcode");
+  const input = page.getByLabel("Message Zcode");
+  await input.fill("wait a while in another tab");
+  await input.press("Enter");
+  await expect(page.getByLabel("Stop run")).toBeVisible({ timeout: 8000 });
+  await expect(page).toHaveTitle(/1 running — zcode/);
+  await page.getByLabel("Stop run").click();
+  await expect(page).toHaveTitle("zcode", { timeout: 15_000 });
+});
+
 test("ZWUI-074: Escape interrupts the active turn without clicking Stop", async ({ page }) => {
   const input = page.getByLabel("Message Zcode");
   await input.fill("wait a while before finishing");
