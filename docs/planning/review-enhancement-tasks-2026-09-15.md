@@ -26,7 +26,7 @@ Most of this plan has since been implemented in the working tree (uncommitted). 
 | ZWUI-069 | Done (measured, modest) — Analytics/InfoDialogs/Telemetry load on demand: main chunk 552.19→537.11 KB raw (170.34→166.62 KB gzip), three on-demand chunks ≈19.2 KB raw. Further micro-splitting was judged not worth the complexity; the initial-load budget test still measures observed response bodies |
 | ZWUI-070 | Partial — Dockerfile.lugas installs deps in-image; labeled experimental; shared contract suite not run |
 | ZWUI-071 | Done — README route table + auth exceptions, api-contracts rewrite, web/README replaced |
-| ZWUI-072 | 072a–c done (alias lifecycle, StringDecoder, process-group kill, upload names, attachment cap); 072d preview isolation unchanged (preview stays disabled) |
+| ZWUI-072 | 072a–c done (alias lifecycle, StringDecoder, process-group kill, upload names, attachment cap); 072d done — snapshot ids are content hashes (same-size edits no longer serve stale previews, identical rebuilds reuse the snapshot), active-content stripping extended (unclosed script tags, unquoted handlers, srcdoc, `javascript:` URLs) with `sandbox` CSP asserted; preview remains disabled by default |
 | ZWUI-073 | Done — smoke sends once (asserts exactly one committed user turn); JS budget measures gzipped response bodies and fails on zero observations |
 
 Sections 1–9 below are the original review, kept for the reasoning and the still-open acceptance criteria.

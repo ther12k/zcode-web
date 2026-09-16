@@ -1292,6 +1292,89 @@ describe("ZWUI-051 GitHub issue reading", () => {
   });
 });
 
+// ---- ZWUI-072d: preview snapshots — content-hash identity, active-content
+// stripping, immutable reuse. Runs on its own instance with preview enabled
+// (the main deployment keeps it OFF). ----
+describe("ZWUI-072d preview snapshots", () => {
+  const PORT_PV = 3476;
+  const BASE_PV = `http://127.0.0.1:${PORT_PV}`;
+  const TOKEN_PV = "pv-test-token";
+  let pvServer;
+  let pvWs;
+
+  before(async () => {
+    pvWs = mkdtempSync(join(tmpdir(), "zc-pv-"));
+    const proj = join(pvWs, "proj");
+    mkdirSync(proj, { recursive: true });
+    writeFileSync(join(proj, "index.html"), "<h1>version one</h1><script>alert(1)</script><a href='javascript:alert(2)'>x</a><div onclick=\"go()\" onload=boot()>d</div><iframe srcdoc='<script>3</script>'></iframe>");
+    pvServer = spawn(process.execPath, [join(SERVER_ROOT, "server", "index.js")], {
+      env: {
+        ...process.env,
+        PORT: String(PORT_PV), HOST: "127.0.0.1",
+        ZCODE_WEB_TOKEN: TOKEN_PV,
+        ZCODE_CLI_ENTRY: join(SERVER_ROOT, "scripts", "fake-cli.mjs"),
+        ZCODE_WORKSPACE_ROOT: pvWs,
+        ZCODE_HOME: mkdtempSync(join(tmpdir(), "zc-pv-home-")),
+        ZCODE_ENABLE_PREVIEW: "1",
+        ZCODE_PREVIEW_ORIGIN: "http://127.0.0.1:9",
+      },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    pvServer.stderr.on("data", (c) => process.stderr.write(c));
+    await new Promise((resolve) => {
+      const t = setInterval(async () => {
+        try {
+          const r = await fetch(`${BASE_PV}/api/health`, { headers: { authorization: `Bearer ${TOKEN_PV}` } });
+          if (r.ok) { clearInterval(t); resolve(); }
+        } catch {}
+      }, 100);
+    });
+  });
+
+  after(async () => {
+    pvServer.kill("SIGTERM");
+    await new Promise((res) => pvServer.once("exit", res));
+  });
+
+  const pvAuth = { authorization: `Bearer ${TOKEN_PV}`, "content-type": "application/json" };
+
+  it("strips active content from the snapshot", async () => {
+    const b = await (await fetch(`${BASE_PV}/api/preview/build`, { method: "POST", headers: pvAuth, body: JSON.stringify({ cwd: join(pvWs, "proj") }) })).json();
+    assert.match(b.snapshotId, /^[0-9a-f]{16}$/);
+    const page = await fetch(`${BASE_PV}/api/preview/${b.snapshotId}/index.html`, { headers: { authorization: `Bearer ${TOKEN_PV}` } });
+    assert.equal(page.status, 200);
+    assert.equal(page.headers.get("content-security-policy"), "sandbox", "sandbox CSP rides on snapshot assets");
+    const html = await page.text();
+    assert.ok(!/<script/i.test(html), "no script tags survive");
+    assert.ok(!/onclick|onload/i.test(html), "no inline handlers survive (quoted, unquoted, single/double)");
+    assert.ok(!/srcdoc/i.test(html), "srcdoc iframes are dropped");
+    assert.ok(!/javascript:/i.test(html), "javascript: URLs are neutralized");
+    assert.ok(html.includes("version one"), "the inert markup survives");
+  });
+
+  it("same-size content edits change the snapshot id; identical rebuilds reuse it", async () => {
+    const proj = join(pvWs, "proj");
+    const ORIGINAL = "<h1>version one</h1><script>alert(1)</script><a href='javascript:alert(2)'>x</a><div onclick=\"go()\" onload=boot()>d</div><iframe srcdoc='<script>3</script>'></iframe>";
+    const build = () => fetch(`${BASE_PV}/api/preview/build`, { method: "POST", headers: pvAuth, body: JSON.stringify({ cwd: proj }) }).then((r) => r.json());
+    writeFileSync(join(proj, "index.html"), ORIGINAL);
+    const first = await build();
+    // SAME byte length, different content — the old cwd:bytes:count id
+    // collides here and serves stale output
+    writeFileSync(join(proj, "index.html"), "<h1>version two</h1>");
+    const second = await build();
+    assert.notEqual(second.snapshotId, first.snapshotId, "content change must change the id");
+    const two = await (await fetch(`${BASE_PV}/api/preview/${second.snapshotId}/index.html`, { headers: { authorization: `Bearer ${TOKEN_PV}` } })).text();
+    assert.ok(two.includes("version two") && !two.includes("version one"), "the new id serves the new content");
+    // the old snapshot is untouched (immutable history)
+    const one = await (await fetch(`${BASE_PV}/api/preview/${first.snapshotId}/index.html`, { headers: { authorization: `Bearer ${TOKEN_PV}` } })).text();
+    assert.ok(one.includes("version one"), "old snapshot keeps serving its own content");
+    // rebuilding IDENTICAL content (byte-for-byte) reuses the snapshot
+    writeFileSync(join(proj, "index.html"), ORIGINAL);
+    const third = await build();
+    assert.equal(third.snapshotId, first.snapshotId, "identical content maps to the original id");
+  });
+});
+
 // ---- ZWUI-059: content search indexes real text and never throws on the
 // SQLite bind path; a missing source DB is an empty index, not a crash ----
 describe("ZWUI-059 ContentSearchIndex", async () => {

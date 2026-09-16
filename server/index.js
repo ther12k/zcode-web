@@ -414,6 +414,21 @@ function previewEnabled() {
   return process.env.ZCODE_ENABLE_PREVIEW === "1" && Boolean((process.env.ZCODE_PREVIEW_ORIGIN || "").trim());
 }
 
+// ZWUI-072d: remove ACTIVE content from snapshot HTML. Regexes are defense
+// in depth only — the separate preview origin (and this `sandbox` CSP) are
+// the actual boundary; this pass just avoids handing active markup to it.
+function stripActiveHtml(html) {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<script\b[^>]*>/gi, "") // unclosed script tag (malformed HTML)
+    .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, "")
+    .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, "")
+    .replace(/\son[a-z]+\s*=\s*[^\s>]+/gi, "") // unquoted inline handler
+    .replace(/\ssrcdoc\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "") // nested documents bypass nothing, but carry no value in a preview
+    .replace(/(href|src|action)\s*=\s*(["'])\s*javascript:[^"']*\2/gi, "$1=$2#$2")
+    .replace(/(href|src|action)\s*=\s*javascript:[^\s>]+/gi, '$1="#"');
+}
+
 function buildSnapshot(cwd) {
   const warnings = [];
   const files = [];
@@ -446,21 +461,27 @@ function buildSnapshot(cwd) {
   if (!index) {
     throw Object.assign(new Error("no HTML entry file found for snapshot"), { status: 422 });
   }
-  const id = crypto.createHash("sha256").update(cwd + ":" + totalBytes + ":" + files.length).digest("hex").slice(0, 16);
+  // ZWUI-072d: the snapshot id is a hash of the CONTENT (path + exact bytes
+  // of every file). The old cwd:totalBytes:fileCount id served STALE
+  // snapshots after same-size edits and differed for identical content.
+  const hash = crypto.createHash("sha256");
+  for (const f of [...files].sort((a, b) => (a.rel < b.rel ? -1 : 1))) {
+    hash.update(f.rel);
+    hash.update("\0");
+    hash.update(readFileSync(f.full));
+    hash.update("\0");
+  }
+  const id = hash.digest("hex").slice(0, 16);
   const dir = join(uploadsDir(), "..", "previews", id);
+  if (existsSync(join(dir, ".meta.json"))) {
+    // identical content already snapshotted — snapshots are immutable
+    return { id, fileCount: files.length, totalBytes, warnings, reused: true };
+  }
   mkdirSync(dir, { recursive: true });
   for (const f of files) {
     let buf = readFileSync(f.full);
     if (f.rel.endsWith(".html")) {
-      // strip scripts and event handlers per the threat model (defense in
-      // depth — the separate origin is the primary control)
-      buf = Buffer.from(
-        buf.toString("utf8")
-          .replace(/<script[\s\S]*?<\/script>/gi, "")
-          .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, "")
-          .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, ""),
-        "utf8"
-      );
+      buf = Buffer.from(stripActiveHtml(buf.toString("utf8")), "utf8");
     }
     const dest = join(dir, f.rel);
     mkdirSync(join(dest, ".."), { recursive: true });
