@@ -209,6 +209,22 @@ export class SessionStore {
       : null;
   }
 
+  // Cumulative agent working time for a session — the desktop's "Worked for
+  // 12m 26s" figure. turn_usage rows are written when each turn ends, so this
+  // is completed-turn time; a live turn's elapsed time is added client-side.
+  // Older CLI stores lack the table — that's 0 worked time, never an error.
+  workedMs(sessionId) {
+    try {
+      const rows = this.query(
+        `SELECT SUM(duration_ms) AS total FROM turn_usage WHERE session_id = ?`,
+        [sessionId]
+      );
+      return Number(rows[0]?.total) || 0;
+    } catch {
+      return 0;
+    }
+  }
+
   get(sessionId) {
     const rows = this.query(
       `SELECT id, title, directory, time_created, time_updated FROM session WHERE id = ?`,

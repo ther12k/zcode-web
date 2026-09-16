@@ -576,6 +576,7 @@ async function handleApi(req, res, url) {
     let session;
     let page;
     let runInfo = { active: false, startedAt: null };
+    let workedMs = 0;
     try {
       session = store.get(sessionMatch[1]);
       // A fresh CLI turn can announce its session before the CLI has committed
@@ -604,6 +605,7 @@ async function handleApi(req, res, url) {
         const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0);
         page = store.transcript(session.id, { limit, offset });
         runInfo = store.runInfo(session.id);
+        workedMs = store.workedMs(session.id);
       }
     } catch (e) {
       const status = e.code === "DB_MISSING" ? 503 : 500;
@@ -626,6 +628,9 @@ async function handleApi(req, res, url) {
       // report its job id so a reloaded browser can adopt the live stream
       // instead of degrading to store polling.
       activeJobId: jobs.activeJobForSession(session.id)?.id ?? null,
+      // completed-turn working time (the desktop's "Worked for …" figure);
+      // the live turn's elapsed time is added client-side
+      workedMs,
     });
   }
 

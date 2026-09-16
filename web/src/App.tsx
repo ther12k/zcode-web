@@ -201,6 +201,9 @@ export function App() {
   // titles seen in transcript fetches — deep-linked sessions outside the
   // recent list still show their real title (desktop parity)
   const [sessionTitles, setSessionTitles] = useState<Record<string, string>>({});
+  // ZWUI-077: session goals seen in transcript fetches — session lists don't
+  // carry them, so the detail responses are the source (desktop's goal card)
+  const [sessionGoals, setSessionGoals] = useState<Record<string, SessionRow["goal"]>>({});
   // real CLI skills for the launcher (fetched once per page load)
   const [skills, setSkills] = useState<{ list: import("./api/client").SkillInfo[]; loading: boolean; error: string | null }>({ list: [], loading: true, error: null });
   const [draft, setDraft] = useState<{ text: string; key: number } | null>(null);
@@ -296,8 +299,9 @@ export function App() {
     if (action === "search" || action === "skills" || action === "tools" || action === "settings" || action === "shortcuts") { setModal(action); return true; }
     return false;
   }, [navigateNewChat]);
-  const onSessionMeta = useCallback((s: { id: string; title: string; directory?: string }) => {
+  const onSessionMeta = useCallback((s: { id: string; title: string; directory?: string; goal?: SessionRow["goal"] }) => {
     setSessionTitles((m) => (m[s.id] === s.title ? m : { ...m, [s.id]: s.title }));
+    if (s.goal !== undefined) setSessionGoals((m) => (m[s.id] === s.goal ? m : { ...m, [s.id]: s.goal }));
     if (s.directory && s.id === activeSessionId) {
       const canonical = safeDecode(s.directory);
       if (canonical && cwd && canonical !== cwd && roots.some((r) => canonical === r || canonical.startsWith(r))) {
@@ -376,10 +380,14 @@ export function App() {
     }
   }, [activeSessionId, renaming, notify, refreshSessions, token]);
   const listed = sessions.find((s) => s.id === activeSessionId) || null;
-  const activeSession = listed
+  const baseSession = listed
     || (activeSessionId && sessionTitles[activeSessionId]
-      ? { id: activeSessionId, title: sessionTitles[activeSessionId], directory: cwd, createdAt: 0, updatedAt: 0, goal: null }
+      ? { id: activeSessionId, title: sessionTitles[activeSessionId], directory: cwd, createdAt: 0, updatedAt: 0 }
       : null);
+  // list rows don't carry goals — overlay the one seen in the detail fetch
+  const activeSession = baseSession
+    ? { ...baseSession, goal: sessionGoals[baseSession.id] ?? listed?.goal ?? null }
+    : null;
 
   // "Sessions" view: the LATEST 50 across all allowed roots (like the search
   // dialog's empty state). The row label shows each session's project, so a
@@ -471,8 +479,15 @@ export function App() {
   // may have touched the working tree
   const [panelRefreshKey, setPanelRefreshKey] = useState(0);
   const prevBusy = useRef(false);
+  // ZWUI-077: when the current busy period started — feeds the goal card's
+  // live "Worked for" figure while the agent is running
+  const [runBusySince, setRunBusySince] = useState<number | null>(null);
   useEffect(() => {
-    if (prevBusy.current && !runBusy) setPanelRefreshKey((k) => k + 1);
+    if (!prevBusy.current && runBusy) setRunBusySince(Date.now());
+    if (prevBusy.current && !runBusy) {
+      setPanelRefreshKey((k) => k + 1);
+      setRunBusySince(null);
+    }
     prevBusy.current = runBusy;
   }, [runBusy]);
 
@@ -771,6 +786,7 @@ export function App() {
               else setRightCollapsed(true);
             }}
             goal={activeSession?.goal}
+            runStartedAt={runBusySince}
           />
         ) : (
           <div className="pane-rail" aria-label="Preview panel collapsed">

@@ -6,7 +6,7 @@ import {
   CheckCircle2, ChevronDown, CircleDot, Code2, Eye, FileCode2, FileDiff, FolderClosed, GitBranch,
   Globe, ListTree, LoaderCircle, Maximize2, Minimize2, Monitor, PanelBottom, Play, RefreshCw, Smartphone, Target,
 } from "lucide-react";
-import { IconButton } from "../ui";
+import { IconButton, relativeTime } from "../ui";
 import { IssueInspector, useGithubIssue } from "./IssueInspector";
 import { issueKey, type IssueIdentity, type ScannedIssueRef } from "../lib/issueRefs";
 import type { ApiClient } from "../api/client";
@@ -18,7 +18,7 @@ function authHeaders() {
   return { authorization: `Bearer ${localStorage.getItem("zcode-web-token") || ""}` };
 }
 
-type Goal = { objective: string; status: string; tokensUsed: number; timeUsedSeconds: number } | null | undefined;
+type Goal = { objective: string; status: string; tokensUsed: number; timeUsedSeconds: number; updatedAt?: number } | null | undefined;
 
 // ZWUI-067: decode `git status --porcelain` XY codes into words — raw
 // two-letter codes assume git knowledge the UI must not require. X is the
@@ -44,12 +44,14 @@ function gitStatusLabel(code: string, long: boolean): string {
   return raw || "changed";
 }
 
-export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleExpanded, refreshKey = 0, runBusy = false, sessionTitle, branch: branchProp, client, issues = [], selectedIssue = null, onAddToPrompt }: {
+export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleExpanded, refreshKey = 0, runBusy = false, runStartedAt = null, sessionTitle, branch: branchProp, client, issues = [], selectedIssue = null, onAddToPrompt }: {
   cwd: string;
   onCollapse: () => void;
   goal?: Goal;
   /** live run state for the Overview card (ZWUI-050 subscription lives in App) */
   runBusy?: boolean;
+  /** when the current busy period started (ms epoch) — live goal timer */
+  runStartedAt?: number | null;
   sessionTitle?: string;
   branch?: string | null;
   /** authenticated client — issue reads go through it, never bare fetches */
@@ -112,7 +114,7 @@ export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleEx
         </div>
       </div>
       {tab === "overview" && (
-        <OverviewTab cwd={cwd} branch={branchProp} goal={goal} runBusy={runBusy} sessionTitle={sessionTitle}
+        <OverviewTab cwd={cwd} branch={branchProp} goal={goal} runBusy={runBusy} runStartedAt={runStartedAt} sessionTitle={sessionTitle}
           goChanges={() => setTab("changes")} goFiles={() => setTab("code")} />
       )}
       {tab === "preview" && previewCap?.enabled && <PreviewTab cwd={cwd} mobile={mobile} onMobile={setMobile} cap={previewCap} />}
@@ -197,11 +199,12 @@ function IssueListRow({ client, ref_, active, onSelect }: {
 // next" from REAL state — conversation identity, run status, goal — and
 // routes to Changes/Files. Selection-driven details open from there.
 
-function OverviewTab({ cwd, branch, goal, runBusy, sessionTitle, goChanges, goFiles }: {
+function OverviewTab({ cwd, branch, goal, runBusy, runStartedAt, sessionTitle, goChanges, goFiles }: {
   cwd: string;
   branch?: string | null;
   goal: Goal;
   runBusy: boolean;
+  runStartedAt: number | null;
   sessionTitle?: string;
   goChanges: () => void;
   goFiles: () => void;
@@ -221,7 +224,7 @@ function OverviewTab({ cwd, branch, goal, runBusy, sessionTitle, goChanges, goFi
         </p>
         {branch && <small className="overview-sub"><GitBranch size={11} /> {branch}</small>}
       </div>
-      <GoalPanel goal={goal} />
+      <GoalPanel goal={goal} runBusy={runBusy} runStartedAt={runStartedAt} />
       <div className="overview-links">
         <button onClick={goChanges}><FileDiff size={14} /><span><b>Review changes</b><small>Working-tree diff, unified or split</small></span></button>
         <button onClick={goFiles}><FolderClosed size={14} /><span><b>Browse files</b><small>Read-only project files</small></span></button>
@@ -485,11 +488,27 @@ function ChangesTab({ cwd, refreshKey = 0 }: { cwd: string; refreshKey?: number 
 
 
 // Goal panel — reference structure, fed by the CLI's real session_target row.
-function GoalPanel({ goal }: { goal?: Goal }) {
+// ZWUI-077: while a run is busy the time figure ticks live (stored cumulative
+// time + the current busy period's elapsed), mirroring the desktop's card.
+function GoalPanel({ goal, runBusy, runStartedAt }: { goal?: Goal; runBusy?: boolean; runStartedAt?: number | null }) {
   const [open, setOpen] = useState(false);
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (!runBusy) return;
+    setTick(Date.now());
+    const t = setInterval(() => setTick(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [runBusy]);
   if (!goal) return null;
   const running = goal.status === "active";
-  const mins = Math.floor(goal.timeUsedSeconds / 60);
+  const liveSeconds = goal.timeUsedSeconds
+    + (runBusy && runStartedAt ? Math.max(0, ((tick || Date.now()) - runStartedAt)) / 1000 : 0);
+  const worked = liveSeconds >= 1
+    ? liveSeconds < 60
+      ? `${Math.round(liveSeconds)}s`
+      : `${Math.floor(liveSeconds / 60)}m ${Math.round(liveSeconds % 60)}s`
+    : "just started";
+  const updated = goal.updatedAt ? relativeTime(goal.updatedAt) : "";
   return (
     <div className={`goal-panel ${open ? "goal-open" : ""}`}>
       <button className="goal-heading" onClick={() => setOpen(!open)} aria-expanded={open}>
@@ -500,14 +519,21 @@ function GoalPanel({ goal }: { goal?: Goal }) {
       </button>
       <div className="goal-description">
         <span>{goal.objective}</span>
-        <small>{mins > 0 ? `${mins}m` : "just started"}</small>
+        <small>{worked}</small>
       </div>
       <div className="goal-progress" aria-label="Goal activity">
-        <span className={running ? "done" : ""} />
+        <span className="done" />
       </div>
       {open && (
         <ul className="goal-steps">
-          <li><span className="unchecked-step" /><span>Objective tracked from the CLI session target ({goal.tokensUsed.toLocaleString()} tokens used)</span></li>
+          <li>
+            <span className={running ? "unchecked-step" : "checked-step"} />
+            <span>{running ? "Working toward the objective" : `Objective ${goal.status}`}</span>
+          </li>
+          <li>
+            <span className="unchecked-step" />
+            <span>{goal.tokensUsed.toLocaleString()} tokens used · updated {updated || "recently"}</span>
+          </li>
         </ul>
       )}
     </div>

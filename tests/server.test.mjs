@@ -657,6 +657,8 @@ describe("SessionStore turn durations + runActive", async () => {
     // re-feeds the context) — the chip's "current context", not the sum
     assert.equal(page.contextTokens, 44, "latest step-finish total wins over the sum");
     assert.equal(page.tokensTotal, 1544, "tokensTotal remains the all-steps sum");
+    // ZWUI-077: session-level worked time — the sum of completed turn_usage rows
+    assert.equal(store.workedMs("sess_du"), 9891, "workedMs sums completed-turn durations");
     const failed = page.turns.find((t) => t.error);
     assert.ok(failed, "failed turn present");
     assert.equal(failed.text, "", "failed turn renders no inline text");
@@ -669,6 +671,16 @@ describe("SessionStore turn durations + runActive", async () => {
     const userTurn = page.turns.find((t) => t.role === "user");
     assert.equal(userTurn.createdAt, 1000, "user turn exposes its message creation time");
     assert.ok(page.turns.every((t) => t.createdAt === null || typeof t.createdAt === "number"), "createdAt is number or null");
+  });
+
+  it("workedMs treats a store without turn_usage (older CLI) as zero, never an error", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zc-store-"));
+    const dbPath = join(dir, "db.sqlite");
+    const db = new DatabaseSync(dbPath);
+    db.exec("CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT)");
+    db.close();
+    const store = new SessionStore(dbPath);
+    assert.equal(store.workedMs("sess_missing"), 0);
   });
 
   it("separator-only messages never take the turn footer", () => {

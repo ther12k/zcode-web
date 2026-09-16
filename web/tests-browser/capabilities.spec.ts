@@ -101,6 +101,9 @@ test("search finds message content through the sidecar index", async ({ page }) 
   db.close();
 
   await page.goto("/");
+  // app readiness before the shortcut — a cold server can otherwise eat the
+  // keypress before the shell mounts its key handlers
+  await expect(page.locator(".brand-name")).toHaveText("zcode");
   await page.keyboard.press("ControlOrMeta+k");
   const dialog = page.getByRole("dialog", { name: "Find your next thought." });
   await expect(dialog).toBeVisible();
@@ -110,6 +113,54 @@ test("search finds message content through the sidecar index", async ({ page }) 
   await expect(dialog.locator(".search-results").first()).toContainText("Totally bland title", { timeout: 15_000 });
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
+});
+
+// ZWUI-077: the desktop's goal card and "Worked for" figure, fed by real CLI
+// store rows (session_target + turn_usage) through the session detail route.
+test("goal card and worked-time chip render from real session_target/turn_usage rows", async ({ page }) => {
+  mkdirSync(WS, { recursive: true });
+  const dbDir = join(REPO, ".e2e-home", "cli", "db");
+  mkdirSync(dbDir, { recursive: true });
+  const db = new DatabaseSync(join(dbDir, "db.sqlite"));
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT);
+    CREATE TABLE IF NOT EXISTS message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, sequence INTEGER);
+    CREATE TABLE IF NOT EXISTS part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT, sequence INTEGER);
+    CREATE TABLE IF NOT EXISTS turn_usage (session_id TEXT, turn_id TEXT, user_message_id TEXT, status TEXT, started_at INTEGER, completed_at INTEGER, duration_ms INTEGER);
+    CREATE TABLE IF NOT EXISTS session_target (id TEXT PRIMARY KEY, session_id TEXT, objective TEXT, status TEXT, tokens_used INTEGER, time_used_seconds INTEGER, time_created INTEGER, time_updated INTEGER);
+  `);
+  const sid = "sess_goal_e2e_00000000000000000000000000";
+  // idempotent seed: the e2e store persists across runs and turn_usage has no
+  // unique key — re-inserting would stack durations and skew "Worked for"
+  db.prepare("DELETE FROM turn_usage WHERE session_id = ?").run(sid);
+  db.prepare("DELETE FROM session_target WHERE session_id = ?").run(sid);
+  db.prepare("DELETE FROM part WHERE session_id = ?").run(sid);
+  db.prepare("DELETE FROM message WHERE session_id = ?").run(sid);
+  db.prepare("DELETE FROM session WHERE id = ?").run(sid);
+  db.prepare("INSERT INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)")
+    .run(sid, "Goal parity probe", WS, 1, Date.now());
+  db.prepare("INSERT INTO message (id, session_id, data, sequence) VALUES (?,?,?,?)")
+    .run("msg_goal_e2e", sid, JSON.stringify({ role: "user", time: { created: Date.now() } }), 0);
+  db.prepare("INSERT INTO part (id, message_id, session_id, data, sequence) VALUES (?,?,?,?,?)")
+    .run("part_goal_e2e", "msg_goal_e2e", sid, JSON.stringify({ type: "text", text: "work toward the goal" }), 0);
+  db.prepare("INSERT INTO turn_usage (session_id, turn_id, user_message_id, status, started_at, completed_at, duration_ms) VALUES (?,?,?,?,?,?,?)")
+    .run(sid, "t_goal_1", "msg_goal_e2e", "completed", 1, 2, 75_000);
+  db.prepare("INSERT INTO session_target (id, session_id, objective, status, tokens_used, time_used_seconds, time_created, time_updated) VALUES (?,?,?,?,?,?,?,?)")
+    .run("target_goal_e2e", sid, "make this zcode web ui ux as close as possible to zcode desktop", "active", 318_822, 40_000, 1, Date.now());
+  db.close();
+
+  await page.goto("/w/" + encodeURIComponent(WS) + "/s/" + sid);
+  await expect(page.getByLabel("Message Zcode")).toBeVisible();
+  // the goal card (Overview tab of the inspector) shows the real objective
+  // and cumulative time (stored 40_000s figure renders through the card)
+  await page.getByLabel("Show preview panel").last().click();
+  const goalPanel = page.locator(".goal-panel");
+  await expect(goalPanel).toBeVisible();
+  await expect(goalPanel).toContainText("make this zcode web ui ux as close as possible to zcode desktop");
+  await expect(goalPanel).toContainText("In progress");
+  // and the chat context strip carries the session-level "Worked for" figure
+  // (75s of completed turns; the desktop phrasing, not a bare minute count)
+  await expect(page.locator(".worked-chip")).toContainText(/Worked for (1m|75s)/);
 });
 
 // ZWUI-066: stacked overlays — the TOPMOST one owns Escape. With a preview

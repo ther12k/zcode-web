@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { ArrowLeftRight, ArrowUp, ArrowUpRight, BadgeCheck, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Coins, Copy, Eye, EyeOff, FileText, FoldVertical, FolderClosed, GitBranch, LoaderCircle, MessageSquare, MoreHorizontal, Plus, RotateCcw, ShieldCheck, SlidersHorizontal, Sparkles, Square, SquarePen, SquareTerminal, Terminal, Unplug, Wrench, X, Zap } from "lucide-react";
 import { ZLogo, IconButton, Markdown, CheckMark, useDialogA11y, overlayOpen, relativeTime } from "../ui";
 import { randomUUID } from "../lib/uuid";
-import { ApiError, type ApiClient, type CommandInfo, type FileCard, type ModelInfo, type SessionDetail, type TimelineEvent, type TranscriptTurn } from "../api/client";
+import { ApiError, type ApiClient, type CommandInfo, type FileCard, type ModelInfo, type SessionDetail, type SessionInfo, type TimelineEvent, type TranscriptTurn } from "../api/client";
 import { isTerminal } from "../state/run";
 import * as runs from "../state/runManager";
 import { snapshotSubmission, mayClearDraft, dequeueAfterSuccess, type Submission } from "../lib/submission";
@@ -64,7 +64,7 @@ export function ChatPanel({
   /** app-level slash actions (open dialogs, new chat) — true when handled */
   onSlashAction?: (action: string) => boolean;
   /** session metadata from transcript fetches (title lift for deep links) */
-  onSessionMeta?: (s: { id: string; title: string; directory?: string }) => void;
+  onSessionMeta?: (s: { id: string; title: string; directory?: string; goal?: SessionInfo["goal"] }) => void;
   /** GitHub repo bound to this project (origin remote) — bare #N resolves here */
   repoBinding?: { host: string; owner: string; repo: string } | null;
   /** an issue reference was clicked in the conversation */
@@ -190,7 +190,8 @@ export function ChatPanel({
     setContextTokens(d.contextTokens ?? null);
     setExternalActive(!!d.runActive);
     setExternalStartedAt(d.runStartedAt ?? null);
-    if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory });
+    setWorkedMs(d.workedMs ?? 0);
+    if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory, goal: d.session.goal ?? undefined });
     considerAdoption(d);
   }, [onSessionMeta, considerAdoption]);
   // incremental refresh: match turns by message id — known turns update in
@@ -215,9 +216,10 @@ export function ChatPanel({
     });
     setExternalActive(!!d.runActive);
     setExternalStartedAt(d.runStartedAt ?? null);
+    if (d.workedMs != null) setWorkedMs(d.workedMs);
     if (d.tokensTotal != null) setSessionTokensTotal(d.tokensTotal);
     if (d.contextTokens != null) setContextTokens(d.contextTokens);
-    if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory });
+    if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory, goal: d.session.goal ?? undefined });
     considerAdoption(d);
   }, [onSessionMeta, considerAdoption]);
   // initial load — full replace only when the session (or an explicit
@@ -812,6 +814,9 @@ export function ChatPanel({
   // session-wide token count for the context-bar chip: the server's
   // pagination-independent total when available, else the loaded turns
   const [sessionTokensTotal, setSessionTokensTotal] = useState<number | null>(null);
+  // ZWUI-077: completed-turn working time (turn_usage sum) — the desktop's
+  // "Worked for 12m 26s". The live turn's elapsed time is added on top.
+  const [workedMs, setWorkedMs] = useState(0);
   // ZWUI-067 (live QA): step-finish tokens.total is per-STEP usage (each call
   // re-feeds the context), so the sum across a long session is a billing
   // figure, not a size. The chip shows the CURRENT CONTEXT — freshest
@@ -969,6 +974,20 @@ export function ChatPanel({
           <span className={`pulse-dot ${busy ? "" : "idle"}`} />
           <span>{busy ? `Agent active · ${(models.find((m) => m.ref === model)?.model || "GLM").split("/").pop()?.toUpperCase()}` : "Idle"}</span>
         </span>
+        {/* ZWUI-077: the desktop's session-level "Worked for 12m 26s" —
+            completed-turn time from turn_usage plus the live turn's elapsed */}
+        {(() => {
+          const live = localBusy && run.submittedAt
+            ? workedMs + Math.max(1000, (externalTick || run.submittedAt) - run.submittedAt)
+            : workedMs;
+          if (live < 1000) return null;
+          return (
+            <span className="worked-chip" title="Cumulative agent working time (completed turns + the live turn)">
+              <Clock3 size={12} />
+              <span>Worked for {formatDuration(live)}</span>
+            </span>
+          );
+        })()}
         {/* the single usage entry point — REF2-06 keeps detailed numbers here,
             not repeated across composer and messages. Shows the CURRENT
             CONTEXT (what the next call re-feeds), matching the desktop; the

@@ -103,6 +103,8 @@ export type SessionDetail = {
   runStartedAt?: number | null;
   /** server-side active job id (ZWUI-075) for in-flight reattachment */
   activeJobId?: string | null;
+  /** completed-turn working time (turn_usage sum) — desktop's "Worked for" */
+  workedMs?: number | null;
 };
 
 export type JobStatus = {
