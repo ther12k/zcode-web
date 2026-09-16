@@ -3,7 +3,7 @@
 // mode/model pickers, live-run "working" message. Run state comes from the
 // ZWUI-016 reducer; transport from the ZWUI-017 controller.
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, lazy, Suspense } from "react";
 import { ArrowLeftRight, ArrowUp, ArrowUpRight, BadgeCheck, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Coins, Copy, Eye, EyeOff, FileText, FoldVertical, FolderClosed, GitBranch, LoaderCircle, MessageSquare, MoreHorizontal, Plus, RotateCcw, ShieldCheck, SlidersHorizontal, Sparkles, Square, SquarePen, SquareTerminal, Terminal, Unplug, Wrench, X, Zap } from "lucide-react";
 import { ZLogo, IconButton, Markdown, CheckMark, useDialogA11y, relativeTime } from "../ui";
 import { randomUUID } from "../lib/uuid";
@@ -13,7 +13,11 @@ import * as runs from "../state/runManager";
 import { snapshotSubmission, mayClearDraft, type Submission } from "../lib/submission";
 import { scanIssueRefs, issueKey, parseIssueKey, type IssueIdentity, type ScannedIssueRef } from "../lib/issueRefs";
 import { loadDraft, saveDraft, loadPrefs, savePrefs } from "../state/prefs";
-import { AgentTerminalDrawer, TokenTelemetryDialog, type TerminalEntry } from "./Telemetry";
+import type { TerminalEntry } from "./Telemetry";
+// ZWUI-069: telemetry surfaces (token audit dialog, terminal drawer) load on
+// demand — off the initial parse tree until first opened
+const AgentTerminalDrawer = lazy(() => import("./Telemetry").then((m) => ({ default: m.AgentTerminalDrawer })));
+const TokenTelemetryDialog = lazy(() => import("./Telemetry").then((m) => ({ default: m.TokenTelemetryDialog })));
 
 // transcript page size: big enough that the user's own recent prompts are in
 // view when opening an agent-heavy session (tool runs chain many turns per
@@ -1193,12 +1197,14 @@ export function ChatPanel({
         )}
       </div>
 
-      <AgentTerminalDrawer
-        open={terminalOpen}
-        entries={visibleTerminalEntries}
-        onClose={() => setTerminalOpen(false)}
-        onClear={() => setTerminalClearedSig(terminalSignature)}
-      />
+      <Suspense fallback={null}>
+        <AgentTerminalDrawer
+          open={terminalOpen}
+          entries={visibleTerminalEntries}
+          onClose={() => setTerminalOpen(false)}
+          onClear={() => setTerminalClearedSig(terminalSignature)}
+        />
+      </Suspense>
 
       <div className="composer-zone">
         {localBusy && run.transportLost && (
@@ -1384,15 +1390,17 @@ export function ChatPanel({
       />
       {preview && <PreviewOverlay preview={preview} onClose={() => setPreview(null)} />}
       {tokenDialog && (
-        <TokenTelemetryDialog
-          sessionId={sessionId || "draft"}
-          title={sessionTitle || "New chat"}
-          turns={history.turns}
-          totalTurns={history.total}
-          sessionTotal={sessionTokensTotal}
-          liveTokens={liveTokens && !isTerminal(run.phase) ? liveTokens : null}
-          onClose={() => setTokenDialog(false)}
-        />
+        <Suspense fallback={null}>
+          <TokenTelemetryDialog
+            sessionId={sessionId || "draft"}
+            title={sessionTitle || "New chat"}
+            turns={history.turns}
+            totalTurns={history.total}
+            sessionTotal={sessionTokensTotal}
+            liveTokens={liveTokens && !isTerminal(run.phase) ? liveTokens : null}
+            onClose={() => setTokenDialog(false)}
+          />
+        </Suspense>
       )}
     </section>
   );

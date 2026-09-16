@@ -23,8 +23,25 @@ export function useMediaQuery(query: string): boolean {
 // Overlay behavior shared by every dialog-sized surface: focus the first
 // control on open, trap Tab inside while open, close on Escape, and restore
 // focus to the element that launched the overlay on close.
+//
+// ZWUI-066: overlays STACK — with two dialogs open (rename over search,
+// preview over settings) each used to install its own document keydown
+// listener, so one Escape closed every layer at once and Tab traps fought.
+// A module-level stack gives exclusive keyboard ownership to the TOPMOST
+// overlay; covered dialogs ignore Escape/Tab until they surface again.
+const dialogStack: symbol[] = [];
+
+/** True while any a11y-managed overlay is open — global shortcuts defer to it. */
+export function overlayOpen(): boolean {
+  return dialogStack.length > 0;
+}
+
 export function useDialogA11y(ref: React.RefObject<HTMLElement | null>, onClose: () => void, autoFocus = true) {
+  const tokenRef = useRef<symbol | null>(null);
+  if (tokenRef.current === null) tokenRef.current = Symbol("overlay");
+  const token = tokenRef.current;
   useEffect(() => {
+    dialogStack.push(token);
     const previouslyFocused = document.activeElement as HTMLElement | null;
     const timer = autoFocus
       ? setTimeout(() => {
@@ -32,14 +49,18 @@ export function useDialogA11y(ref: React.RefObject<HTMLElement | null>, onClose:
         }, 30)
       : undefined;
     return () => {
+      const i = dialogStack.indexOf(token);
+      if (i >= 0) dialogStack.splice(i, 1);
       if (timer) clearTimeout(timer);
       previouslyFocused?.focus();
     };
     // mount/unmount only: restore must capture the launcher exactly once
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [token]);
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
+      // covered by a higher overlay — it owns Escape/Tab until it closes
+      if (dialogStack[dialogStack.length - 1] !== token) return;
       if (event.key === "Escape") onClose();
       if (event.key === "Tab") {
         const elements = ref.current?.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), textarea:not([disabled]), select, [tabindex="0"]');
@@ -51,7 +72,7 @@ export function useDialogA11y(ref: React.RefObject<HTMLElement | null>, onClose:
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [ref, onClose]);
+  }, [ref, onClose, token]);
 }
 
 export function ZLogo({ size = 25, className = "" }: { size?: number; className?: string }) {

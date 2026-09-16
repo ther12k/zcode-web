@@ -4,7 +4,7 @@
 // State ownership (ZWUI-006): runs live in a registry keyed by jobId —
 // navigating never retargets or cancels a job.
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, lazy, Suspense } from "react";
 import {
   Archive, ArrowDownWideNarrow, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Eye, EyeOff, KeyRound,
   FolderClosed, FolderOpen, History, Keyboard, LoaderCircle, Menu, MoreHorizontal, PanelLeft, PanelRight, Pin, PinOff, Plus,
@@ -12,15 +12,19 @@ import {
 } from "lucide-react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useWorkspace } from "./workspace";
-import { ZLogo, IconButton, relativeTime, useMediaQuery, useDialogA11y } from "./ui";
+import { ZLogo, IconButton, relativeTime, useMediaQuery, useDialogA11y, overlayOpen } from "./ui";
 import { loadPrefs } from "./state/prefs";
 import type * as prefsMod from "./state/prefs";
 import { ChatPanel } from "./components/ChatPanel";
 import { RightPanel } from "./components/RightPanel";
 import { SearchDialog } from "./components/SearchDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
-import { ShortcutsDialog, SkillsDialog, ToolsDialog } from "./components/InfoDialogs";
-import { AnalyticsDialog } from "./components/AnalyticsDialog";
+// ZWUI-069: rarely-opened modal surfaces load on demand — they leave the
+// initial parse tree and pull their chunk on first open
+const ShortcutsDialog = lazy(() => import("./components/InfoDialogs").then((m) => ({ default: m.ShortcutsDialog })));
+const SkillsDialog = lazy(() => import("./components/InfoDialogs").then((m) => ({ default: m.SkillsDialog })));
+const ToolsDialog = lazy(() => import("./components/InfoDialogs").then((m) => ({ default: m.ToolsDialog })));
+const AnalyticsDialog = lazy(() => import("./components/AnalyticsDialog").then((m) => ({ default: m.AnalyticsDialog })));
 import type { IssueIdentity, ScannedIssueRef } from "./lib/issueRefs";
 import { effectivePanelWidth } from "./lib/layout";
 import { activeRunCount, subscribeRuns } from "./state/runManager";
@@ -250,7 +254,9 @@ export function App() {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); setModal("search"); }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "b") { event.preventDefault(); setSidebarCollapsed((c) => !c); }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "j") { event.preventDefault(); setRightCollapsed((c) => !c); }
-      if (event.key === "Escape") { setModal(null); setTaskMenu(false); setSortMenu(false); setNavOpen(false); }
+      // ZWUI-066: an open overlay owns Escape — the shell must not also
+      // close the modal sitting UNDER it with the same keypress
+      if (event.key === "Escape" && !overlayOpen()) { setModal(null); setTaskMenu(false); setSortMenu(false); setNavOpen(false); }
     }
     window.addEventListener("keydown", keyboard);
     return () => window.removeEventListener("keydown", keyboard);
@@ -795,27 +801,35 @@ export function App() {
           onSubmit={() => void renameSession()}
         />
       )}
-      {modal === "shortcuts" && <ShortcutsDialog onClose={() => setModal(null)} />}
-      {modal === "analytics" && (
-        <AnalyticsDialog
-          open
-          token={token}
-          onClose={() => setModal(null)}
-          onSelectSession={(id, directory) => selectSession(id, directory)}
-        />
+      {modal === "shortcuts" && (
+        <Suspense fallback={null}><ShortcutsDialog onClose={() => setModal(null)} /></Suspense>
       )}
-      {modal === "tools" && <ToolsDialog caps={caps} onClose={() => setModal(null)} />}
+      {modal === "analytics" && (
+        <Suspense fallback={null}>
+          <AnalyticsDialog
+            open
+            token={token}
+            onClose={() => setModal(null)}
+            onSelectSession={(id, directory) => selectSession(id, directory)}
+          />
+        </Suspense>
+      )}
+      {modal === "tools" && (
+        <Suspense fallback={null}><ToolsDialog caps={caps} onClose={() => setModal(null)} /></Suspense>
+      )}
       {modal === "skills" && (
-        <SkillsDialog
-          skills={skills.list}
-          loading={skills.loading}
-          error={skills.error}
-          onClose={() => setModal(null)}
-          onSelect={(name) => {
-            setDraft({ text: `Use the ${name} skill: `, key: Date.now() });
-            setModal(null);
-          }}
-        />
+        <Suspense fallback={null}>
+          <SkillsDialog
+            skills={skills.list}
+            loading={skills.loading}
+            error={skills.error}
+            onClose={() => setModal(null)}
+            onSelect={(name) => {
+              setDraft({ text: `Use the ${name} skill: `, key: Date.now() });
+              setModal(null);
+            }}
+          />
+        </Suspense>
       )}
       {toast && (
         <div className={`toast ${toast.type}`} role={toast.type === "error" ? "alert" : "status"} key={toast.key}>

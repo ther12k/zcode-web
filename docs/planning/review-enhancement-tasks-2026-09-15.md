@@ -9,7 +9,7 @@
 
 ## 0. Implementation status (updated 2026-09-16)
 
-Most of this plan has since been implemented in the working tree (uncommitted). Gate results at the implementation revision: TypeScript build clean, frontend unit tests 100/100, backend/security tests 63/63 (12 new), production build OK (552.19 KB raw / 170.34 KB gzip), lint exit 0 with 25 warnings, full Playwright browser suite 52/52 (3 new capability/auth tests included). Per-task state:
+Most of this plan has since been implemented in the working tree (uncommitted). Gate results at the implementation revision: TypeScript build clean, frontend unit tests 100/100, backend/security tests 63/63 (12 new), production build OK (537.11 KB raw / 166.62 KB gzip after the ZWUI-069 split), lint exit 0 with 25 warnings, full Playwright browser suite green including 5 new capability/auth/search/overlay tests. Per-task state:
 
 | Task | State |
 | --- | --- |
@@ -20,10 +20,10 @@ Most of this plan has since been implemented in the working tree (uncommitted). 
 | ZWUI-063 | Done (code) — live/persisted fold, neutral `Run finished`, failure footer without checkmark; browser-level acceptance still to exercise |
 | ZWUI-064 | Done (code) — callID-keyed live tool cards sharing the terminal drawer's identity rule |
 | ZWUI-065 | Done — `capsError` retry screen, explicit `authState`, prefs via provider + `zcode-prefs` event, token helpers unified |
-| ZWUI-066 | Open — dialog layering/focus coordination not started |
-| ZWUI-067 | Mostly done — git status words (server + UI), true run counts, truthful status copy, pinned reachable beyond latest-50; hidden-session restore UI still minimal |
-| ZWUI-068 | Partial — serve:test enables FILES/GIT; new capabilities/auth spec; content-search e2e still open |
-| ZWUI-069 | Open — bundle measured (552 KB raw); code-splitting not started |
+| ZWUI-066 | Done — overlays stack with exclusive Escape/Tab ownership in the topmost layer (`useDialogA11y` dialog stack; the shell's global Escape defers while an overlay is open); stacked-dialog e2e proves one Escape closes only the top layer |
+| ZWUI-067 | Done — git status words (server + UI), true run counts, truthful status copy, pinned reachable beyond latest-50, and hidden-session restore (list + restore/restore-all) in Settings |
+| ZWUI-068 | Done — serve:test enables FILES/GIT; capabilities spec covers real file listing, git-status decoding, the UI token flow, content-search through the real sidecar index, and stacked-overlay Escape ownership |
+| ZWUI-069 | Done (measured, modest) — Analytics/InfoDialogs/Telemetry load on demand: main chunk 552.19→537.11 KB raw (170.34→166.62 KB gzip), three on-demand chunks ≈19.2 KB raw. Further micro-splitting was judged not worth the complexity; the initial-load budget test still measures observed response bodies |
 | ZWUI-070 | Partial — Dockerfile.lugas installs deps in-image; labeled experimental; shared contract suite not run |
 | ZWUI-071 | Done — README route table + auth exceptions, api-contracts rewrite, web/README replaced |
 | ZWUI-072 | 072a–c done (alias lifecycle, StringDecoder, process-group kill, upload names, attachment cap); 072d preview isolation unchanged (preview stays disabled) |

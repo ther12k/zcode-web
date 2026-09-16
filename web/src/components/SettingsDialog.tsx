@@ -1,9 +1,9 @@
 // Settings dialog — reference structure: settings-tabs + settings-body with
 // provider/environment sections (adapted to our real capabilities).
-import { useState } from "react";
-import { Check, LoaderCircle, LockKeyhole, ArrowUpRight, Database, FolderClosed } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Check, Eye, LoaderCircle, LockKeyhole, ArrowUpRight, Database, FolderClosed } from "lucide-react";
 import { Dialog, ZLogo } from "../ui";
-import { loadPrefs, savePrefs, type FontSize } from "../state/prefs";
+import { loadPrefs, savePrefs, PREFS_EVENT, type FontSize, type Preferences } from "../state/prefs";
 
 type Caps = {
   runtime: string; cliPresent: boolean; providerConfigured: boolean; dbPresent: boolean;
@@ -25,6 +25,18 @@ export function SettingsDialog({ caps, onClose, onLogout }: {
   const [tab, setTab] = useState<"workspace" | "provider">("workspace");
   const [busy, setBusy] = useState(false);
   const [fontSize, setFontSize] = useState<FontSize>(() => loadPrefs().fontSize);
+  // ZWUI-067: hidden sessions are managed here — hide is device-local, so
+  // the management surface must make RESTORING discoverable (nothing is ever
+  // deleted by hiding)
+  const [prefs, setPrefs] = useState<Preferences>(() => loadPrefs());
+  useEffect(() => {
+    const onPrefs = (e: Event) => {
+      const next = (e as CustomEvent<Preferences>).detail;
+      if (next) setPrefs(next);
+    };
+    window.addEventListener(PREFS_EVENT, onPrefs);
+    return () => window.removeEventListener(PREFS_EVENT, onPrefs);
+  }, []);
 
   const applyFontSize = (fs: FontSize) => {
     setFontSize(fs);
@@ -62,6 +74,34 @@ export function SettingsDialog({ caps, onClose, onLogout }: {
                 </button>
               ))}
             </div>
+            {prefs.hiddenSessions.length > 0 && (
+              <>
+                <div className="settings-section-heading">
+                  <h3>Hidden sessions.</h3>
+                  <p>Hidden on this device only — the sessions still exist in the store and stay available everywhere else.</p>
+                </div>
+                <div className="hidden-sessions-list">
+                  {prefs.hiddenSessions.map((id) => (
+                    <span key={id} className="hidden-session-chip">
+                      <span className="mono">{prefs.displayAliases[id] || id.slice(0, 22)}</span>
+                      <button
+                        className="secondary-button"
+                        aria-label={`Restore session ${prefs.displayAliases[id] || id}`}
+                        onClick={() => savePrefs({ hiddenSessions: prefs.hiddenSessions.filter((x) => x !== id) })}
+                      >
+                        <Eye size={12} />Restore
+                      </button>
+                    </span>
+                  ))}
+                  <button
+                    className="secondary-button"
+                    onClick={() => savePrefs({ hiddenSessions: [] })}
+                  >
+                    <Eye size={12} />Restore all
+                  </button>
+                </div>
+              </>
+            )}
             <div className="settings-section-heading">
               <h3>Where things stand.</h3>
               <p>Live readiness of this deployment.</p>
