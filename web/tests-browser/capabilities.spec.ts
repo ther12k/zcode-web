@@ -176,6 +176,8 @@ test("goal card and worked-time chip render from real session_target/turn_usage 
   // and the chat context strip carries the session-level "Worked for" figure
   // (75s of completed turns; the desktop phrasing, not a bare minute count)
   await expect(page.locator(".worked-chip")).toContainText(/Worked for (1m|75s)/);
+  // ZWUI-079: the topbar shows the same figure under the session title
+  await expect(page.locator(".topbar-worked")).toContainText(/Worked for (1m|75s)/);
 });
 
 // ZWUI-066: stacked overlays — the TOPMOST one owns Escape. With a preview

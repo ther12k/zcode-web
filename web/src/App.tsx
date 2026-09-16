@@ -6,13 +6,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, lazy, Suspense } from "react";
 import {
-  Archive, ArrowDownWideNarrow, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Eye, EyeOff, KeyRound,
+  Archive, ArrowDownWideNarrow, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Clock3, Eye, EyeOff, KeyRound,
   FolderClosed, FolderOpen, History, Keyboard, LoaderCircle, Menu, MoreHorizontal, PanelLeft, PanelRight, Pin, PinOff, Plus,
   Search, Settings2, SquarePen, Unplug, WandSparkles, X, GitBranch,
 } from "lucide-react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useWorkspace } from "./workspace";
-import { ZLogo, IconButton, relativeTime, useMediaQuery, useDialogA11y, overlayOpen } from "./ui";
+import { ZLogo, IconButton, relativeTime, formatDuration, useMediaQuery, useDialogA11y, overlayOpen } from "./ui";
 import { loadPrefs } from "./state/prefs";
 import type * as prefsMod from "./state/prefs";
 import { ChatPanel } from "./components/ChatPanel";
@@ -207,6 +207,9 @@ export function App() {
   const [sessionGoals, setSessionGoals] = useState<Record<string, SessionRow["goal"]>>({});
   // ZWUI-078: agent todo checklists from detail responses — the Progress list
   const [sessionTodos, setSessionTodos] = useState<Record<string, TodoItem[]>>({});
+  // ZWUI-079: completed-turn working time per session (detail responses) —
+  // the topbar's "Worked for" line; the live turn's elapsed is added below
+  const [sessionWorked, setSessionWorked] = useState<Record<string, number>>({});
   // real CLI skills for the launcher (fetched once per page load)
   const [skills, setSkills] = useState<{ list: import("./api/client").SkillInfo[]; loading: boolean; error: string | null }>({ list: [], loading: true, error: null });
   const [draft, setDraft] = useState<{ text: string; key: number } | null>(null);
@@ -302,11 +305,12 @@ export function App() {
     if (action === "search" || action === "skills" || action === "tools" || action === "settings" || action === "shortcuts") { setModal(action); return true; }
     return false;
   }, [navigateNewChat]);
-  const onSessionMeta = useCallback((s: { id: string; title: string; directory?: string; goal?: SessionRow["goal"]; todos?: TodoItem[] }) => {
+  const onSessionMeta = useCallback((s: { id: string; title: string; directory?: string; goal?: SessionRow["goal"]; todos?: TodoItem[]; workedMs?: number }) => {
     setSessionTitles((m) => (m[s.id] === s.title ? m : { ...m, [s.id]: s.title }));
     if (s.goal !== undefined) setSessionGoals((m) => (m[s.id] === s.goal ? m : { ...m, [s.id]: s.goal }));
     const todos = s.todos;
     if (todos !== undefined) setSessionTodos((m) => (m[s.id] === todos ? m : { ...m, [s.id]: todos }));
+    if (s.workedMs !== undefined) setSessionWorked((m) => (m[s.id] === s.workedMs ? m : { ...m, [s.id]: s.workedMs! }));
     if (s.directory && s.id === activeSessionId) {
       const canonical = safeDecode(s.directory);
       if (canonical && cwd && canonical !== cwd && roots.some((r) => canonical === r || canonical.startsWith(r))) {
@@ -496,6 +500,19 @@ export function App() {
     prevBusy.current = runBusy;
   }, [runBusy]);
 
+  // ZWUI-079: live "Worked for" — stored completed-turn time plus the current
+  // busy period's elapsed, re-rendered every second while a run is active
+  const [, setWorkedTick] = useState(0);
+  useEffect(() => {
+    if (!runBusy) return;
+    setWorkedTick(Date.now());
+    const t = setInterval(() => setWorkedTick(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [runBusy]);
+  const liveWorkedMs = activeSessionId
+    ? (sessionWorked[activeSessionId] ?? 0) + (runBusy && runBusySince ? Date.now() - runBusySince : 0)
+    : 0;
+
   if (!caps) {
     // ZWUI-065: a failed bootstrap must not hang on an infinite loader —
     // server unreachable gets an explicit retry, auth problems fall through
@@ -549,7 +566,17 @@ export function App() {
         <div className="breadcrumbs">
           <button onClick={() => navigateToCwd(cwd)}><FolderClosed size={13} /><span>{projectLabel}</span></button>
           <span className="breadcrumb-divider">/</span>
-          <h1 className="topbar-title" title={activeSession?.title || "New chat"}>{activeSession?.title || "New chat"}</h1>
+          <div className="title-stack">
+            <h1 className="topbar-title" title={activeSession?.title || "New chat"}>{activeSession?.title || "New chat"}</h1>
+            {/* ZWUI-079: the desktop's "Worked for 12m 26s" under the session
+                title — completed-turn time plus the live turn's elapsed */}
+            {activeSessionId && liveWorkedMs >= 1000 && (
+              <span className="topbar-worked" title="Cumulative agent working time on this session">
+                <Clock3 size={11} />
+                <span>Worked for {formatDuration(liveWorkedMs)}</span>
+              </span>
+            )}
+          </div>
           {activeSessionId && prefs.pinnedSessions.includes(activeSessionId) && <span className="mini-badge pinned-badge"><Pin size={8} />Pinned</span>}
         </div>
         <div className="topbar-actions">

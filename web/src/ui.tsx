@@ -106,6 +106,14 @@ export function relativeTime(ms: number) {
   return `${Math.floor(minutes / 1440)}d`;
 }
 
+// The desktop's "Worked for 6s / 12m 26s" duration phrasing (ZWUI-077).
+export function formatDuration(ms: number): string {
+  if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))}s`;
+  const m = Math.floor(ms / 60_000);
+  const s = Math.round((ms % 60_000) / 1000);
+  return s ? `${m}m ${s}s` : `${m}m`;
+}
+
 export function BusyButton({ busy, children, className = "primary-button", ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { busy?: boolean }) {
   return <button type="button" className={className} disabled={busy || props.disabled} {...props}>{busy && <LoaderCircle size={14} className="spin" />}{children}</button>;
 }

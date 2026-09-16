@@ -64,7 +64,7 @@ export function ChatPanel({
   /** app-level slash actions (open dialogs, new chat) — true when handled */
   onSlashAction?: (action: string) => boolean;
   /** session metadata from transcript fetches (title lift for deep links) */
-  onSessionMeta?: (s: { id: string; title: string; directory?: string; goal?: SessionInfo["goal"]; todos?: TodoItem[] }) => void;
+  onSessionMeta?: (s: { id: string; title: string; directory?: string; goal?: SessionInfo["goal"]; todos?: TodoItem[]; workedMs?: number }) => void;
   /** GitHub repo bound to this project (origin remote) — bare #N resolves here */
   repoBinding?: { host: string; owner: string; repo: string } | null;
   /** an issue reference was clicked in the conversation */
@@ -191,7 +191,7 @@ export function ChatPanel({
     setExternalActive(!!d.runActive);
     setExternalStartedAt(d.runStartedAt ?? null);
     setWorkedMs(d.workedMs ?? 0);
-    if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory, goal: d.session.goal ?? undefined, todos: d.todos ?? [] });
+    if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory, goal: d.session.goal ?? undefined, todos: d.todos ?? [], workedMs: d.workedMs ?? undefined });
     considerAdoption(d);
   }, [onSessionMeta, considerAdoption]);
   // incremental refresh: match turns by message id — known turns update in
@@ -219,7 +219,7 @@ export function ChatPanel({
     if (d.workedMs != null) setWorkedMs(d.workedMs);
     if (d.tokensTotal != null) setSessionTokensTotal(d.tokensTotal);
     if (d.contextTokens != null) setContextTokens(d.contextTokens);
-    if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory, goal: d.session.goal ?? undefined, todos: d.todos ?? [] });
+    if (d.session?.id && d.session?.title) onSessionMeta?.({ id: d.session.id, title: d.session.title, directory: d.session.directory, goal: d.session.goal ?? undefined, todos: d.todos ?? [], workedMs: d.workedMs ?? undefined });
     considerAdoption(d);
   }, [onSessionMeta, considerAdoption]);
   // initial load — full replace only when the session (or an explicit
