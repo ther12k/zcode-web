@@ -14,12 +14,12 @@ function toneFor(name: string) {
   return TONES[h % TONES.length];
 }
 
-function DialogShell({ title, subtitle, onClose, children }: { title: string; subtitle?: string; onClose: () => void; children: React.ReactNode }) {
+function DialogShell({ title, subtitle, onClose, children, wide = false }: { title: string; subtitle?: string; onClose: () => void; children: React.ReactNode; wide?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   useDialogA11y(ref, onClose);
   return (
     <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="dialog" role="dialog" aria-modal="true" aria-label={title} ref={ref}>
+      <div className={`dialog ${wide ? "dialog-wide" : ""}`} role="dialog" aria-modal="true" aria-label={title} ref={ref}>
         <header className="dialog-header">
           <div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div>
           <button className="icon-button" aria-label="Close dialog" onClick={onClose}>✕</button>
@@ -134,7 +134,7 @@ export function SkillsDialog({ skills, loading, error, onSelect, onClose }: {
     return skills.filter((s) => `${s.name} ${s.description}`.toLowerCase().includes(q));
   }, [skills, query]);
   return (
-    <DialogShell title="A little expertise, on demand." subtitle="Your real ZCode skills — reusable prompts to get you into your flow." onClose={onClose}>
+    <DialogShell title="A little expertise, on demand." subtitle="Your real ZCode skills — reusable prompts to get you into your flow." onClose={onClose} wide>
       <div className="dialog-body">
         <div className="search-field">
           <Search size={15} />

@@ -121,7 +121,7 @@ export function TokenTelemetryDialog({ sessionId, title, turns, totalTurns, sess
   }
 
   return (
-    <Dialog title="Token telemetry." subtitle="Measured usage — per turn, from the CLI's own records." onClose={onClose} wide>
+    <Dialog title="Token telemetry." subtitle="Measured usage — per turn, from the CLI's own records." onClose={onClose} xl>
       <div className="dialog-body token-telemetry">
         <div className="token-metrics">
           {contextTokens != null && (
@@ -152,26 +152,28 @@ export function TokenTelemetryDialog({ sessionId, title, turns, totalTurns, sess
             <span>PER-TURN AUDIT — LOADED MESSAGES</span>
             <span>{stats.measured.length} rows</span>
           </div>
-          <table className="token-table">
-            <thead>
-              <tr><th>#</th><th>Role</th><th className="num">Tokens</th><th className="num">Duration</th><th className="num">Speed</th><th>Status</th></tr>
-            </thead>
-            <tbody>
-              {stats.measured.map((t, i) => (
-                <tr key={t.id || i}>
-                  <td>{i + 1}</td>
-                  <td>{t.role === "user" ? "You" : "Zcode"}</td>
-                  <td className="num">{t.tokens ? t.tokens.toLocaleString() : "—"}</td>
-                  <td className="num">{fmtDuration(t.durationMs || 0)}</td>
-                  <td className="num">{t.tokens && t.durationMs ? `${Math.round(t.tokens / (t.durationMs / 1000))}/s` : "—"}</td>
-                  <td>{t.error ? <span className="failed-chip">failed</span> : t.incomplete ? <span className="muted">in flight</span> : "ok"}</td>
-                </tr>
-              ))}
-              {!stats.measured.length && (
-                <tr><td colSpan={6} className="token-empty">No telemetry yet — turns record usage when they finish.</td></tr>
-              )}
-            </tbody>
-          </table>
+          <div className="token-table-scroll">
+            <table className="token-table">
+              <thead>
+                <tr><th>#</th><th>Role</th><th className="num">Tokens</th><th className="num">Duration</th><th className="num">Speed</th><th>Status</th></tr>
+              </thead>
+              <tbody>
+                {stats.measured.map((t, i) => (
+                  <tr key={t.id || i}>
+                    <td>{i + 1}</td>
+                    <td>{t.role === "user" ? "You" : "Zcode"}</td>
+                    <td className="num">{t.tokens ? t.tokens.toLocaleString() : "—"}</td>
+                    <td className="num">{fmtDuration(t.durationMs || 0)}</td>
+                    <td className="num">{t.tokens && t.durationMs ? `${Math.round(t.tokens / (t.durationMs / 1000))}/s` : "—"}</td>
+                    <td>{t.error ? <span className="failed-chip">failed</span> : t.incomplete ? <span className="muted">in flight</span> : "ok"}</td>
+                  </tr>
+                ))}
+                {!stats.measured.length && (
+                  <tr><td colSpan={6} className="token-empty">No telemetry yet — turns record usage when they finish.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
         <div className="token-actions">
           <button className="secondary-button" onClick={() => void copySummary()}>

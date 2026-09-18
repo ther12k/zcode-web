@@ -83,10 +83,12 @@ export function IconButton({ label, children, className = "", ...props }: Button
   return <button type="button" className={`icon-button ${className}`} title={label} aria-label={label} {...props}>{children}</button>;
 }
 
-export function Dialog({ title, subtitle, children, onClose, wide = false }: { title: string; subtitle?: string; children: ReactNode; onClose: () => void; wide?: boolean }) {
+// sizes: default 512px form dialogs · wide 720px (settings, search, analytics)
+// · xl 960px for data tables (token telemetry's per-turn audit)
+export function Dialog({ title, subtitle, children, onClose, wide = false, xl = false }: { title: string; subtitle?: string; children: ReactNode; onClose: () => void; wide?: boolean; xl?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   useDialogA11y(ref, onClose);
-  return <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}><div className={`dialog ${wide ? "dialog-wide" : ""}`} role="dialog" aria-modal="true" aria-label={title} ref={ref}><header className="dialog-header"><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div><IconButton label="Close dialog" onClick={onClose}><X size={18} /></IconButton></header>{children}</div></div>;
+  return <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}><div className={`dialog ${xl ? "dialog-xl" : wide ? "dialog-wide" : ""}`} role="dialog" aria-modal="true" aria-label={title} ref={ref}><header className="dialog-header"><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div><IconButton label="Close dialog" onClick={onClose}><X size={18} /></IconButton></header>{children}</div></div>;
 }
 
 // ZWUI-015: fail-closed markdown — sanitized, plain-text fallback; fenced
@@ -112,6 +114,14 @@ export function formatDuration(ms: number): string {
   const m = Math.floor(ms / 60_000);
   const s = Math.round((ms % 60_000) / 1000);
   return s ? `${m}m ${s}s` : `${m}m`;
+}
+
+// Attachment sizes for the composer's preflight toasts ("2.4 MB").
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${Math.round(kb)} KB`;
+  return `${(kb / 1024).toFixed(1)} MB`;
 }
 
 export function BusyButton({ busy, children, className = "primary-button", ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { busy?: boolean }) {
