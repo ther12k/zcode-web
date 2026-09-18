@@ -1,7 +1,7 @@
 // ZWUI-058: versioned preferences + per-session drafts. Draft isolation
 // between sessions is a correctness rule (ZWUI-012), not a nicety.
 import { describe, it, expect, beforeEach } from "vitest";
-import { loadPrefs, savePrefs, loadDraft, saveDraft } from "../prefs";
+import { loadPrefs, savePrefs, loadDraft, saveDraft, rememberRecentModel } from "../prefs";
 
 beforeEach(() => {
   localStorage.clear();
@@ -10,7 +10,7 @@ beforeEach(() => {
 describe("preferences store", () => {
   it("returns defaults when nothing is stored", () => {
     const p = loadPrefs();
-    expect(p).toMatchObject({ version: 1, mode: "plan", fontSize: "m", hiddenSessions: [], pinnedSessions: [], displayAliases: {} });
+    expect(p).toMatchObject({ version: 1, mode: "plan", model: "", recentModels: [], fontSize: "m", hiddenSessions: [], pinnedSessions: [], displayAliases: {} });
   });
 
   it("resets quietly on a future version (migration hook)", () => {
@@ -31,6 +31,15 @@ describe("preferences store", () => {
     expect(next.model).toBe("glm-4.6");
     expect(next.fontSize).toBe("l");
     expect(loadPrefs().fontSize).toBe("l");
+  });
+
+  it("remembers recent models newest first with a bounded list", () => {
+    rememberRecentModel("model-a", 3);
+    rememberRecentModel("model-b", 3);
+    rememberRecentModel("model-a", 3);
+    rememberRecentModel("model-c", 3);
+    rememberRecentModel("model-d", 3);
+    expect(loadPrefs().recentModels).toEqual(["model-d", "model-c", "model-a"]);
   });
 });
 

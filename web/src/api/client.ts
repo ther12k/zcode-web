@@ -35,6 +35,9 @@ export type AppConfig = {
   defaultMode: string;
   cliPresent: boolean;
   providerConfigured: boolean;
+  /** composer attachment preflight limits (enforced server-side) */
+  maxUploadBytes: number;
+  maxAttachments: number;
 };
 
 export type ModelInfo = {
@@ -42,6 +45,8 @@ export type ModelInfo = {
   provider: string;
   providerName: string;
   model: string;
+  /** Human-friendly name from the provider config, with model id fallback. */
+  displayName?: string;
   isDefault: boolean;
 };
 

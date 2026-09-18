@@ -12,6 +12,8 @@ export type FontSize = "xs" | "s" | "m" | "l";
 export type Preferences = {
   version: number;
   model: string;
+  /** Recently selected model refs, newest first, device-local. */
+  recentModels: string[];
   mode: string;
   rootPath: string;
   fontSize: FontSize;         // chat text scale, device-local
@@ -23,6 +25,7 @@ export type Preferences = {
 const DEFAULT_PREFS: Preferences = {
   version: PREFS_VERSION,
   model: "",
+  recentModels: [],
   mode: "plan",
   rootPath: "",
   fontSize: "m",
@@ -40,7 +43,13 @@ export function loadPrefs(): Preferences {
       // future: migrate older shapes; today only v1 exists — reset quietly
       return { ...DEFAULT_PREFS };
     }
-    return { ...DEFAULT_PREFS, ...parsed };
+    return {
+      ...DEFAULT_PREFS,
+      ...parsed,
+      recentModels: Array.isArray(parsed.recentModels)
+        ? parsed.recentModels.filter((ref): ref is string => typeof ref === "string" && ref.length > 0).slice(0, 8)
+        : [],
+    };
   } catch {
     return { ...DEFAULT_PREFS };
   }
@@ -58,6 +67,13 @@ export function savePrefs(patch: Partial<Preferences>) {
   try {
     window.dispatchEvent(new CustomEvent(PREFS_EVENT, { detail: next }));
   } catch { /* non-browser context: state sync is best-effort */ }
+  return next;
+}
+
+export function rememberRecentModel(ref: string, limit = 5): string[] {
+  if (!ref) return loadPrefs().recentModels;
+  const next = [ref, ...loadPrefs().recentModels.filter((item) => item !== ref)].slice(0, Math.max(1, limit));
+  savePrefs({ recentModels: next });
   return next;
 }
 

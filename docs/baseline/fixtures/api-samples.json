@@ -20,8 +20,8 @@
   },
   "GET /api/models": {
     "models": [
-      { "ref": "prov-a/Model-X", "provider": "prov-a", "providerName": "Provider A", "model": "Model-X", "isDefault": true },
-      { "ref": "prov-b/Model-Y", "provider": "prov-b", "providerName": "Provider B", "model": "Model-Y", "isDefault": false }
+      { "ref": "prov-a/Model-X", "provider": "prov-a", "providerName": "Provider A", "model": "Model-X", "displayName": "Model X", "isDefault": true },
+      { "ref": "prov-b/Model-Y", "provider": "prov-b", "providerName": "Provider B", "model": "Model-Y", "displayName": "Model Y", "isDefault": false }
     ]
   },
   "POST /api/chat 202": { "jobId": "0f0e1d2c-1111-2222-3333-444455556666", "sessionId": null, "cwd": "/home/u/Workspace/demo", "mode": "plan", "model": null },
