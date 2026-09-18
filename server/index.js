@@ -49,6 +49,24 @@ const contentIndex = new ContentSearchIndex(
 );
 const TERMINAL_STATUS = new Set(["succeeded", "failed", "cancelled", "timeout"]);
 
+// THE one session-activity resolver (detail, list, and recent all use it —
+// a session must not read idle in detail while its sidebar row pulses).
+// The store's heuristic reads the newest message's time.completed: a turn
+// cancelled/failed mid-stream leaves that null and looks busy until the
+// recency window expires. The job registry's terminal verdict overrides it
+// when the run finished at/after the newest message started. Known limit:
+// the timestamp comparison cannot prove message OWNERSHIP — a different
+// writer starting a turn just before this run finished could be suppressed;
+// fixing that needs turn identity in the protocol, not timestamps.
+function sessionRunState(sessionId, storeRunInfo) {
+  if (!storeRunInfo.active) return storeRunInfo;
+  const lastJob = jobs.lastJobForSession(sessionId);
+  if (lastJob && TERMINAL_STATUS.has(lastJob.status) && lastJob.finishedAt && (storeRunInfo.startedAt ?? 0) <= lastJob.finishedAt) {
+    return { active: false, startedAt: null };
+  }
+  return storeRunInfo;
+}
+
 // Short-lived tickets let EventSource connect without putting the long-lived
 // bearer token in the URL (which leaks into proxy logs / history). A ticket
 // is bound to one job and expires with it.
@@ -510,6 +528,9 @@ async function handleApi(req, res, url) {
     const runtime = cliRuntimeStatus();
     return sendJson(res, 200, {
       ok: true,
+      // boot identity (test harnesses verify readiness against THIS build,
+      // not whichever stale listener happens to hold the port)
+      instance: process.env.ZCODE_INSTANCE_ID ?? null,
       cli: { entry: cli.entry, present: cli.present },
       cliRuntime: { ...runtime, warning: runtime.present ? null : "ZCODE_CLI_NODE not found — job spawns will fail" },
       db: { path: cli.dbPath, present: cli.dbPresent },
@@ -577,7 +598,7 @@ async function handleApi(req, res, url) {
     try {
       // ZWUI-082: per-row live flag from the shared store — the sidebar's
       // working loader must reflect ANY writer (desktop/CLI/web)
-      const sessions = store.list(dir).map((s) => ({ ...s, active: store.runInfo(s.id).active }));
+      const sessions = store.list(dir).map((s) => ({ ...s, active: sessionRunState(s.id, store.runInfo(s.id)).active }));
       return sendJson(res, 200, { cwd: dir, sessions });
     } catch (e) {
       // ZWUI-018: real DB failures are 5xx with the reason — never an empty list
@@ -594,7 +615,15 @@ async function handleApi(req, res, url) {
     let workedMs = 0;
     let todos = [];
     try {
-      session = store.get(sessionMatch[1]);
+      // DB_MISSING must not preempt the job-backed branches below: a web-only
+      // session whose CLI never wrote the store still deserves its run's
+      // detail answer instead of a 503
+      try {
+        session = store.get(sessionMatch[1]);
+      } catch (e) {
+        if (e.code !== "DB_MISSING") throw e;
+        session = undefined;
+      }
       // A fresh CLI turn can announce its session before the CLI has committed
       // the session row. Keep a reload in that short window on the live job
       // instead of returning 404 and losing the run's stream identity.
@@ -636,19 +665,9 @@ async function handleApi(req, res, url) {
         const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 5, 1), 400);
         const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0);
         page = store.transcript(session.id, { limit, offset });
-        runInfo = store.runInfo(session.id);
+        runInfo = sessionRunState(session.id, store.runInfo(session.id));
         workedMs = store.workedMs(session.id);
         todos = store.todos(session.id);
-        // The store's runActive heuristic reads the newest message's
-        // time.completed — a turn cancelled/failed mid-stream leaves that
-        // null and the session looks busy until the recency window expires.
-        // This server's own registry knows that run reached a terminal state;
-        // when it finished at/after the newest message started, its verdict
-        // wins. A NEWER turn from another writer re-arms activity honestly.
-        const lastJob = jobs.lastJobForSession(session.id);
-        if (runInfo.active && lastJob && TERMINAL_STATUS.has(lastJob.status) && lastJob.finishedAt && (runInfo.startedAt ?? 0) <= lastJob.finishedAt) {
-          runInfo = { active: false, startedAt: null };
-        }
       }
     } catch (e) {
       const status = e.code === "DB_MISSING" ? 503 : 500;
@@ -962,14 +981,14 @@ async function handleApi(req, res, url) {
         // no root → latest across every allowed root (search dialog's
         // "latest 50 sessions" empty state)
         // ZWUI-082: active flag per row — any writer (desktop/CLI/web)
-        const sessions = store.recent(ALLOWED_ROOTS, limit).map((s) => ({ ...s, active: store.runInfo(s.id).active }));
+        const sessions = store.recent(ALLOWED_ROOTS, limit).map((s) => ({ ...s, active: sessionRunState(s.id, store.runInfo(s.id)).active }));
         return sendJson(res, 200, { sessions });
       }
       const abs = resolve(rootParam);
       if (!ALLOWED_ROOTS.some((r) => abs === r || abs.startsWith(r + sep))) {
         return sendJson(res, 403, { error: "root outside allowed roots" });
       }
-      const sessions = store.recentUnder(abs, limit).map((s) => ({ ...s, active: store.runInfo(s.id).active }));
+      const sessions = store.recentUnder(abs, limit).map((s) => ({ ...s, active: sessionRunState(s.id, store.runInfo(s.id)).active }));
       return sendJson(res, 200, { sessions });
     } catch (e) {
       const status = e.code === "DB_MISSING" ? 503 : 500;
@@ -1332,7 +1351,16 @@ async function handleApi(req, res, url) {
 // ---------- server ----------
 
 const server = createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  let url;
+  try {
+    // URL construction is INSIDE the guarded path: a malformed request
+    // target or Host header throws here, and a throw escaping this callback
+    // is an uncaught exception that takes the whole process down — before
+    // authentication is even reached. Answer 400 instead.
+    url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  } catch {
+    return sendJson(res, 400, { error: "malformed request" });
+  }
   try {
     if (url.pathname.startsWith("/api/")) {
       if (url.pathname === "/api/bootstrap" && req.method === "GET") {

@@ -317,7 +317,15 @@ export function ChatPanel({
     let timer: ReturnType<typeof setTimeout> | null = null;
     const tick = async () => {
       timer = null;
-      if (fetching || document.visibilityState !== "visible") return;
+      if (!alive) return;
+      // hidden tabs skip the REQUEST but must keep the scheduler alive —
+      // returning here without rescheduling would stop the loop until an
+      // unrelated effect re-ran it, and the visibility handler only forces
+      // ONE refresh on return, not continued polling
+      if (fetching || document.visibilityState !== "visible") {
+        timer = setTimeout(tick, 2_000);
+        return;
+      }
       fetching = true;
       try {
         const d = await client.session(sessionId, HISTORY_PAGE, 0);

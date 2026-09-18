@@ -19,10 +19,10 @@ services:
     container_name: zcode-web
     user: "${HOST_UID:?set HOST_UID in .env}:${HOST_GID:?set HOST_GID in .env}"
     ports:
-      - "3000:3000"
+      - "127.0.0.1:${ZCODE_WEB_PORT:-3000}:3000"
     environment:
       HOME: ${HOST_HOME:?set HOST_HOME in .env}
-      ZCODE_WEB_TOKEN: ${ZCODE_WEB_TOKEN:-change-me-please}
+      ZCODE_WEB_TOKEN: ${ZCODE_WEB_TOKEN:?Set a strong ZCODE_WEB_TOKEN (required — no insecure default)}
       ZCODE_ALLOWED_MODES: ${ZCODE_ALLOWED_MODES:-plan,build,edit,yolo}
       ZCODE_MAX_JOBS: ${ZCODE_MAX_JOBS:-3}
       ZCODE_JOB_TIMEOUT_MS: ${ZCODE_JOB_TIMEOUT_MS:-900000}

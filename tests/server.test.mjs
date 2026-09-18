@@ -4,9 +4,10 @@
 
 import { spawn } from "node:child_process";
 import { createServer as createHttpServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, mkdirSync, existsSync, symlinkSync, unlinkSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, existsSync, symlinkSync, unlinkSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -28,12 +29,17 @@ function startServer(extraEnv = {}) {
   // what ZWUI-018's DB_MISSING case asserts
   home = mkdtempSync(join(tmpdir(), "zc-home-"));
   const fakeHome = home;
+  // per-boot identity: /api/health echoes it, so readiness can PROVE our
+  // build answered (a stale foreign server holding the port with the same
+  // credential must not satisfy the check)
+  const nonce = randomUUID();
   server = spawn(process.execPath, [join(SERVER_ROOT, "server", "index.js")], {
     env: {
       ...process.env,
       PORT: String(PORT),
       HOST: "127.0.0.1",
       ZCODE_WEB_TOKEN: TOKEN,
+      ZCODE_INSTANCE_ID: nonce,
       ZCODE_CLI_ENTRY: join(SERVER_ROOT, "scripts", "fake-cli.mjs"),
       ZCODE_WORKSPACE_ROOT: ws,
       ZCODE_HOME: fakeHome,
@@ -45,17 +51,31 @@ function startServer(extraEnv = {}) {
     stdio: ["ignore", "pipe", "pipe"],
   });
   server.stderr.on("data", (c) => process.stderr.write(c));
-  // wait for listen
-  return new Promise((resolve) => {
+  // readiness fails FAST and PROVABLY: child exit (e.g. EADDRINUSE from a
+  // stale port holder) rejects at once, a hard deadline replaces infinite
+  // polling, and the health nonce proves OUR build answered
+  return new Promise((resolve, reject) => {
+    let settled = false;
     const t = setInterval(async () => {
       try {
         const r = await fetch(`${BASE}/api/health`, { headers: { authorization: `Bearer ${TOKEN}` } });
-        if (r.ok) {
-          clearInterval(t);
-          resolve();
-        }
+        if (!r.ok) return;
+        const body = await r.json().catch(() => null);
+        if (body?.instance !== nonce) return; // foreign listener — wait for ours or fail
+        finish(resolve);
       } catch {}
     }, 100);
+    const deadline = setTimeout(() => finish(reject, new Error(`startServer: no verified server at ${BASE} within 10s`)), 10_000);
+    const onExit = (code) => finish(reject, new Error(`startServer: server exited during startup (code ${code})`));
+    server.once("exit", onExit);
+    function finish(fn, arg) {
+      if (settled) return;
+      settled = true;
+      clearInterval(t);
+      clearTimeout(deadline);
+      server.off("exit", onExit);
+      fn(arg);
+    }
   });
 }
 
@@ -1724,6 +1744,207 @@ describe("JobManager stdout multibyte decoding", async () => {
       const line = job.lines.find((e) => e.kind === "line");
       assert.equal(line.line.payload.response, "héllo 🌍 done", "the split emoji survives parsing");
     } finally {
+      config.cliEntry = prevEntry;
+    }
+  });
+});
+
+// ── review follow-ups: verdict retention, parser boundary, group cleanup,
+//    bounded retention, resolver consistency, startup fail-fast ──
+
+// boot an ISOLATED server on its own port+home (never touches the globals
+// the shared suite relies on); nonce-checked readiness like startServer
+async function bootServer(port, { env = {}, homeDir, wsDir } = {}) {
+  mkdirSync(join(homeDir, "cli", "db"), { recursive: true });
+  mkdirSync(wsDir, { recursive: true });
+  const nonce = randomUUID();
+  const proc = spawn(process.execPath, [join(SERVER_ROOT, "server", "index.js")], {
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: "127.0.0.1",
+      ZCODE_WEB_TOKEN: TOKEN,
+      ZCODE_INSTANCE_ID: nonce,
+      ZCODE_CLI_ENTRY: join(SERVER_ROOT, "scripts", "fake-cli.mjs"),
+      ZCODE_WORKSPACE_ROOT: wsDir,
+      ZCODE_HOME: homeDir,
+      ZCODE_ENABLE_FILES: "1",
+      ZCODE_ENABLE_GIT: "1",
+      ...env,
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  const base = `http://127.0.0.1:${port}`;
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (proc.exitCode !== null) throw new Error(`bootServer exited early (code ${proc.exitCode})`);
+    try {
+      const r = await fetch(`${base}/api/health`, { headers: { authorization: `Bearer ${TOKEN}` } });
+      if (r.ok && (await r.json()).instance === nonce) return { proc, base };
+    } catch {}
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  proc.kill();
+  throw new Error(`bootServer: no verified server at ${base}`);
+}
+
+describe("review follow-ups", () => {
+  it("malformed Host header answers 400 and the process keeps serving", async () => {
+    // raw socket: no credentials, malformed Host — must not crash the server
+    const sock = (await import("node:net")).connect(PORT, "127.0.0.1");
+    await new Promise((r) => sock.once("connect", r));
+    sock.write("GET /api/health HTTP/1.1\r\nHost: [::bad\r\n\r\n");
+    const raw = await new Promise((r) => {
+      let buf = "";
+      const t = setTimeout(() => { sock.destroy(); r(buf); }, 3000);
+      sock.on("data", (c) => { buf += c; if (buf.includes("\r\n\r\n")) { clearTimeout(t); sock.destroy(); r(buf); } });
+      sock.on("error", () => { clearTimeout(t); r(buf); });
+    });
+    assert.match(raw, /^HTTP\/1\.1 400/, "malformed request gets a controlled 400");
+    // …and the same process still answers an authenticated health check
+    const after = await fetch(`${BASE}/api/health`, { headers: { authorization: `Bearer ${TOKEN}` } });
+    assert.equal(after.status, 200);
+  });
+
+  it("/api/health echoes the boot nonce (readiness proves the build)", async () => {
+    const r = await fetch(`${BASE}/api/health`, { headers: { authorization: `Bearer ${TOKEN}` } });
+    const j = await r.json();
+    assert.ok(typeof j.instance === "string" && j.instance.length > 10, "instance id present");
+  });
+
+  it("a cancelled RESUMED session keeps its idle verdict in detail, list, and recent", async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const home2 = mkdtempSync(join(tmpdir(), "zc-res-"));
+    const ws2 = mkdtempSync(join(tmpdir(), "zc-ws-"));
+    const proj = join(ws2, "proj");
+    mkdirSync(proj, { recursive: true });
+    mkdirSync(join(home2, "cli", "db"), { recursive: true });
+    const sid = "sess_resume_verdict_000000000000000000000";
+    const db = new DatabaseSync(join(home2, "cli", "db", "db.sqlite"));
+    db.exec(`
+      CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT);
+      CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, sequence INTEGER);
+      CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT, sequence INTEGER);
+      CREATE TABLE session_target (session_id TEXT PRIMARY KEY, objective TEXT, status TEXT, tokens_used INTEGER, time_used_seconds INTEGER, time_created INTEGER, time_updated INTEGER);
+      CREATE TABLE turn_usage (session_id TEXT, turn_id TEXT, user_message_id TEXT, status TEXT, started_at INTEGER, completed_at INTEGER, duration_ms INTEGER);
+      CREATE TABLE todo (session_id TEXT, content TEXT, status TEXT, priority TEXT, position INTEGER, time_created INTEGER, time_updated INTEGER, PRIMARY KEY (session_id, position));
+    `);
+    db.prepare("INSERT INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)")
+      .run(sid, "resumed probe", proj, 1, Date.now());
+    // the poisoned state under test: an assistant message whose
+    // time.completed was never written (turn cancelled mid-stream)
+    db.prepare("INSERT INTO message (id, session_id, data, sequence) VALUES (?,?,?,?)")
+      .run("msg_rv", sid, JSON.stringify({ role: "assistant", time: { created: Date.now() - 60_000 } }), 0);
+    db.close();
+
+    const { proc, base } = await bootServer(PORT + 7, { homeDir: home2, wsDir: ws2 });
+    try {
+      const H = { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" };
+      // store heuristic alone says busy…
+      const before = await (await fetch(`${base}/api/sessions/${sid}`, { headers: H })).json();
+      assert.equal(before.runActive, true, "seeded incomplete message reads busy before the run");
+      // …resume the session and cancel the turn
+      const chatR = await fetch(`${base}/api/chat`, { method: "POST", headers: H, body: JSON.stringify({ text: "wait a while resume verdict", sessionId: sid, cwd: proj, mode: "build" }) });
+      assert.equal(chatR.status, 202);
+      const { jobId } = await chatR.json();
+      await new Promise((r) => setTimeout(r, 700));
+      const cancelR = await fetch(`${base}/api/jobs/${jobId}/cancel`, { method: "POST", headers: H });
+      assert.equal(cancelR.status, 200);
+      let status = "";
+      for (let i = 0; i < 40 && !status; i++) {
+        await new Promise((r) => setTimeout(r, 150));
+        const j = await (await fetch(`${base}/api/jobs/${jobId}`, { headers: H })).json();
+        if (["cancelled", "failed", "succeeded"].includes(j.status)) status = j.status;
+      }
+      assert.equal(status, "cancelled");
+      // the verdict survives: ONE resolver answer everywhere
+      const detail = await (await fetch(`${base}/api/sessions/${sid}`, { headers: H })).json();
+      assert.equal(detail.runActive, false, "detail settles to idle");
+      const list = await (await fetch(`${base}/api/sessions?cwd=${encodeURIComponent(proj)}`, { headers: H })).json();
+      const row = list.sessions.find((s) => s.id === sid);
+      assert.equal(row?.active, false, "list agrees with detail");
+      const recent = await (await fetch(`${base}/api/sessions/recent?limit=50`, { headers: H })).json();
+      const rrow = recent.sessions.find((s) => s.id === sid);
+      assert.equal(rrow?.active, false, "recent agrees with detail");
+    } finally {
+      proc.kill();
+    }
+  });
+
+  it("terminal-job expiry leaves a small verdict record, not the full job", async () => {
+    const home2 = mkdtempSync(join(tmpdir(), "zc-ret-"));
+    const ws2 = mkdtempSync(join(tmpdir(), "zc-rws-"));
+    const { proc, base } = await bootServer(PORT + 8, { homeDir: home2, wsDir: ws2, env: { ZCODE_JOB_RETENTION_MS: "400" } });
+    try {
+      const H = { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" };
+      const chatR = await fetch(`${base}/api/chat`, { method: "POST", headers: H, body: JSON.stringify({ text: "retention probe", cwd: ws2, mode: "build" }) });
+      const { jobId } = await chatR.json();
+      let sid = null;
+      for (let i = 0; i < 40; i++) {
+        await new Promise((r) => setTimeout(r, 150));
+        const j = await (await fetch(`${base}/api/jobs/${jobId}`, { headers: H })).json();
+        sid = j.sessionId ?? sid;
+        if (["succeeded", "failed"].includes(j.status)) break;
+      }
+      assert.ok(sid, "session id learned from the job");
+      // past the retention window: the job is reaped…
+      await new Promise((r) => setTimeout(r, 900));
+      const reaped = await fetch(`${base}/api/jobs/${jobId}`, { headers: H });
+      assert.equal(reaped.status, 404, "replay window closed");
+      // …but the web-only session still settles idle via the small record
+      const detail = await fetch(`${base}/api/sessions/${sid}`, { headers: H });
+      assert.equal(detail.status, 200, "synthetic detail from terminal record");
+      assert.equal((await detail.json()).runActive, false);
+    } finally {
+      proc.kill();
+    }
+  });
+
+  it("startup fails fast and clearly when the port is already held", async () => {
+    const proc = spawn(process.execPath, [join(SERVER_ROOT, "server", "index.js")], {
+      env: { ...process.env, PORT: String(PORT), HOST: "127.0.0.1", ZCODE_WEB_TOKEN: TOKEN, ZCODE_INSTANCE_ID: randomUUID(), ZCODE_CLI_ENTRY: join(SERVER_ROOT, "scripts", "fake-cli.mjs"), ZCODE_WORKSPACE_ROOT: ws, ZCODE_HOME: home },
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    const code = await new Promise((resolve) => {
+      const t = setTimeout(() => { proc.kill(); resolve("timeout"); }, 8000);
+      proc.once("exit", (c) => { clearTimeout(t); resolve(c); });
+    });
+    assert.notEqual(code, "timeout", "bind failure must exit promptly, not hang");
+    assert.notEqual(code, 0, "double-bind cannot succeed");
+  });
+
+  it("cancellation SIGKILLs the process GROUP — an orphan ignoring SIGTERM dies too", async () => {
+    const { JobManager, config } = await import("../server/zcode.js");
+    const prevEntry = config.cliEntry;
+    const pidFile = join(tmpdir(), `orphan-${randomUUID()}.pid`);
+    process.env.ORPHAN_PID_FILE = pidFile;
+    config.cliEntry = join(SERVER_ROOT, "tests", "fixtures", "cli-orphan.mjs");
+    try {
+      const mgr = new JobManager();
+      const { job } = mgr.start({ text: "spawn orphan", cwd: ws, mode: "plan" });
+      // wait for the fixture to have spawned its tool child
+      let childPid = 0;
+      for (let i = 0; i < 50 && !childPid; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        if (existsSync(pidFile)) childPid = Number(readFileSync(pidFile, "utf8").trim());
+      }
+      assert.ok(childPid > 0, "orphan pid file written");
+      process.kill(childPid, 0); // alive before cancel
+      assert.equal(mgr.cancel(job.id), true);
+      for (let i = 0; i < 40 && !["cancelled", "failed"].includes(job.status); i++) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      assert.equal(job.status, "cancelled", "leader cancelled promptly");
+      // the escalation window (5s) must clear the group even though the
+      // leader is gone and the job is already terminal
+      let dead = false;
+      for (let i = 0; i < 90 && !dead; i++) {
+        await new Promise((r) => setTimeout(r, 150));
+        try { process.kill(childPid, 0); } catch { dead = true; }
+      }
+      assert.ok(dead, "orphaned tool process reaped by the group escalation");
+    } finally {
+      delete process.env.ORPHAN_PID_FILE;
       config.cliEntry = prevEntry;
     }
   });

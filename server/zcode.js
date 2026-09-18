@@ -24,6 +24,8 @@ export const config = {
   cliNode: (process.env.ZCODE_CLI_NODE || "").trim() || process.execPath,
   zcodeHome: process.env.ZCODE_HOME || join(homedir(), ".zcode"),
   jobTimeoutMs: Number(process.env.ZCODE_JOB_TIMEOUT_MS || 15 * 60_000),
+  // how long a terminal job stays addressable for status + SSE replay
+  jobRetentionMs: Number(process.env.ZCODE_JOB_RETENTION_MS || 30 * 60_000),
   maxJobs: Number(process.env.ZCODE_MAX_JOBS || 3),
   maxUploadBytes: Number(process.env.ZCODE_MAX_UPLOAD_BYTES || 15 * 1024 * 1024),
   allowedModes: (process.env.ZCODE_ALLOWED_MODES || "plan,build,edit,yolo")
@@ -315,18 +317,14 @@ export class JobManager {
     const finish = (exitCode, error) => {
       if (TERMINAL.has(job.status)) return;
       job.finishedAt = Date.now();
-      // bySession KEEPS the terminal job: the session detail route reads its
-      // verdict to override the store's runActive heuristic (a cancelled
-      // turn's un-completed assistant message otherwise looks busy for the
-      // whole recency window). activeJobForSession filters terminals, and
-      // start()'s SESSION_BUSY guard ignores them, so this stays safe and
-      // bounded (one entry per session key).
-      if (job.resumeSessionId && this.bySession.get(job.resumeSessionId) === job) {
-        this.bySession.delete(job.resumeSessionId);
-      }
-      if (job.resumeSessionId && this.bySession.get(job.resumeSessionId) === job) {
-        this.bySession.delete(job.resumeSessionId);
-      }
+      // bySession KEEPS the terminal verdict (for BOTH fresh and resumed
+      // runs — resumeSessionId and sessionId are the same identity on a
+      // resume, so deleting "the resume entry" deletes the verdict itself).
+      // The detail/list routes read it to override the store's runActive
+      // heuristic: a turn cancelled mid-stream leaves the newest message's
+      // time.completed null and would otherwise look busy for the whole
+      // recency window. Replacement is guarded so a newer job's entry is
+      // never clobbered.
       job.exitCode = exitCode;
       job.error = error ? String(error) : (job.hasTurnFailed && !job.error ? "turn failed" : job.error);
       if (job.status === "stopping") {
@@ -354,11 +352,18 @@ export class JobManager {
         killSignal: job.killSignal,
       });
       clearTimeout(timer);
-      // terminal jobs stay addressable (status + replay) for a window
+      // terminal jobs stay addressable (status + replay) for a window; the
+      // session map only keeps a SMALL terminal record afterwards so replay
+      // buffers and process references cannot accumulate per session
       setTimeout(() => {
         this.jobs.delete(job.id);
         if (job.requestId) this.byRequest.delete(job.requestId);
-      }, 30 * 60_000).unref();
+        for (const key of [job.sessionId, job.resumeSessionId]) {
+          if (key && this.bySession.get(key) === job) {
+            this.bySession.set(key, { sessionId: key, status: job.status, finishedAt: job.finishedAt, terminalRecord: true });
+          }
+        }
+      }, config.jobRetentionMs).unref();
     };
 
     const timer = setTimeout(() => {
@@ -372,7 +377,6 @@ export class JobManager {
 
     proc.on("error", (err) => finish(null, err));
     proc.on("close", (code, signal) => {
-      if (process.env.ZCODE_DEBUG_CANCEL) console.error(`[close ${job.id.slice(0, 8)}] code=${code} signal=${signal} at +${Date.now() - job.createdAt}ms`);
       if (signal) job.killSignal = signal;
       if (job.timedOut) finish(code, null);
       else finish(code);
@@ -390,13 +394,17 @@ export class JobManager {
     if (job.status === "stopping") return true;
     job.cancelRequested = true;
     job.setStatus("stopping");
-    if (process.env.ZCODE_DEBUG_CANCEL) console.error(`[cancel ${jobId.slice(0, 8)}] SIGTERM at +${Date.now() - job.createdAt}ms pid=${job.proc?.pid}`);
     killTree(job.proc, "SIGTERM");
+    // Escalation targets the PROCESS GROUP and runs even after the job goes
+    // terminal: the CLI can exit promptly on SIGTERM while a tool subprocess
+    // it spawned ignores the term signal — "group leader exited" is not
+    // proof the owned group is empty. ESRCH means the group is gone (the
+    // clean case); pid reuse before this fires would require the entire
+    // group to die and a new session leader to take the id.
+    const pgid = job.proc?.pid;
     setTimeout(() => {
-      if (!TERMINAL.has(job.status)) {
-        if (process.env.ZCODE_DEBUG_CANCEL) console.error(`[cancel ${jobId.slice(0, 8)}] SIGKILL failsafe at +${Date.now() - job.createdAt}ms`);
-        killTree(job.proc, "SIGKILL");
-      }
+      if (!job.cancelRequested || !pgid) return;
+      try { process.kill(-pgid, "SIGKILL"); } catch { /* group already empty */ }
     }, 5000).unref();
     return true;
   }

@@ -823,6 +823,62 @@ test("ZWUI-075: reload mid-run reattaches to the in-flight job stream", async ({
   await expect(page.locator(".message-duration")).toHaveText(/cancelled/, { timeout: 15_000 });
 });
 
+// Review follow-up (P1): a session whose persisted newest message is an
+// INCOMPLETE assistant turn (cancelled mid-stream) must settle to idle after
+// cancelling a RESUMED run — and stay idle across a reload. This is the
+// exact combination the old suites missed: resumption + poisoned history +
+// cancellation + reconciliation.
+test("cancelled resumed session settles idle and survives reload", async ({ page }) => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { mkdirSync } = await import("node:fs");
+  const { dirname } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const dbDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", ".e2e-home", "cli", "db");
+  mkdirSync(dbDir, { recursive: true });
+  const db = new DatabaseSync(join(dbDir, "db.sqlite"));
+  for (const col of ["title_source", "time_title_updated"]) {
+    try { db.exec(`ALTER TABLE session ADD COLUMN ${col} ${col === "title_source" ? "TEXT NOT NULL DEFAULT 'first_input'" : "INTEGER"}`); } catch { /* already present */ }
+  }
+  const wsRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", ".e2e-ws");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT);
+    CREATE TABLE IF NOT EXISTS message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, sequence INTEGER);
+    CREATE TABLE IF NOT EXISTS part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT, sequence INTEGER);
+  `);
+  const sid = "sess_resume_idle_0000000000000000000000000";
+  db.exec(`DELETE FROM message WHERE session_id = '${sid}'`);
+  db.exec(`DELETE FROM session WHERE id = '${sid}'`);
+  db.prepare("INSERT INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)")
+    .run(sid, "Resume idle probe", wsRoot, 1, Date.now());
+  // a COMPLETE history first — the poisoned (incomplete) assistant row is
+  // injected after the cancel, modeling what the real CLI leaves behind on
+  // a turn stopped mid-stream
+  db.prepare("INSERT INTO message (id, session_id, data, sequence) VALUES (?,?,?,?)")
+    .run("msg_ri", sid, JSON.stringify({ role: "assistant", time: { created: Date.now() - 120_000, completed: Date.now() - 110_000 } }), 0);
+  db.close();
+  await page.goto("/w/" + encodeURIComponent(wsRoot) + "/s/" + sid);
+  await expect(page.getByLabel("Message Zcode")).toBeVisible();
+  const input = page.getByLabel("Message Zcode");
+  await input.fill("wait a while resume idle");
+  await input.press("Enter");
+  await expect(page.getByLabel("Stop run")).toBeVisible({ timeout: 8000 });
+  await page.getByLabel("Stop run").click();
+  // the composer must return to Send — no "streaming in the Zcode app" lock
+  await expect(page.getByLabel("Send message")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".composer-hint")).not.toContainText("streaming in the Zcode app");
+  // NOW poison the store the way a cancelled mid-stream turn looks, and
+  // reload: the registry's terminal verdict must keep the session idle
+  const db2 = new DatabaseSync(join(dbDir, "db.sqlite"));
+  db2.prepare("UPDATE message SET data = ? WHERE id = 'msg_ri'")
+    .run(JSON.stringify({ role: "assistant", time: { created: Date.now() - 60_000 } }));
+  db2.close();
+  await page.reload();
+  await page.waitForLoadState("domcontentloaded");
+  await expect(page.getByLabel("Message Zcode")).toBeVisible({ timeout: 8000 });
+  await expect(page.getByLabel("Send message")).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator(".composer-hint")).not.toContainText("streaming in the Zcode app");
+});
+
 test("ZWUI-076: a follow-up on an existing session never re-fetches the transcript", async ({ page }) => {
   const input = page.getByLabel("Message Zcode");
   await input.fill("browser integration hello");
@@ -1527,4 +1583,56 @@ test("ZWUI-082: steer interrupts the running turn and sends the draft immediatel
   await expect(page.locator(".agent-message").last()).toContainText("echo:steered hello", { timeout: 25_000 });
   // the steered run adopted the same session
   await expect(page).toHaveURL(/\/s\/sess_[A-Za-z0-9-]+/, { timeout: 10_000 });
+});
+
+// Review follow-up (P2): hiding the tab must PAUSE polling requests without
+// killing the scheduler — after restore, continued synchronization must
+// resume (more than the single visibilitychange refresh).
+test("hidden tab keeps the polling loop alive for continued sync", async ({ page }) => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { mkdirSync } = await import("node:fs");
+  const { dirname } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const dbDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", ".e2e-home", "cli", "db");
+  mkdirSync(dbDir, { recursive: true });
+  const wsRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", ".e2e-ws");
+  const sid = "sess_hidden_poll_000000000000000000000000";
+  const db = new DatabaseSync(join(dbDir, "db.sqlite"));
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT);
+    CREATE TABLE IF NOT EXISTS message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, sequence INTEGER);
+    CREATE TABLE IF NOT EXISTS part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT, sequence INTEGER);
+  `);
+  const dbFile = join(dbDir, "db.sqlite");
+  const seedText = (text: string) => {
+    const conn = new DatabaseSync(dbFile);
+    conn.exec(`DELETE FROM part WHERE session_id = '${sid}'`);
+    conn.exec(`DELETE FROM message WHERE session_id = '${sid}'`);
+    conn.exec(`DELETE FROM session WHERE id = '${sid}'`);
+    conn.prepare("INSERT INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)").run(sid, "hidden poll probe", wsRoot, 1, Date.now());
+    conn.prepare("INSERT INTO message (id, session_id, data, sequence) VALUES (?,?,?,?)").run("msg_hp", sid, JSON.stringify({ role: "assistant", time: { created: Date.now(), completed: Date.now() } }), 0);
+    conn.prepare("INSERT INTO part (id, message_id, session_id, data, sequence) VALUES (?,?,?,?,?)").run("part_hp", "msg_hp", sid, JSON.stringify({ type: "text", text }), 0);
+    conn.close();
+  };
+  seedText("first marker");
+
+  await page.goto("/w/" + encodeURIComponent(wsRoot) + "/s/" + sid);
+  await expect(page.getByLabel("Message Zcode")).toBeVisible();
+  await expect(page.locator(".agent-message").or(page.locator(".markdown")).first()).toContainText("first marker", { timeout: 8000 });
+
+  // hide the tab long enough for a scheduled tick to fire while hidden —
+  // a REAL hide via another tab taking foreground (fires visibilitychange)
+  const other = await page.context().newPage();
+  await other.bringToFront();
+  await page.waitForTimeout(2500);
+  await page.bringToFront();
+  await other.close();
+
+  // first post-restore mutation: the loop must pick this up…
+  seedText("second marker");
+  await expect(page.locator(".agent-message").or(page.locator(".markdown")).first()).toContainText("second marker", { timeout: 15_000 });
+  // …and STILL be polling afterwards — a third mutation lands too (this is
+  // the part the old code lost: one visibility refresh, then silence)
+  seedText("third marker");
+  await expect(page.locator(".agent-message").or(page.locator(".markdown")).first()).toContainText("third marker", { timeout: 15_000 });
 });
