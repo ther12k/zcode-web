@@ -682,12 +682,13 @@ export class ContentSearchIndex {
 }
 
 // Session rename: the CLI stores the title on the session row itself and
-// marks user-set titles with title_source='user'. We write exactly that.
+// marks user-set titles with title_source='custom' (the schema's CHECK
+// allows default/first_input/generated/custom — 'user' violates it).
 export function renameSession(dbPath, sessionId, title) {
   const db = new DatabaseSync(dbPath);
   try {
     const info = db
-      .prepare("UPDATE session SET title = ?, title_source = 'user', time_title_updated = ? WHERE id = ? AND id NOT LIKE 'sess_subagent_%'")
+      .prepare("UPDATE session SET title = ?, title_source = 'custom', time_title_updated = ? WHERE id = ? AND id NOT LIKE 'sess_subagent_%'")
       .run(String(title).slice(0, 200), Date.now(), sessionId);
     return info.changes > 0;
   } finally {

@@ -25,6 +25,26 @@ test("deep link renders the reference shell (route identity survives refresh)", 
   await expect(page.locator(".statusbar")).toBeVisible();
 });
 
+// Regression (collapse button): the desktop width block must not clobber the
+// base `.sidebar-collapsed` rail — collapsing used to hide every label while
+// the column stayed at its full 238px width (a wide empty icon strip).
+test.describe("desktop sidebar collapse (1280px)", () => {
+  test("collapse shrinks the column to the 62px rail and expands back", async ({ page }) => {
+    const sidebarW = async () => page.evaluate(() => Math.round((document.querySelector(".sidebar") as HTMLElement).getBoundingClientRect().width));
+    expect(await sidebarW()).toBeGreaterThanOrEqual(190);
+    await page.getByLabel("Collapse sidebar").click();
+    await expect(page.locator(".app-shell")).toHaveClass(/sidebar-collapsed/);
+    expect(await sidebarW()).toBeLessThanOrEqual(66);
+    // the sort/view switch has no 62px form — it returns when expanded
+    await expect(page.locator(".sidebar-viewbar")).toBeHidden();
+    // the wordmark is hidden in the rail; the logo button toggles back
+    await page.getByLabel("Toggle workspace navigation").click();
+    await expect(page.locator(".app-shell")).not.toHaveClass(/sidebar-collapsed/);
+    expect(await sidebarW()).toBeGreaterThanOrEqual(190);
+    await expect(page.locator(".sidebar-viewbar")).toBeVisible();
+  });
+});
+
 test("send a message and watch the streamed reply complete", async ({ page }) => {
   const input = page.getByLabel("Message Zcode");
   await input.fill("browser integration hello");
@@ -34,9 +54,9 @@ test("send a message and watch the streamed reply complete", async ({ page }) =>
   // live-run evidence appears (working dots or activity), then the echoed answer
   await expect(page.locator(".working-message, .agent-message").first()).toBeVisible({ timeout: 8000 });
   await expect(page.locator(".agent-message")).toContainText("echo:browser integration hello", { timeout: 20000 });
-  // ZWUI-063: the terminal footer is truthful — "Run finished", never a
-  // "Plan ready/Task completed" claim the run cannot prove
-  await expect(page.locator(".message-footer, .activity")).toContainText(/Run finished/, { timeout: 10000 });
+  // ZWUI-063: the terminal footer is a neutral completion summary — no
+  // success claim beyond the turn itself finishing
+  await expect(page.locator(".message-footer, .activity")).toContainText(/Completed/, { timeout: 10000 });
   // a fresh chat adopts its session: the URL gains /s/<sessionId> while the
   // stream keeps rendering
   await expect(page).toHaveURL(/\/s\/sess_[A-Za-z0-9-]+/, { timeout: 10_000 });
@@ -120,6 +140,8 @@ test("skills launcher lists real skills and drafts the composer", async ({ page 
   await page.locator(".secondary-nav .nav-button", { hasText: "Skills" }).click();
   const dialog = page.getByRole("dialog", { name: /expertise, on demand/ });
   await expect(dialog).toBeVisible();
+  // two-column skill cards need the wide dialog, not the 512px default
+  expect((await dialog.boundingBox())?.width).toBeGreaterThan(640);
   // the fake CLI registry serves three skills
   await expect(dialog.locator(".skill-card")).toHaveCount(3);
   // search filters
@@ -128,6 +150,12 @@ test("skills launcher lists real skills and drafts the composer", async ({ page 
   // selecting a skill lands its prompt in the composer and closes the dialog
   await dialog.locator(".skill-card").click();
   await expect(dialog).toBeHidden();
+  await expect(page.getByLabel("Message Zcode")).toHaveValue("Use the fake-deploy skill: ");
+  // re-selecting the same skill must not duplicate the injected text
+  await page.locator(".secondary-nav .nav-button", { hasText: "Skills" }).click();
+  await expect(dialog).toBeVisible();
+  await dialog.getByLabel("Search skills").fill("deploy");
+  await dialog.locator(".skill-card").click();
   await expect(page.getByLabel("Message Zcode")).toHaveValue("Use the fake-deploy skill: ");
 });
 
@@ -377,7 +405,10 @@ test("desktop updates append without reloading the open view", async ({ page }) 
   await expect(page.getByText("answer that streamed in from the desktop")).toBeVisible({ timeout: 5000 });
   await expect(page.getByText("first prompt")).toBeVisible();
   await expect(page.locator(".chat-loader")).toHaveCount(0);
-  await expect(page.getByText("Worked for 4s")).toBeVisible();
+  // ZWUI-081: the finished turn leaves a neutral "Completed" summary — the
+  // "Worked for" timer is gone once the turn ends
+  await expect(page.locator(".task-completed").last()).toHaveText(/Completed/);
+  await expect(page.getByText("Worked for 4s")).toHaveCount(0);
 });
 
 test("chat affordances: jump-to-latest pill and stable load-older position", async ({ page }) => {
@@ -562,6 +593,9 @@ test.describe("telemetry surfaces", () => {
     await page.locator(".chat-context .token-chip").click();
     const dialog = page.getByRole("dialog", { name: /Token telemetry/i });
     await expect(dialog).toBeVisible();
+    // the per-turn audit needs the xl dialog — the old 512/602px widths
+    // crushed the metric cards and table columns
+    expect((await dialog.boundingBox())?.width).toBeGreaterThan(800);
     // only assistant turns carry tokens/duration in the mock — 2 measured rows
     await expect(dialog.getByText(/Turns measured/)).toBeVisible();
     await expect(dialog.locator(".token-table tbody tr")).toHaveCount(2);
@@ -572,6 +606,46 @@ test.describe("telemetry surfaces", () => {
     // Escape closes (shared dialog a11y)
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
+  });
+
+  // The dialog must always fit the viewport; only its audit table scrolls
+  // (metrics, table header, and actions stay pinned).
+  test("token telemetry dialog fits the viewport and scrolls the table inside", async ({ page }) => {
+    const longSession = {
+      ...teleSession,
+      transcript: Array.from({ length: 48 }, (_, i) => mkTurn(i)),
+      total: 48,
+    };
+    await page.route(/\/api\/sessions\/sess_.+\?limit=/, (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(longSession) })
+    );
+    await page.reload();
+    await page.waitForLoadState("domcontentloaded");
+    await expect(page.getByText("answer 47")).toBeVisible({ timeout: 5000 });
+    await page.locator(".chat-context .token-chip").click();
+    const dialog = page.getByRole("dialog", { name: /Token telemetry/i });
+    await expect(dialog).toBeVisible();
+    // 24 measured rows cannot fit a 720px viewport — the dialog still must
+    const box = await dialog.boundingBox();
+    const viewport = page.viewportSize();
+    assert.ok(box && viewport, "dialog box and viewport must resolve");
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
+    // header and actions are pinned without scrolling the dialog itself
+    await expect(dialog.getByRole("button", { name: /Copy summary/ })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: /Export JSON/ })).toBeVisible();
+    await expect(dialog.locator(".token-table tbody tr")).toHaveCount(24);
+    // the table region is the scroller: content overflows and scrolls
+    const scroll = dialog.locator(".token-table-scroll");
+    const before = await scroll.evaluate((el) => ({ top: el.scrollTop, overflow: el.scrollHeight - el.clientHeight }));
+    expect(before.overflow).toBeGreaterThan(0);
+    await scroll.evaluate((el) => { el.scrollTop = 120; });
+    await expect(scroll).toHaveJSProperty("scrollTop", 120);
+    // the sticky header stays at the top of the scroll region
+    const headBox = await dialog.locator(".token-table thead th").first().boundingBox();
+    const scrollBox = await scroll.boundingBox();
+    assert.ok(headBox && scrollBox);
+    expect(Math.abs(headBox.y - scrollBox.y)).toBeLessThan(2);
   });
 
   test("agent terminal drawer lists bash evidence and is read-only", async ({ page }) => {
@@ -594,12 +668,14 @@ test.describe("telemetry surfaces", () => {
   test("byline times render and toggle between relative and exact", async ({ page }) => {
     const bar = page.locator(".chat-context");
     const timesItem = () => page.getByRole("menuitemcheckbox", { name: /Exact times/ });
+    // exact timestamps are the default byline mode (date included for older turns)
+    await expect(page.locator(".message-byline time").first()).toHaveText(/\d{2}:\d{2}/);
     await bar.locator(".context-menu-wrap > button").click();
     await timesItem().click();
-    await expect(page.locator(".message-byline time").first()).toHaveText(/\d{2}:\d{2}/);
+    await expect(page.locator(".message-byline time").first()).toHaveText(/^\d+[mhd]$/);
     // checkbox items keep the menu open — toggle straight back
     await timesItem().click();
-    await expect(page.locator(".message-byline time").first()).toHaveText(/^\d+[mhd]$/);
+    await expect(page.locator(".message-byline time").first()).toHaveText(/\d{2}:\d{2}/);
   });
 });
 
@@ -776,7 +852,9 @@ test("ZWUI-074: Escape interrupts the active turn without clicking Stop", async 
   );
   await page.keyboard.press("Escape");
   await expect((await cancelResponse).status()).toBe(200);
-  await expect(page.getByLabel("Send message")).toBeVisible({ timeout: 15_000 });
+  // SIGTERM → child close → done event can lag on a loaded CI box — the
+  // composer's return to idle is the user-visible contract, give it room
+  await expect(page.getByLabel("Send message")).toBeVisible({ timeout: 30_000 });
 });
 
 test("ZWUI-040: Stop shows cancelled in the browser AND /api/jobs agrees", async ({ page }) => {
@@ -1208,7 +1286,7 @@ test.describe("ZWUI-058: clipboard copy", () => {
   });
 });
 
-test("ZWUI-056: session rows render title + project/time meta (two-line shape)", async ({ page }) => {
+test("ZWUI-056: session rows render the desktop's single-line shape (title + right-aligned project/time)", async ({ page }) => {
   await page.route(/\/api\/sessions\/recent\?.*/, async (route) =>
     route.fulfill({
       status: 200,
@@ -1225,6 +1303,215 @@ test("ZWUI-056: session rows render title + project/time meta (two-line shape)",
   await expect(row.locator(".task-title")).toHaveText("row shape probe");
   await expect(row.locator(".task-meta .task-project")).toHaveText("proj");
   await expect(row.locator(".task-meta time")).toHaveCount(1);
+  // one line like the desktop: the row stays ~30px tall even when active —
+  // the title ellipsizes instead of wrapping to a second line
   const box = (await row.locator(".task-link").boundingBox())!;
-  expect(box.height).toBeGreaterThanOrEqual(44);
+  expect(box.height).toBeLessThan(40);
+  const title = (await row.locator(".task-title").boundingBox())!;
+  const time = (await row.locator(".task-meta time").boundingBox())!;
+  // same line: vertical centers align, and time sits right of the title block
+  const titleCenter = title.y + title.height / 2;
+  const timeCenter = time.y + time.height / 2;
+  expect(Math.abs(titleCenter - timeCenter)).toBeLessThan(2);
+  expect(time.x).toBeGreaterThan(title.x + (title.width ?? 0) / 2);
+});
+
+// Session options menu: rename writes through to the store (title updates in
+// the topbar AND the sidebar) and pin moves the row into the pinned section.
+test("session options menu renames and pins the open session", async ({ page }) => {
+  // the shared e2e store predates the rename columns — evolve it in place
+  // (ALTER ... ADD COLUMN throws when the column already exists)
+  const { DatabaseSync } = await import("node:sqlite");
+  const { mkdirSync } = await import("node:fs");
+  const { dirname } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const dbDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", ".e2e-home", "cli", "db");
+  mkdirSync(dbDir, { recursive: true });
+  const db = new DatabaseSync(join(dbDir, "db.sqlite"));
+  for (const col of ["title_source", "time_title_updated"]) {
+    try { db.exec(`ALTER TABLE session ADD COLUMN ${col} ${col === "title_source" ? "TEXT NOT NULL DEFAULT 'first_input'" : "INTEGER"}`); } catch { /* already present */ }
+  }
+  // a real session row (the fake CLI's fixed id never lands in the store)
+  const sid = "sess_rename_e2e_0000000000000000000000000";
+  const wsRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", ".e2e-ws");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT);
+    CREATE TABLE IF NOT EXISTS message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, sequence INTEGER);
+    CREATE TABLE IF NOT EXISTS part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT, sequence INTEGER);
+  `);
+  db.prepare("INSERT OR REPLACE INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)")
+    .run(sid, "Before rename", wsRoot, 1, Date.now());
+  db.close();
+  await page.goto("/w/" + encodeURIComponent(wsRoot) + "/s/" + sid);
+  await expect(page.getByLabel("Message Zcode")).toBeVisible();
+  await expect(page.locator(".topbar-title")).toHaveText("Before rename");
+  await page.getByLabel("Session options").click();
+  await page.getByRole("menuitem", { name: "Rename session" }).click();
+  await page.locator("#rename-session").fill("Renamed by e2e");
+  await page.getByRole("button", { name: "Save name" }).click();
+  await expect(page.getByText("Session renamed.")).toBeVisible();
+  await expect(page.locator(".topbar-title")).toHaveText("Renamed by e2e");
+  // pin from the same menu — the row floats to the pinned section
+  await page.getByLabel("Session options").click();
+  await page.getByRole("menuitem", { name: "Pin session" }).click();
+  await expect(page.locator(".pinned-section")).toBeVisible();
+  await expect(page.locator(".pinned-row")).toContainText("Renamed by e2e");
+});
+
+// ZWUI-080: the composer preflights attachments against the server-advertised
+// caps — over-limit files are refused at pick time, never after a base64 read
+test("ZWUI-080: a sixth attachment is refused at pick time (server cap mirrored)", async ({ page }) => {
+  let uploads = 0;
+  await page.route(/\/api\/upload$/, async (route) => {
+    uploads += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ path: `/e2e-uploads/f${uploads}.txt`, name: `f${uploads}.txt`, size: 3 }),
+    });
+  });
+  const files = Array.from({ length: 6 }, (_, i) => ({
+    name: `f${i + 1}.txt`,
+    mimeType: "text/plain",
+    buffer: Buffer.from("abc"),
+  }));
+  await page.locator('input[type="file"]').setInputFiles(files);
+  await expect(page.getByRole("alert")).toContainText("5 attachments max — skipped f6.txt");
+  await expect(page.locator(".attached-file")).toHaveCount(5);
+  expect(uploads).toBe(5);
+});
+
+test("ZWUI-080: an oversized attachment is rejected before upload", async ({ page }) => {
+  // shrink the advertised cap so a tiny buffer counts as oversized
+  await page.route(/\/api\/config$/, async (route) => {
+    const res = await route.fetch();
+    const j = await res.json();
+    j.maxUploadBytes = 8;
+    await route.fulfill({ response: res, json: j });
+  });
+  await page.reload();
+  await page.waitForLoadState("domcontentloaded");
+  await expect(page.getByLabel("Message Zcode")).toBeVisible();
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "big.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("123456789"), // 9 bytes > the mocked 8-byte cap
+  });
+  await expect(page.getByRole("alert")).toContainText("big.txt: too large (9 B — limit 8 B)");
+  await expect(page.locator(".attached-file")).toHaveCount(0);
+});
+
+test("model picker groups providers, searches flexibly, and refreshes live config", async ({ page }) => {
+  let modelCalls = 0;
+  let catalog = [
+    { ref: "zai/glm-5.3", provider: "zai", providerName: "Z.AI", model: "glm-5.3", displayName: "GLM 5.3", isDefault: true },
+    { ref: "zai/glm-5.3-flash", provider: "zai", providerName: "Z.AI", model: "glm-5.3-flash", displayName: "GLM 5.3 Flash", isDefault: false },
+    { ref: "openai/gpt-5.2", provider: "openai", providerName: "OpenAI", model: "gpt-5.2", displayName: "GPT 5.2", isDefault: false },
+  ];
+  await page.route(/\/api\/models$/, async (route) => {
+    modelCalls += 1;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ models: catalog }) });
+  });
+  await page.reload();
+  await page.waitForLoadState("domcontentloaded");
+  const picker = page.locator(".model-picker");
+  await picker.click();
+  const dialog = page.getByRole("dialog", { name: "Select model" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator(".model-section-label", { hasText: "Z.AI" })).toBeVisible();
+  await expect(dialog.locator(".model-section-label", { hasText: "OpenAI" })).toBeVisible();
+  await expect(dialog.getByText("GLM 5.3 Flash", { exact: true })).toBeVisible();
+  await dialog.getByLabel("Search models or providers").fill("glm 53 flash");
+  await expect(dialog.getByText("GLM 5.3 Flash", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("GPT 5.2", { exact: true })).toHaveCount(0);
+  await dialog.getByText("GLM 5.3 Flash", { exact: true }).click();
+  await expect(picker).toContainText("GLM 5.3 Flash");
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("zcode-web-prefs") || "{}").model)).toBe("zai/glm-5.3-flash");
+  await picker.click();
+  catalog = [catalog[0], { ...catalog[2], isDefault: true }, { ref: "openai/o4-mini", provider: "openai", providerName: "OpenAI", model: "o4-mini", displayName: "o4-mini", isDefault: false }];
+  const beforeRefresh = modelCalls;
+  await dialog.getByLabel("Refresh models").click();
+  await expect(dialog.getByText("o4-mini", { exact: true })).toBeVisible();
+  expect(modelCalls).toBeGreaterThan(beforeRefresh);
+});
+
+test("ZWUI-080: composer and shell menus expose menu semantics", async ({ page }) => {
+  const modeButton = page.locator(".mode-picker");
+  await expect(modeButton).toHaveAttribute("aria-haspopup", "menu");
+  await expect(modeButton).toHaveAttribute("aria-expanded", "false");
+  await modeButton.click();
+  await expect(modeButton).toHaveAttribute("aria-expanded", "true");
+  const modeMenu = page.locator(".mode-popover");
+  await expect(modeMenu).toHaveAttribute("role", "menu");
+  await expect(modeMenu.locator('[role="menuitemradio"][aria-checked="true"]')).toHaveCount(1);
+  await page.keyboard.press("Escape");
+  await expect(modeButton).toHaveAttribute("aria-expanded", "false");
+  // shell session-options menu
+  const options = page.getByRole("button", { name: "Session options" });
+  await options.click();
+  await expect(options).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator(".task-popover")).toHaveAttribute("role", "menu");
+  await page.keyboard.press("Escape");
+  await expect(options).toHaveAttribute("aria-expanded", "false");
+});
+
+// ZWUI-082: a session with a live run shows the amber working loader on its
+// sidebar row — visible without having the conversation open
+test("ZWUI-082: the sidebar row of a running session shows the working loader", async ({ page }) => {
+  // the fake CLI always adopts session sess_fake0… — list it in the sidebar
+  // before the run starts (the fake CLI writes no session rows to the store)
+  const FAKE_SID = "sess_fake0000000000000000000000000000";
+  await page.route(/\/api\/sessions\/recent\?.*/, async (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ sessions: [
+        { id: FAKE_SID, title: "sidebar loader probe", directory: "/home/ther12k/Workspace/ZCode/zcode-web/.e2e-ws", updatedAt: Date.now(), createdAt: Date.now() },
+      ] }),
+    })
+  );
+  await page.goto("/w/default");
+  await page.waitForLoadState("domcontentloaded");
+  const row = page.locator(".sessions-list .task-row", { hasText: "sidebar loader probe" });
+  await expect(row).toBeVisible();
+  await expect(row.locator(".task-dot.working")).toHaveCount(0);
+  // start a run in that session — the row dot pulses amber while it lives
+  const input = page.getByLabel("Message Zcode");
+  await row.locator(".task-link").click();
+  await expect(page).toHaveURL(new RegExp(`/s/${FAKE_SID}`), { timeout: 10_000 });
+  await input.fill("wait a while sidebar loader");
+  await input.press("Enter");
+  await expect(row.locator(".task-dot.working")).toHaveCount(1, { timeout: 10_000 });
+  await expect(row).toHaveClass(/is-working/);
+  // and the chat's own working row shows the amber "Working for" timer
+  await expect(page.locator(".working-message")).toContainText(/Working for \d+s/, { timeout: 8000 });
+  // cleanup via the explicit Stop control (deterministic target): the dot
+  // retires with the run
+  await expect(page.getByLabel("Stop run")).toBeVisible({ timeout: 8000 });
+  await page.getByLabel("Stop run").click();
+  await expect(page.locator(".message-duration")).toHaveText(/cancelled/, { timeout: 15_000 });
+  await expect(row.locator(".task-dot.working")).toHaveCount(0, { timeout: 10_000 });
+});
+
+// ZWUI-082: steer — interrupt the current turn and send the drafted message
+// as soon as the interrupt settles
+test("ZWUI-082: steer interrupts the running turn and sends the draft immediately", async ({ page }) => {
+  const input = page.getByLabel("Message Zcode");
+  await input.fill("wait a while before steering");
+  await input.press("Enter");
+  await expect(page.getByLabel("Stop run")).toBeVisible({ timeout: 8000 });
+  await input.fill("steered hello");
+  const steer = page.getByLabel("Steer — interrupt and send now");
+  await expect(steer).toBeVisible();
+  const steerClick = steer.click();
+  const cancelResponse = page.waitForResponse(
+    (r) => r.url().includes("/cancel") && r.request().method() === "POST",
+    { timeout: 8000 }
+  );
+  await Promise.all([steerClick, cancelResponse.then((r) => expect(r.status()).toBe(200))]);
+  // the composer cleared at steer time, and the steered text runs right after
+  // the interrupt settles — its echo must appear in this session
+  await expect(page.locator(".agent-message").last()).toContainText("echo:steered hello", { timeout: 25_000 });
+  // the steered run adopted the same session
+  await expect(page).toHaveURL(/\/s\/sess_[A-Za-z0-9-]+/, { timeout: 10_000 });
 });

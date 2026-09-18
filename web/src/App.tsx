@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, lazy, Suspense } from "react";
 import {
   Archive, ArrowDownWideNarrow, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Clock3, Eye, EyeOff, KeyRound,
-  FolderClosed, FolderOpen, History, Keyboard, LoaderCircle, Menu, MoreHorizontal, PanelLeft, PanelRight, Pin, PinOff, Plus,
+  FolderClosed, History, Keyboard, LoaderCircle, Menu, MoreHorizontal, PanelLeft, PanelRight, Pin, PinOff, Plus,
   Search, Settings2, SquarePen, Unplug, WandSparkles, X, GitBranch,
 } from "lucide-react";
 import { useNavigate, useParams } from "@tanstack/react-router";
@@ -27,13 +27,18 @@ const ToolsDialog = lazy(() => import("./components/InfoDialogs").then((m) => ({
 const AnalyticsDialog = lazy(() => import("./components/AnalyticsDialog").then((m) => ({ default: m.AnalyticsDialog })));
 import type { IssueIdentity, ScannedIssueRef } from "./lib/issueRefs";
 import { effectivePanelWidth } from "./lib/layout";
-import { activeRunCount, subscribeRuns } from "./state/runManager";
+import { activeRunCount, activeRunSessionIds, subscribeRuns } from "./state/runManager";
 import type { TodoItem } from "./api/client";
 
 type SessionRow = {
   id: string; title: string; directory: string; updatedAt: number;
+  /** ZWUI-082: a turn is live in this session from ANY writer (store flag) */
+  active?: boolean;
   goal?: { objective: string; status: string; tokensUsed: number; timeUsedSeconds: number; updatedAt: number } | null;
 };
+
+// stable getSnapshot fallback for the working-session subscription
+const EMPTY_WORKING_SET: Set<string> = new Set();
 
 export function App() {
   const { client, caps, capsError, token, setToken, logout, reloadCaps, prefs, updatePrefs } = useWorkspace();
@@ -383,6 +388,7 @@ export function App() {
       notify("Session renamed.");
       setRenaming(null);
       refreshSessions();
+      setRecentNonce((n) => n + 1);
     } catch (e) {
       notify((e as Error).message, "error");
       setRenaming((r2) => (r2 ? { ...r2, busy: false } : r2));
@@ -403,6 +409,9 @@ export function App() {
   // global list still reads clearly. Re-selecting still merges the active
   // project's own sessions to the top via pinned/sort below.
   const [recent, setRecent] = useState<SessionRow[]>([]);
+  // bumped after a rename so the global recent list (and pinned rows that
+  // resolve titles from it) don't show the pre-rename title for a poll cycle
+  const [recentNonce, setRecentNonce] = useState(0);
   useEffect(() => {
     let alive = true;
     if (!cwd || sidebarView !== "sessions") return;
@@ -421,7 +430,7 @@ export function App() {
       load();
     }, 30_000);
     return () => { alive = false; clearInterval(poll); };
-  }, [cwd, sidebarView, token]);
+  }, [cwd, sidebarView, token, recentNonce]);
 
   // ZWUI-067: a pinned session older than the latest-50 window must stay
   // reachable — resolve its title/directory on demand instead of dropping it
@@ -451,6 +460,8 @@ export function App() {
   // ZWUI-067: the statusbar count is the true number of live runs across ALL
   // conversations (background runs included), not "the open one"
   const runningCount = useSyncExternalStore(subscribeRuns, activeRunCount, () => 0);
+  // ZWUI-082: which sessions hold those runs — the sidebar's working loader
+  const workingSessionIds = useSyncExternalStore(subscribeRuns, activeRunSessionIds, () => EMPTY_WORKING_SET);
 
   // Desktop parity for background work: the app badge/dock icon shows agent
   // activity; a browser tab only has its title. Prefix it while any run is
@@ -548,8 +559,10 @@ export function App() {
         >
           <ZLogo size={25} /><span className="brand-name">zcode</span>
         </button>
-        <span className="web-badge">web</span>
+        {/* desktop layout: the collapse control sits right beside the wordmark;
+           the web badge rides the far edge as the product's honest differentiator */}
         <IconButton label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"} className="collapse-button" onClick={() => setSidebarCollapsed(!sidebarCollapsed)}><PanelLeft size={15} /></IconButton>
+        <span className="web-badge">web</span>
       </header>
 
       <header className="topbar">
@@ -569,7 +582,8 @@ export function App() {
           <div className="title-stack">
             <h1 className="topbar-title" title={activeSession?.title || "New chat"}>{activeSession?.title || "New chat"}</h1>
             {/* ZWUI-079: the desktop's "Worked for 12m 26s" under the session
-                title — completed-turn time plus the live turn's elapsed */}
+                title — the session-level cumulative record (per-turn "Worked
+                for" rows are gone from the transcript once turns complete) */}
             {activeSessionId && liveWorkedMs >= 1000 && (
               <span className="topbar-worked" title="Cumulative agent working time on this session">
                 <Clock3 size={11} />
@@ -591,27 +605,27 @@ export function App() {
             onClick={() => { setRightCollapsed(false); setMobilePreview((v) => !v); }}
           ><PanelRight size={16} /></IconButton>
           <div className="task-menu-wrap">
-            <IconButton label="Session options" className={taskMenu ? "selected" : ""} onClick={() => setTaskMenu(!taskMenu)}><MoreHorizontal size={18} /></IconButton>
+            <IconButton label="Session options" className={taskMenu ? "selected" : ""} aria-haspopup="menu" aria-expanded={taskMenu} onClick={() => setTaskMenu(!taskMenu)}><MoreHorizontal size={18} /></IconButton>
             {taskMenu && activeSessionId && (
-              <div className="popover task-popover">
+              <div className="popover task-popover" role="menu" aria-label="Session actions">
                 <div className="popover-label">SESSION ACTIONS</div>
-                <button onClick={() => { const pinned = !prefs.pinnedSessions.includes(activeSessionId); updatePrefs({ pinnedSessions: pinned ? [...prefs.pinnedSessions, activeSessionId] : prefs.pinnedSessions.filter((x) => x !== activeSessionId) }); notify(pinned ? "Pinned to the top of your sidebar." : "Removed from pinned."); setTaskMenu(false); }}>
+                <button role="menuitem" onClick={() => { const pinned = !prefs.pinnedSessions.includes(activeSessionId); updatePrefs({ pinnedSessions: pinned ? [...prefs.pinnedSessions, activeSessionId] : prefs.pinnedSessions.filter((x) => x !== activeSessionId) }); notify(pinned ? "Pinned to the top of your sidebar." : "Removed from pinned."); setTaskMenu(false); }}>
                   {prefs.pinnedSessions.includes(activeSessionId) ? <PinOff size={14} /> : <Pin size={14} />}{prefs.pinnedSessions.includes(activeSessionId) ? "Unpin session" : "Pin session"}
                 </button>
-                <button onClick={() => { setRenaming({ title: activeSession?.title || "", busy: false }); setTaskMenu(false); }}>
+                <button role="menuitem" onClick={() => { setRenaming({ title: activeSession?.title || "", busy: false }); setTaskMenu(false); }}>
                   <SquarePen size={14} />Rename session
                 </button>
-                <button onClick={() => { updatePrefs({ hiddenSessions: prefs.hiddenSessions.includes(activeSessionId) ? prefs.hiddenSessions.filter((x) => x !== activeSessionId) : [...prefs.hiddenSessions, activeSessionId] }); notify("Hidden on this device."); setTaskMenu(false); }}>
+                <button role="menuitem" onClick={() => { updatePrefs({ hiddenSessions: prefs.hiddenSessions.includes(activeSessionId) ? prefs.hiddenSessions.filter((x) => x !== activeSessionId) : [...prefs.hiddenSessions, activeSessionId] }); notify("Hidden on this device."); setTaskMenu(false); }}>
                   <Archive size={14} />{prefs.hiddenSessions.includes(activeSessionId) ? "Unhide on this device" : "Hide on this device"}
                 </button>
                 <div className="popover-divider" />
-                <button onClick={() => { setModal("settings"); setTaskMenu(false); }}><Settings2 size={14} />Settings</button>
+                <button role="menuitem" onClick={() => { setModal("settings"); setTaskMenu(false); }}><Settings2 size={14} />Settings</button>
               </div>
             )}
             {taskMenu && !activeSessionId && (
-              <div className="popover task-popover">
+              <div className="popover task-popover" role="menu" aria-label="Session actions">
                 <div className="popover-label">SESSION ACTIONS</div>
-                <button onClick={() => { setModal("settings"); setTaskMenu(false); }}><Settings2 size={14} />Settings</button>
+                <button role="menuitem" onClick={() => { setModal("settings"); setTaskMenu(false); }}><Settings2 size={14} />Settings</button>
               </div>
             )}
           </div>
@@ -620,18 +634,17 @@ export function App() {
 
       <aside className="sidebar" aria-label="Workspace navigation">
         <div className="primary-nav">
-          <button className="nav-button new-task-button" onClick={navigateNewChat} title="New chat"><SquarePen size={16} /><span className="nav-label">New chat</span></button>
-          <button className="nav-button" onClick={() => setModal("search")} title="Search sessions"><Search size={16} /><span className="nav-label">Search sessions</span><kbd>⌘ K</kbd></button>
-          <button className="nav-button" onClick={() => { updatePrefs({ rootPath: roots.find((r) => r !== cwd) || roots[0] || "" }); notify("Switched workspace root."); }} title="Open workspace"><FolderOpen size={16} /><span className="nav-label">Open workspace</span></button>
+          <button className="nav-button new-task-button" onClick={navigateNewChat} title="New task"><SquarePen size={16} /><span className="nav-label">New task</span></button>
+          <button className="nav-button" onClick={() => setModal("search")} title="Search sessions"><Search size={16} /><span className="nav-label">Search</span><kbd>⌘ K</kbd></button>
         </div>
         <div className="sidebar-viewbar">
           <span className="sort-menu-wrap">
-            <IconButton label="Change sidebar sorting" className={sortMenu ? "selected" : ""} onClick={() => setSortMenu(!sortMenu)}><ArrowDownWideNarrow size={13} /></IconButton>
+            <IconButton label="Change sidebar sorting" className={sortMenu ? "selected" : ""} aria-haspopup="menu" aria-expanded={sortMenu} onClick={() => setSortMenu(!sortMenu)}><ArrowDownWideNarrow size={13} /></IconButton>
             {sortMenu && (
-              <div className="popover sort-popover">
+              <div className="popover sort-popover" role="menu" aria-label="Sidebar sorting">
                 <div className="popover-label">SORT BY</div>
                 {([["recent", "Most recent", "Latest activity first"], ["name", "Name", "Alphabetical order"]] as const).map(([id, label, hint]) => (
-                  <button key={id} onClick={() => { setSidebarSort(id); setSortMenu(false); }}>
+                  <button key={id} role="menuitemradio" aria-checked={sidebarSort === id} onClick={() => { setSidebarSort(id); setSortMenu(false); }}>
                     <span><b>{label}</b><small>{hint}</small></span>
                     {sidebarSort === id && <CheckCircle2 size={13} className="success-text" />}
                   </button>
@@ -645,7 +658,7 @@ export function App() {
           </div>
         </div>
         <div className="sidebar-section">
-          <span>{sidebarView === "projects" ? "PROJECTS" : "RECENT SESSIONS"}</span>
+          <span>{sidebarView === "projects" ? "PROJECTS" : "RECENT"}</span>
           <div>
             {navOpen && isNarrowNav && (
               <IconButton label="Close navigation" className="drawer-close" onClick={() => setNavOpen(false)}><X size={14} /></IconButton>
@@ -671,7 +684,7 @@ export function App() {
                     return (
                       <div key={id} className={`pinned-row ${id === activeSessionId ? "active" : ""}`}>
                         <button className="pinned-row-link" onClick={() => selectSession(id, directory || undefined)} title={title}>
-                          <span className={`task-dot ${id === activeSessionId ? "current" : ""}`} />
+                          <span className={`task-dot ${id === activeSessionId ? "current" : ""} ${workingSessionIds.has(id) || row?.active ? "working" : ""}`} />
                           <span>{prefs.displayAliases[id] || title}</span>
                           <span className="pinned-kind">{directory.split("/").filter(Boolean).pop() || "…"}</span>
                         </button>
@@ -695,6 +708,7 @@ export function App() {
                     key={s.id}
                     row={s}
                     active={s.id === activeSessionId}
+                    working={workingSessionIds.has(s.id) || s.active}
                     prefs={prefs}
                     onSelect={() => selectSession(s.id, s.directory)}
                     onPin={(pin) => updatePrefs({ pinnedSessions: pin ? [...prefs.pinnedSessions, s.id] : prefs.pinnedSessions.filter((x) => x !== s.id) })}
@@ -772,6 +786,8 @@ export function App() {
           onBusyChange={setRunBusy}
           onSlashAction={onSlashAction}
           onSessionMeta={onSessionMeta}
+          maxUploadBytes={caps.maxUploadBytes}
+          maxAttachments={caps.maxAttachments}
           onSessionCreated={(id) => {
             refreshSessions();
             if (id !== activeSessionId) {
@@ -941,26 +957,25 @@ function TokenPrompt({ onSubmit, isInvalid }: { onSubmit: (t: string) => void; i
             </div>
           </div>
         </header>
-        <form
-          className="dialog-body"
-          onSubmit={(e) => { e.preventDefault(); onSubmit(v.trim()); }}
-        >
-          <label className="field-label" htmlFor="token-input">Access token</label>
-          <div className="token-field">
-            <input
-              id="token-input"
-              type={reveal ? "text" : "password"}
-              className="text-field mono"
-              value={v}
-              onChange={(e) => setV(e.target.value)}
-              placeholder="zb…"
-              autoComplete="off"
-              spellCheck={false}
-              autoFocus
-            />
-            <IconButton label={reveal ? "Hide token" : "Show token"} onClick={() => setReveal((r) => !r)}>
-              {reveal ? <EyeOff size={14} /> : <Eye size={14} />}
-            </IconButton>
+        <form onSubmit={(e) => { e.preventDefault(); onSubmit(v.trim()); }}>
+          <div className="dialog-body">
+            <label className="field-label" htmlFor="token-input">Access token</label>
+            <div className="token-field">
+              <input
+                id="token-input"
+                type={reveal ? "text" : "password"}
+                className="text-field mono"
+                value={v}
+                onChange={(e) => setV(e.target.value)}
+                placeholder="zb…"
+                autoComplete="off"
+                spellCheck={false}
+                autoFocus
+              />
+              <IconButton label={reveal ? "Hide token" : "Show token"} onClick={() => setReveal((r) => !r)}>
+                {reveal ? <EyeOff size={14} /> : <Eye size={14} />}
+              </IconButton>
+            </div>
           </div>
           <div className="dialog-footer">
             <span className="muted">Stored locally · never sent anywhere but this server</span>
@@ -1090,9 +1105,9 @@ function ProjectGroups({ roots, activeSessionId, pinnedSessions, onSelectSession
                       {isOpen && (
                         <div className="project-tasks">
                           {(rows || []).map((s) => (
-                            <div className={`task-row ${activeSessionId === s.id ? "active" : ""}`} key={s.id}>
+                            <div className={`task-row ${activeSessionId === s.id ? "active" : ""} ${s.active ? "is-working" : ""}`} key={s.id}>
                               <button className="task-link" onClick={() => onSelectSession(s.id, s.directory || dir)} title={s.title}>
-                                <span className={`task-dot ${activeSessionId === s.id ? "current" : ""}`} />
+                                <span className={`task-dot ${activeSessionId === s.id ? "current" : ""} ${s.active ? "working" : ""}`} />
                                 <span className="task-title-wrap"><span className="task-title">{s.title || s.id}</span></span>
                                 <time>{relativeTime(s.updatedAt)}</time>
                               </button>
@@ -1113,9 +1128,11 @@ function ProjectGroups({ roots, activeSessionId, pinnedSessions, onSelectSession
   );
 }
 
-function SessionRow({ row, active, prefs, onSelect, onPin, onHide }: {
+function SessionRow({ row, active, working, prefs, onSelect, onPin, onHide }: {
   row: { id: string; title: string; updatedAt: number; directory: string };
   active: boolean;
+  /** a live run is attached to this session — the row shows the working loader */
+  working?: boolean;
   prefs: { pinnedSessions: string[]; displayAliases: Record<string, string> };
   onSelect: () => void;
   onPin: (pin: boolean) => void;
@@ -1123,17 +1140,16 @@ function SessionRow({ row, active, prefs, onSelect, onPin, onHide }: {
 }) {
   const pinned = prefs.pinnedSessions.includes(row.id);
   return (
-    <div className={`task-row ${active ? "active" : ""} ${pinned ? "is-pinned" : ""}`}>
+    <div className={`task-row ${active ? "active" : ""} ${pinned ? "is-pinned" : ""} ${working ? "is-working" : ""}`}>
       <button className="task-link" onClick={onSelect} title={`${row.title}${row.directory ? ` — ${row.directory}` : ""}`}>
-        <span className={`task-dot ${active ? "current" : ""}`} />
-        {/* title owns the line; project + recency sit underneath as metadata
-           — one cramped line truncated titles to ~10 characters */}
-        <span className="task-title-wrap">
-          <span className="task-title">{prefs.displayAliases[row.id] || row.title || row.id}</span>
-          <span className="task-meta">
-            <span className="task-project" title={row.directory}>{baseName(row.directory)}</span>
-            <time>{relativeTime(row.updatedAt)}</time>
-          </span>
+        <span className={`task-dot ${active ? "current" : ""} ${working ? "working" : ""}`} />
+        {/* desktop row shape: one line — title ellipsized, project + recency
+           right-aligned (the global list spans projects, so the project tag
+           stays visible; the full directory rides the tooltip) */}
+        <span className="task-title">{prefs.displayAliases[row.id] || row.title || row.id}</span>
+        <span className="task-meta">
+          <span className="task-project" title={row.directory}>{baseName(row.directory)}</span>
+          <time>{relativeTime(row.updatedAt)}</time>
         </span>
       </button>
       <span className="task-row-actions">

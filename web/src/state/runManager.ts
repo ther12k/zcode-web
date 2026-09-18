@@ -91,12 +91,32 @@ function destroy(key: RunKey, e: RunEntry) {
 }
 
 function notify(e: RunEntry) {
+  recomputeActiveSessions();
   for (const cb of e.listeners) {
     try { cb(); } catch { /* a dead subscriber must not break the run */ }
   }
   for (const cb of globalListeners) {
     try { cb(); } catch { /* same */ }
   }
+}
+
+// ZWUI-082: which sessions hold a live run — the sidebar marks their rows
+// with the working loader. Cached between notifications so a
+// useSyncExternalStore getSnapshot always returns a stable value.
+let activeSessionCache: Set<string> = new Set();
+function recomputeActiveSessions() {
+  const next = new Set<string>();
+  for (const [key, e] of entries) {
+    if (e.run.phase === "idle" || isTerminal(e.run.phase)) continue;
+    const sid = key.slice(key.indexOf("::") + 2);
+    if (sid && !sid.startsWith("new:")) next.add(sid);
+  }
+  activeSessionCache = next;
+}
+
+/** Session ids (unbound `new:` runs excluded) with a live run. */
+export function activeRunSessionIds(): Set<string> {
+  return activeSessionCache;
 }
 
 function dispatch(key: RunKey, e: RunEntry, action: Parameters<typeof runReducer>[1]) {

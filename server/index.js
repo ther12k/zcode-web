@@ -38,6 +38,9 @@ const ALLOWED_ROOTS = [
 
 const jobs = new JobManager();
 const store = new SessionStore(cliStatus().dbPath);
+// prompt attachments per message — enforced here and advertised to the
+// composer so over-limit files are rejected at pick time, not at send
+const MAX_ATTACHMENTS = 5;
 // sidecar FTS index for message-content search — our own file, the CLI's
 // session DB is never written
 const contentIndex = new ContentSearchIndex(
@@ -307,11 +310,16 @@ function listModels({ withKeys = false } = {}) {
       const models = p?.models || {};
       for (const modelId of Object.keys(models)) {
         const ref = `${id}/${modelId}`;
+        const modelConfig = models[modelId];
+        const displayName = typeof modelConfig === "object" && modelConfig?.name
+          ? String(modelConfig.name)
+          : modelId;
         out.push({
           ref,
           provider: id,
           providerName: p.name || id,
           model: modelId,
+          displayName,
           isDefault: ref === main,
           ...(withKeys
             ? { apiKey: p.options?.apiKey || null, baseURL: p.options?.baseURL || null }
@@ -522,6 +530,10 @@ async function handleApi(req, res, url) {
       defaultMode: "plan",
       cliPresent: cliStatus().present,
       providerConfigured: providerConfigured(),
+      // composer preflight limits — the client rejects over-limit attachments
+      // at pick time instead of after a full base64 round trip
+      maxUploadBytes: config.maxUploadBytes,
+      maxAttachments: MAX_ATTACHMENTS,
     });
   }
 
@@ -563,7 +575,10 @@ async function handleApi(req, res, url) {
       return sendJson(res, 400, { error: "cwd outside workspace root" });
     }
     try {
-      return sendJson(res, 200, { cwd: dir, sessions: store.list(dir) });
+      // ZWUI-082: per-row live flag from the shared store — the sidebar's
+      // working loader must reflect ANY writer (desktop/CLI/web)
+      const sessions = store.list(dir).map((s) => ({ ...s, active: store.runInfo(s.id).active }));
+      return sendJson(res, 200, { cwd: dir, sessions });
     } catch (e) {
       // ZWUI-018: real DB failures are 5xx with the reason — never an empty list
       const status = e.code === "DB_MISSING" ? 503 : 500;
@@ -837,8 +852,8 @@ async function handleApi(req, res, url) {
       .map((p) => resolve(String(p)));
     // ZWUI-072: an explicit error, never a silent drop — a caller that sent
     // six files must know the fifth onward were not analyzed
-    if (requested.length > 5) {
-      return sendJson(res, 400, { error: "too many attachments (max 5)", rejected: requested.slice(5) });
+    if (requested.length > MAX_ATTACHMENTS) {
+      return sendJson(res, 400, { error: `too many attachments (max ${MAX_ATTACHMENTS})`, rejected: requested.slice(MAX_ATTACHMENTS) });
     }
     const bad = requested.filter((p) => !p.startsWith(upDir + sep) || !existsSync(p));
     if (bad.length) {
@@ -920,13 +935,16 @@ async function handleApi(req, res, url) {
       if (!rootParam) {
         // no root → latest across every allowed root (search dialog's
         // "latest 50 sessions" empty state)
-        return sendJson(res, 200, { sessions: store.recent(ALLOWED_ROOTS, limit) });
+        // ZWUI-082: active flag per row — any writer (desktop/CLI/web)
+        const sessions = store.recent(ALLOWED_ROOTS, limit).map((s) => ({ ...s, active: store.runInfo(s.id).active }));
+        return sendJson(res, 200, { sessions });
       }
       const abs = resolve(rootParam);
       if (!ALLOWED_ROOTS.some((r) => abs === r || abs.startsWith(r + sep))) {
         return sendJson(res, 403, { error: "root outside allowed roots" });
       }
-      return sendJson(res, 200, { sessions: store.recentUnder(abs, limit) });
+      const sessions = store.recentUnder(abs, limit).map((s) => ({ ...s, active: store.runInfo(s.id).active }));
+      return sendJson(res, 200, { sessions });
     } catch (e) {
       const status = e.code === "DB_MISSING" ? 503 : 500;
       return sendJson(res, status, { error: e.message, code: e.code });

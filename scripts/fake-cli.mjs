@@ -16,6 +16,10 @@ const promptIdx = args.indexOf("--prompt");
 const prompt = promptIdx >= 0 ? args[promptIdx + 1] : "";
 const mode = process.env.FAKE_MODE || "ok";
 const delay = Number(process.env.FAKE_DELAY_MS || 0);
+// resumed runs must announce the session they resumed — the browser keys the
+// live run by it, and a mismatched id detaches the panel from the stream
+const resumeIdx = args.indexOf("--resume");
+const resumedSessionId = resumeIdx >= 0 ? args[resumeIdx + 1] : null;
 // a "slowfirst" token in the prompt delays the FIRST envelope (not just the
 // answer delta): lets tests exercise the submit→first-event window
 const firstDelay = /\bslowfirst\b/i.test(prompt) ? 5000 : 0;
@@ -50,6 +54,13 @@ if (args[0] === "commands" && args[1] === "list") {
 }
 
 let seq = 0;
+// One session id per PROMPT for fresh chats: the e2e server is shared across
+// the suite, and a fixed id lets one test's lingering long run mark the
+// session busy for every later test (sidebar loaders, locked composers).
+// Resumed runs keep the server-chosen id. Deterministic so specs can compute it.
+import { createHash } from "node:crypto";
+const FAKE_SESSION_ID = resumedSessionId
+  || "sess_" + createHash("sha256").update(prompt).digest("hex").slice(0, 27);
 function emit(type, payload = {}) {
   seq += 1;
   process.stdout.write(
@@ -57,7 +68,7 @@ function emit(type, payload = {}) {
       eventId: `fake-${seq}`,
       payload,
       seq,
-      sessionId: "sess_fake0000000000000000000000000000",
+      sessionId: FAKE_SESSION_ID,
       timestamp: Date.now(),
       traceId: "fake-trace",
       turnId: "turn_fake",

@@ -19,8 +19,16 @@ export type Capabilities = {
   allowedRoots: string[];
   workspaceRoot: string;
   maxJobs: number;
+  /** composer attachment preflight caps (server-advertised; sane fallbacks
+      for the degraded states where /api/config was never reachable) */
+  maxUploadBytes: number;
+  maxAttachments: number;
   runtime: "node" | "lugas/bun" | "unknown";
 };
+
+// matches the server's ZCODE_MAX_UPLOAD_BYTES / MAX_ATTACHMENTS defaults
+const FALLBACK_UPLOAD_BYTES = 15 * 1024 * 1024;
+const FALLBACK_MAX_ATTACHMENTS = 5;
 
 export async function discoverCapabilities(client: ApiClient): Promise<Capabilities> {
   try {
@@ -35,6 +43,8 @@ export async function discoverCapabilities(client: ApiClient): Promise<Capabilit
       allowedRoots: cfg.allowedRoots || [cfg.workspaceRoot],
       workspaceRoot: cfg.workspaceRoot,
       maxJobs: health.maxJobs || 3,
+      maxUploadBytes: cfg.maxUploadBytes || FALLBACK_UPLOAD_BYTES,
+      maxAttachments: cfg.maxAttachments || FALLBACK_MAX_ATTACHMENTS,
       runtime: (health as { runtime?: string }).runtime === "lugas/bun" ? "lugas/bun" : "node",
     };
   } catch (err: unknown) {
@@ -49,6 +59,8 @@ export async function discoverCapabilities(client: ApiClient): Promise<Capabilit
         allowedRoots: [],
         workspaceRoot: "",
         maxJobs: 1,
+        maxUploadBytes: FALLBACK_UPLOAD_BYTES,
+        maxAttachments: FALLBACK_MAX_ATTACHMENTS,
         runtime: "node",
       };
     }
@@ -67,6 +79,8 @@ export async function discoverCapabilities(client: ApiClient): Promise<Capabilit
           allowedRoots: [],
           workspaceRoot: "",
           maxJobs: 1,
+          maxUploadBytes: FALLBACK_UPLOAD_BYTES,
+          maxAttachments: FALLBACK_MAX_ATTACHMENTS,
           runtime: "node",
         };
       }

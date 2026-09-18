@@ -22,7 +22,7 @@ type Analytics = {
 };
 
 function fmt(n: number): string {
-  return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(2)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : n.toLocaleString();
+  return n >= 1_000_000_000 ? `${(n / 1_000_000_000).toFixed(2)}B` : n >= 1_000_000 ? `${(n / 1_000_000).toFixed(2)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : n.toLocaleString();
 }
 function dur(ms: number): string {
   if (!ms) return "—";

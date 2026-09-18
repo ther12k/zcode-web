@@ -3,16 +3,17 @@
 // mode/model pickers, live-run "working" message. Run state comes from the
 // ZWUI-016 reducer; transport from the ZWUI-017 controller.
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, lazy, Suspense } from "react";
-import { ArrowLeftRight, ArrowUp, ArrowUpRight, BadgeCheck, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Coins, Copy, Eye, EyeOff, FileText, FoldVertical, FolderClosed, GitBranch, LoaderCircle, MessageSquare, MoreHorizontal, Plus, RotateCcw, ShieldCheck, SlidersHorizontal, Sparkles, Square, SquarePen, SquareTerminal, Terminal, Unplug, Wrench, X, Zap } from "lucide-react";
-import { ZLogo, IconButton, Markdown, CheckMark, useDialogA11y, overlayOpen, relativeTime } from "../ui";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, lazy, Suspense, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { ArrowLeftRight, ArrowUp, ArrowUpRight, BadgeCheck, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Coins, Copy, Eye, EyeOff, FileText, FoldVertical, FolderClosed, GitBranch, LoaderCircle, MessageSquare, MoreHorizontal, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Sparkles, Square, SquarePen, SquareTerminal, Terminal, Unplug, Wrench, X, Zap } from "lucide-react";
+import { ZLogo, IconButton, Markdown, CheckMark, useDialogA11y, overlayOpen, relativeTime, formatBytes } from "../ui";
 import { randomUUID } from "../lib/uuid";
 import { ApiError, type ApiClient, type CommandInfo, type FileCard, type ModelInfo, type SessionDetail, type SessionInfo, type TimelineEvent, type TodoItem, type TranscriptTurn } from "../api/client";
 import { isTerminal } from "../state/run";
 import * as runs from "../state/runManager";
 import { snapshotSubmission, mayClearDraft, dequeueAfterSuccess, type Submission } from "../lib/submission";
 import { scanIssueRefs, issueKey, parseIssueKey, type IssueIdentity, type ScannedIssueRef } from "../lib/issueRefs";
-import { loadDraft, saveDraft, loadPrefs, savePrefs } from "../state/prefs";
+import { loadDraft, saveDraft, loadPrefs, savePrefs, rememberRecentModel } from "../state/prefs";
+import { compactModelRef, compactProviderId, filterModels, groupModels, modelLabel, recentModels } from "../lib/modelPicker";
 import type { TerminalEntry } from "./Telemetry";
 // ZWUI-069: telemetry surfaces (token audit dialog, terminal drawer) load on
 // demand — off the initial parse tree until first opened
@@ -40,7 +41,7 @@ type PreviewState =
   | { kind: "text"; title: string; text: string };
 
 export function ChatPanel({
-  client, cwd, sessionId, sessionTitle, modes, defaultMode, branch, roots, onNavigateCwd, providerLive = true, newChatNonce = 0, reloadKey = 0, injectedDraft, onNotify, onSessionCreated, onBusyChange, onSlashAction, onSessionMeta, repoBinding, onOpenIssue, onIssuesChange,
+  client, cwd, sessionId, sessionTitle, modes, defaultMode, branch, roots, onNavigateCwd, providerLive = true, newChatNonce = 0, reloadKey = 0, injectedDraft, onNotify, onSessionCreated, onBusyChange, onSlashAction, onSessionMeta, repoBinding, onOpenIssue, onIssuesChange, maxUploadBytes = 15 * 1024 * 1024, maxAttachments = 5,
 }: {
   client: ApiClient;
   cwd: string;
@@ -71,6 +72,9 @@ export function ChatPanel({
   onOpenIssue?: (identity: IssueIdentity) => void;
   /** issue references currently visible in this conversation */
   onIssuesChange?: (refs: ScannedIssueRef[]) => void;
+  /** server-advertised attachment caps (/api/config) — preflight at pick time */
+  maxUploadBytes?: number;
+  maxAttachments?: number;
 }) {
   const draftKey = `${cwd}::${sessionId || "new"}`;
   // ZWUI-050: the run is OWNED by the job-keyed manager and survives view
@@ -84,6 +88,13 @@ export function ChatPanel({
   );
   const [input, setInput] = useState(loadDraft(draftKey));
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelError, setModelError] = useState<string | null>(null);
+  const [modelQuery, setModelQuery] = useState("");
+  const [modelActiveIndex, setModelActiveIndex] = useState(0);
+  const [recentModelRefs, setRecentModelRefs] = useState(() => loadPrefs().recentModels);
+  const modelSearchInput = useRef<HTMLInputElement>(null);
+  const modelLoadSeq = useRef(0);
   const [mode, setMode] = useState(defaultMode);
   const [model, setModel] = useState("");
   const [menu, setMenu] = useState<"mode" | "model" | "project" | "view" | null>(null);
@@ -124,7 +135,9 @@ export function ChatPanel({
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [terminalClearedSig, setTerminalClearedSig] = useState<string | null>(null);
   const [exactTimes, setExactTimes] = useState(() => {
-    try { return localStorage.getItem("zcode-exact-times") === "1"; } catch { return false; }
+    // timestamps are the default reading mode; the View toggle restores
+    // compact relative bylines ("5m ago")
+    try { return localStorage.getItem("zcode-exact-times") !== "0"; } catch { return true; }
   });
   useEffect(() => {
     try { localStorage.setItem("zcode-exact-times", exactTimes ? "1" : "0"); } catch {}
@@ -143,22 +156,35 @@ export function ChatPanel({
   const fileInput = useRef<HTMLInputElement>(null);
   const lastKey = useRef(draftKey);
 
-  // models for the picker
-  useEffect(() => {
-    let alive = true;
-    void client.models()
-      .then((r) => {
-        if (!alive) return;
-        setModels(r.models);
-        // Keep a valid user choice across reloads. Server default only wins
-        // when saved model no longer exists.
-        const saved = loadPrefs().model;
-        setModel((cur) => cur || (r.models.find((m) => m.ref === saved) || r.models.find((m) => m.isDefault) || r.models[0])?.ref || "");
-        if (saved && !r.models.some((m) => m.ref === saved)) savePrefs({ model: "" });
-      })
-      .catch(() => {});
-    return () => { alive = false; };
+  // Models are read from the live CLI config. Refreshing here is intentional:
+  // a user can add a provider/model in Zcode Desktop without restarting this UI.
+  const loadModels = useCallback(async () => {
+    const seq = ++modelLoadSeq.current;
+    setModelsLoading(true);
+    setModelError(null);
+    try {
+      const r = await client.models();
+      if (seq !== modelLoadSeq.current) return;
+      setModels(r.models);
+      const prefs = loadPrefs();
+      const savedModel = r.models.find((m) => m.ref === prefs.model);
+      const availableRefs = new Set(r.models.map((m) => m.ref));
+      const prunedRecent = prefs.recentModels.filter((ref) => availableRefs.has(ref));
+      setRecentModelRefs((current) => current.join("\u0000") === prunedRecent.join("\u0000") ? current : prunedRecent);
+      if (prunedRecent.length !== prefs.recentModels.length) savePrefs({ recentModels: prunedRecent });
+      if (prefs.model && !savedModel) savePrefs({ model: "" });
+      setModel((current) => {
+        if (r.models.some((m) => m.ref === current)) return current;
+        return (savedModel || r.models.find((m) => m.isDefault) || r.models[0])?.ref || "";
+      });
+    } catch (e) {
+      if (seq === modelLoadSeq.current) setModelError(e instanceof Error ? e.message : "Could not load models");
+    } finally {
+      if (seq === modelLoadSeq.current) setModelsLoading(false);
+    }
   }, [client]);
+
+  useEffect(() => { void loadModels(); }, [loadModels]);
 
   // load transcript for an existing session
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -308,12 +334,16 @@ export function ChatPanel({
     if (lastKey.current !== draftKey) { setInput(loadDraft(draftKey)); setAttachments([]); setMenu(null); draftRevRef.current = 0; lastKey.current = draftKey; }
   }, [draftKey]);
   // injected drafts (skills launcher) land in the composer, keeping what's
-  // already typed; the saved draft follows so it survives a remount
+  // already typed; the saved draft follows so it survives a remount.
+  // Re-injecting text already in the composer (picking the same skill twice)
+  // must not duplicate it — just refocus at the end.
   const lastInjected = useRef(0);
   useEffect(() => {
     if (!injectedDraft || injectedDraft.key === lastInjected.current) return;
     lastInjected.current = injectedDraft.key;
-    const next = (input ? input.trimEnd() + " " : "") + injectedDraft.text;
+    const text = injectedDraft.text.trim();
+    const base = input.trimEnd();
+    const next = !text || base.includes(text) ? input : (base ? base + " " : "") + injectedDraft.text;
     setInput(next);
     touchDraft();
     saveDraft(draftKey, next);
@@ -486,12 +516,28 @@ export function ChatPanel({
     }
   }
 
-  // multi-file attach: upload each, keep the local File for click-to-preview
+  // multi-file attach: preflight against the server-advertised caps BEFORE
+  // any base64 read — an oversized file must fail in a millisecond, not after
+  // a full FileReader round trip — then upload the valid remainder
   const attachFiles = useCallback(async (files: FileList | File[]) => {
     const list = Array.from(files);
     if (!list.length) return;
-    setUploading((n) => n + list.length);
+    const accepted: File[] = [];
     for (const file of list) {
+      if (file.size === 0) onNotify(`${file.name}: empty file`, "error");
+      else if (file.size > maxUploadBytes) onNotify(`${file.name}: too large (${formatBytes(file.size)} — limit ${formatBytes(maxUploadBytes)})`, "error");
+      else accepted.push(file);
+    }
+    // the server rejects sends beyond maxAttachments with an explicit error
+    // (ZWUI-072) — mirror the cap here so a sixth file never shows as attached
+    const room = maxAttachments - attachments.length;
+    if (accepted.length > Math.max(0, room)) {
+      const overflow = accepted.splice(Math.max(0, room));
+      onNotify(`${maxAttachments} attachments max — skipped ${overflow.map((f) => f.name).join(", ")}`, "error");
+    }
+    if (!accepted.length) return;
+    setUploading((n) => n + accepted.length);
+    for (const file of accepted) {
       try {
         const data = await new Promise<string>((resolve, reject) => {
           const r = new FileReader();
@@ -508,7 +554,7 @@ export function ChatPanel({
         setUploading((n) => Math.max(0, n - 1));
       }
     }
-  }, [client, onNotify]);
+  }, [client, onNotify, maxUploadBytes, maxAttachments, attachments.length]);
 
   const removeAttachment = useCallback((path: string) => {
     setAttachments((a) => {
@@ -713,6 +759,42 @@ export function ChatPanel({
 
   const guard = uploading > 0 || !providerLive;
 
+  // ZWUI-082: steer — interrupt the current turn and send the drafted message
+  // the moment the interrupt settles. Kept apart from the follow-up queue on
+  // purpose: the queue retains work after a cancellation for a deliberate
+  // retry, while a steered message is sent as soon as the run has stopped.
+  const [steerPending, setSteerPending] = useState<Submission | null>(null);
+  const steer = useCallback(() => {
+    const text = input.trim();
+    if ((!text && !attachments.length) || uploading > 0 || !providerLive || !busy || !run.jobId) return;
+    const sub = snapshotSubmission({
+      draftKey, revision: draftRevRef.current,
+      projectKey: cwd, cwd, sessionId,
+      text, model: model || "", mode,
+      attachments: attachments.map((a) => ({ uploadRef: a.path, name: a.name })),
+    }, randomUUID());
+    setSteerPending(sub);
+    setInput(""); setAttachments([]); touchDraft(); saveDraft(draftKey, "");
+    stopRun();
+  }, [input, attachments, uploading, providerLive, busy, run.jobId, draftKey, cwd, sessionId, model, mode, touchDraft, stopRun]);
+
+  const steerSettling = useRef(false);
+  useEffect(() => {
+    if (!steerPending) return;
+    // same authority rule as the queue flush: the locally attached job is
+    // terminal ⇒ send now. The aggregate busy flag lags the store's
+    // recency-windowed activity marker right after a cancel.
+    const settled = !!run.jobId && isTerminal(run.phase);
+    if (!settled || steerSettling.current) return;
+    steerSettling.current = true;
+    const sub = steerPending;
+    setSteerPending(null);
+    queueMicrotask(() => {
+      steerSettling.current = false;
+      submitQueued(sub);
+    });
+  }, [steerPending, run.jobId, run.phase, submitQueued]);
+
   // composer send: the submitted record IS the draft, or a queued follow-up
   // when the current turn still owns the session.
   const send = useCallback(() => {
@@ -771,16 +853,70 @@ export function ChatPanel({
     if (hadDraft) onNotify("Loaded this prompt into the composer — your draft was replaced.");
   }, [input, onNotify, touchDraft]);
 
-  // models grouped by provider in server order (same-provider models are adjacent)
-  const modelGroups = useMemo(() => {
-    const groups: { provider: string; models: ModelInfo[] }[] = [];
-    for (const m of models) {
-      const last = groups[groups.length - 1];
-      if (last && last.provider === m.providerName) last.models.push(m);
-      else groups.push({ provider: m.providerName, models: [m] });
+  const selectedModel = useMemo(() => models.find((item) => item.ref === model) || null, [models, model]);
+  const filteredModels = useMemo(() => filterModels(models, modelQuery), [models, modelQuery]);
+  const modelGroups = useMemo(() => groupModels(filteredModels), [filteredModels]);
+  const recentVisibleModels = useMemo(
+    () => modelQuery.trim() ? [] : recentModels(filteredModels, recentModelRefs),
+    [filteredModels, recentModelRefs, modelQuery],
+  );
+  const recentModelRefSet = useMemo(() => new Set(recentVisibleModels.map((item) => item.ref)), [recentVisibleModels]);
+  const visibleModelGroups = useMemo(
+    () => modelGroups
+      .map((group) => ({ ...group, models: group.models.filter((item) => !recentModelRefSet.has(item.ref)) }))
+      .filter((group) => group.models.length > 0),
+    [modelGroups, recentModelRefSet],
+  );
+  const pickerModels = useMemo(
+    () => [...recentVisibleModels, ...visibleModelGroups.flatMap((group) => group.models)],
+    [recentVisibleModels, visibleModelGroups],
+  );
+  const selectModel = useCallback((next: ModelInfo) => {
+    setModel(next.ref);
+    savePrefs({ model: next.ref });
+    const nextRecent = rememberRecentModel(next.ref);
+    setRecentModelRefs(nextRecent);
+    setModelQuery("");
+    setMenu(null);
+  }, []);
+  const openModelMenu = useCallback(() => {
+    const opening = menu !== "model";
+    setMenu(opening ? "model" : null);
+    if (!opening) return;
+    setModelQuery("");
+    const selectedIndex = pickerModels.findIndex((item) => item.ref === model);
+    setModelActiveIndex(selectedIndex >= 0 ? selectedIndex : 0);
+    if (!models.length && !modelsLoading) void loadModels();
+    window.setTimeout(() => modelSearchInput.current?.focus(), 0);
+  }, [loadModels, menu, model, models.length, modelsLoading, pickerModels]);
+  const modelOptionId = (ref: string) => `model-option-${ref.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+  const handleModelSearchKeyDown = useCallback((event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (!pickerModels.length) {
+      if (event.key === "Escape") setMenu(null);
+      return;
     }
-    return groups;
-  }, [models]);
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setModelActiveIndex((index) => (index + 1) % pickerModels.length);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setModelActiveIndex((index) => (index - 1 + pickerModels.length) % pickerModels.length);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      selectModel(pickerModels[modelActiveIndex] || pickerModels[0]);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      setMenu(null);
+    }
+  }, [pickerModels, modelActiveIndex, selectModel]);
+  useEffect(() => {
+    if (menu !== "model") return;
+    setModelActiveIndex((index) => {
+      const selectedIndex = pickerModels.findIndex((item) => item.ref === model);
+      if (selectedIndex >= 0 && (index < 0 || !pickerModels[index])) return selectedIndex;
+      return Math.min(index, Math.max(0, pickerModels.length - 1));
+    });
+  }, [menu, model, pickerModels]);
 
   // ZWUI-051: bare #N resolves against THIS project's origin remote —
   // switching projects never reinterprets an old reference (resolution is
@@ -975,8 +1111,11 @@ export function ChatPanel({
           <span>{busy ? `Agent active · ${(models.find((m) => m.ref === model)?.model || "GLM").split("/").pop()?.toUpperCase()}` : "Idle"}</span>
         </span>
         {/* ZWUI-077: the desktop's session-level "Worked for 12m 26s" —
-            completed-turn time from turn_usage plus the live turn's elapsed */}
+            completed-turn time from turn_usage plus the live turn's elapsed.
+            Shown only while the agent is actually working; once the turn ends
+            the transcript's own Completed summary takes over */}
         {(() => {
+          if (!busy) return null;
           const live = localBusy && run.submittedAt
             ? workedMs + Math.max(1000, (externalTick || run.submittedAt) - run.submittedAt)
             : workedMs;
@@ -1118,7 +1257,8 @@ export function ChatPanel({
             <article className={`agent-message ${detailsHidden ? "details-hidden" : ""}`} key={t.id || `h${i}`}>
               {events.length > 0 && <div className="timeline-stack">{events.map((ev, j) => <TimelineRow key={j} event={ev} />)}</div>}
               <div className="agent-byline">
-  <strong>Zcode</strong>
+                {/* no sender name — the brand is the app itself; the byline
+                    carries only recency, tokens and the details toggle */}
                 {t.createdAt ? <Time createdAt={t.createdAt} exact={exactTimes} /> : null}
                 {t.tokens ? (
                   <button className="tk-pill" onClick={() => setTokenDialog(true)} title="Token telemetry for this session">
@@ -1141,14 +1281,16 @@ export function ChatPanel({
                     <span className="thinking-hint">How I approached this</span>
                   </summary>
                   {t.reasoning && <p>{t.reasoning}</p>}
+                  {/* the turn's tool calls live INSIDE the collapsible — after
+                      completion only the summary row shows, like the app */}
+                  {(t.tools || []).length > 0 && (
+                    <div className="activity-stack">
+                      {(t.tools || []).map((tool, j) => (
+                        <ToolActivity key={j} name={tool.name} status={tool.status} detail={tool.detail} />
+                      ))}
+                    </div>
+                  )}
                 </details>
-              )}
-              {!detailsHidden && (t.tools || []).length > 0 && (
-                <div className="activity-stack">
-                  {(t.tools || []).map((tool, j) => (
-                    <ToolActivity key={j} name={tool.name} status={tool.status} detail={tool.detail} />
-                  ))}
-                </div>
               )}
               {!detailsHidden && (t.files || []).length > 0 && (
                 <FileCards files={t.files || []} onPreview={(f) => void previewArtifact(f)} />
@@ -1166,7 +1308,9 @@ export function ChatPanel({
                   ) : (
                     <span className="task-completed">
                       <CheckMark />
-                      {t.durationMs ? `Worked for ${formatDuration(t.durationMs)}` : "Completed"}
+                      {/* the app's completion summary — duration lives in the
+                          byline time and the collapsed "Thinking · Xs" row */}
+                      Completed
                       {t.tokens ? (
                         <button className="turn-tokens" onClick={() => setTokenDialog(true)} title="Token telemetry">
                           · {(t.tokens / 1000).toFixed(1)}k tokens
@@ -1205,12 +1349,9 @@ export function ChatPanel({
         {/* a turn running in the desktop/CLI: progress row, no send */}
         {externalActive && !localBusy && (
           <article className="agent-message">
-            <div className="agent-byline">
-<strong>Zcode</strong>
-            </div>
             <div className="working-message external-working">
               <LoaderCircle size={13} className="spin" />
-              <span>Working{externalStartedAt && externalTick ? <span className="working-elapsed">{formatDuration(Math.max(1000, externalTick - externalStartedAt))}</span> : null}<span className="thinking-dots"><i /><i /><i /></span></span>
+              <span>Working for {externalStartedAt && externalTick ? <span className="working-elapsed">{formatDuration(Math.max(1000, externalTick - externalStartedAt))}</span> : "…"}<span className="thinking-dots"><i /><i /><i /></span></span>
             </div>
           </article>
         )}
@@ -1223,10 +1364,11 @@ export function ChatPanel({
         {(run.answer || run.reasoning || localBusy || run.error) && (!liveFolded || run.error) && (
           <article className="agent-message">
             <div className="agent-byline">
-<strong>Zcode</strong>
-              <span className="agent-model">{(models.find((m) => m.ref === model)?.model || "GLM").split("/").pop()?.toUpperCase()}</span>
-              {run.phase !== "idle" && (
-                <span className="message-duration" title={run.phase}>
+              {/* no sender name — the chip carries only LIVE state:
+                  the running timer, or the interrupted verdict after a stop.
+                  A finished turn shows just the Completed footer summary */}
+              {(localBusy || run.phase === "cancelled") && (
+                <span className="message-duration" title={localBusy ? "running" : run.phase}>
                   <Clock3 size={11} />
                   {localBusy && run.submittedAt
                     ? `running · ${formatDuration(Math.max(1000, (externalTick || run.submittedAt) - run.submittedAt))}`
@@ -1301,7 +1443,7 @@ export function ChatPanel({
             {!busy && !liveFolded && run.phase === "succeeded" && (
               <div className="message-footer">
                 <span className="task-completed">
-                  <CheckMark />Run finished
+                  <CheckMark />Completed
                   {liveTokens ? (
                     <button className="turn-tokens" onClick={() => setTokenDialog(true)} title="Token telemetry">
                       · {(liveTokens / 1000).toFixed(1)}k tokens
@@ -1325,7 +1467,7 @@ export function ChatPanel({
 
         {localBusy && (
           <div className="working-message" role="status">
-            <span>Zcode is working<span className="thinking-dots"><i /><i /><i /></span></span>
+            <span>Working for {run.submittedAt ? formatDuration(Math.max(1000, (externalTick || run.submittedAt) - run.submittedAt)) : "…"}<span className="thinking-dots"><i /><i /><i /></span></span>
           </div>
         )}
       </div>
@@ -1465,15 +1607,16 @@ export function ChatPanel({
                 <IconButton label="Attach a file" onClick={() => fileInput.current?.click()}><Plus size={17} /></IconButton>
               </div>
               <div className="composer-menu-wrap">
-                <button className="mode-picker" onClick={() => setMenu(menu === "mode" ? null : "mode")}>
-                  <ShieldCheck size={13} /><span>{mode}</span><ChevronDown size={11} />
+                <button className="mode-picker" aria-haspopup="menu" aria-expanded={menu === "mode"} onClick={() => setMenu(menu === "mode" ? null : "mode")}>
+                  <ShieldCheck size={13} /><span>{mode === "yolo" ? "Full access" : mode}</span><ChevronDown size={11} />
                 </button>
                 {menu === "mode" && (
-                  <div className="popover mode-popover">
+                  <div className="popover mode-popover" role="menu" aria-label="Execution mode">
                     <div className="popover-label">EXECUTION MODE</div>
                     {modes.map((m) => ({
                       id: m,
-                      label: m.charAt(0).toUpperCase() + m.slice(1),
+                      // the desktop's display name for the unrestricted mode
+                      label: m === "yolo" ? "Full access" : m.charAt(0).toUpperCase() + m.slice(1),
                       description: ({
                         plan: "Think it through before building",
                         build: "Make changes to project files",
@@ -1481,8 +1624,8 @@ export function ChatPanel({
                         yolo: "Run without asking (trusted repos)",
                       } as Record<string, string>)[m] || "Server-advertised execution mode",
                     })).map((item) => (
-                      <button key={item.id} onClick={() => { setMode(item.id); savePrefs({ mode: item.id }); setMenu(null); }}>
-                        {item.id === "plan" ? <MessageSquare size={15} /> : <SquarePen size={15} />}
+                      <button key={item.id} role="menuitemradio" aria-checked={mode === item.id} onClick={() => { setMode(item.id); savePrefs({ mode: item.id }); setMenu(null); }}>
+                        {item.id === "plan" ? <MessageSquare size={15} /> : item.id === "yolo" ? <ShieldCheck size={15} /> : <SquarePen size={15} />}
                         <span><b>{item.label}</b><small>{item.description}</small></span>
                         {mode === item.id && <Check size={13} className="success-text" />}
                       </button>
@@ -1493,22 +1636,81 @@ export function ChatPanel({
             </div>
             <div className="composer-right">
               <div className="composer-menu-wrap">
-                <button className="model-picker" onClick={() => setMenu(menu === "model" ? null : "model")}>
-                  <Sparkles size={12} /><span>{(models.find((m) => m.ref === model)?.model || "model").split("/").pop()?.toUpperCase()}</span><ChevronDown size={11} />
+                <button
+                  className="model-picker"
+                  aria-haspopup="dialog"
+                  aria-expanded={menu === "model"}
+                  aria-label={`Model: ${selectedModel ? `${modelLabel(selectedModel)} from ${selectedModel.providerName}` : "Choose model"}`}
+                  title={selectedModel ? `${modelLabel(selectedModel)} · ${selectedModel.ref}` : "Choose model"}
+                  onClick={openModelMenu}
+                >
+                  <Sparkles size={12} /><span>{selectedModel ? modelLabel(selectedModel) : modelsLoading ? "Loading…" : "Choose model"}</span><ChevronDown size={11} />
                 </button>
                 {menu === "model" && (
-                  <div className="popover model-popover">
-                    {modelGroups.map((g) => (
-                      <div className="model-provider-group" key={g.provider}>
-                        <div className="popover-label">{g.provider.toUpperCase()}</div>
-                        {g.models.map((m) => (
-                          <button key={m.ref} onClick={() => { setModel(m.ref); savePrefs({ model: m.ref }); setMenu(null); }}>
-                            <Sparkles size={15} /><span><b>{(m.model.split("/").pop() || m.model).toUpperCase()}</b><small>{[m.model.includes("/") ? m.model : "", m.isDefault ? "default" : ""].filter(Boolean).join(" · ")}</small></span>
-                            {model === m.ref && <Check size={13} className="success-text" />}
-                          </button>
-                        ))}
+                  <div className="popover model-popover" role="dialog" aria-label="Select model">
+                    <div className="model-picker-header">
+                      <div>
+                        <strong>Select model</strong>
+                        <small>{models.length ? `${models.length} configured model${models.length === 1 ? "" : "s"}` : "From your CLI providers"}</small>
                       </div>
-                    ))}
+                      <button className="model-refresh" type="button" aria-label="Refresh models" title="Refresh models" onClick={() => void loadModels()} disabled={modelsLoading}>
+                        <RefreshCw size={13} className={modelsLoading ? "spin" : ""} />
+                      </button>
+                    </div>
+                    <label className="model-search-field">
+                      <Search size={14} />
+                      <input
+                        ref={modelSearchInput}
+                        value={modelQuery}
+                        onChange={(event) => { setModelQuery(event.target.value); setModelActiveIndex(0); }}
+                        onKeyDown={handleModelSearchKeyDown}
+                        placeholder="Search models or providers…"
+                        aria-label="Search models or providers"
+                        role="combobox"
+                        aria-controls="model-options"
+                        aria-expanded="true"
+                        aria-autocomplete="list"
+                        aria-activedescendant={pickerModels[modelActiveIndex] ? modelOptionId(pickerModels[modelActiveIndex].ref) : undefined}
+                      />
+                      {modelQuery && <button type="button" aria-label="Clear model search" onClick={() => { setModelQuery(""); setModelActiveIndex(0); modelSearchInput.current?.focus(); }}><X size={13} /></button>}
+                    </label>
+                    {modelError && (
+                      <div className="model-picker-error" role="alert">
+                        <span>{modelError}</span>
+                        <button type="button" onClick={() => void loadModels()}>Retry</button>
+                      </div>
+                    )}
+                    <div className="model-picker-results" id="model-options" role="menu" aria-label="Available models">
+                      {modelsLoading && !models.length && <div className="model-picker-state"><LoaderCircle size={15} className="spin" />Loading models…</div>}
+                      {!modelsLoading && !modelError && !models.length && <div className="model-picker-state">No configured models found.</div>}
+                      {!modelsLoading && !pickerModels.length && models.length > 0 && <div className="model-picker-state">No models match “{modelQuery}”.<button type="button" onClick={() => setModelQuery("")}>Clear search</button></div>}
+                      {recentVisibleModels.length > 0 && (
+                        <div className="model-provider-group model-recent-group">
+                          <div className="model-section-label">RECENT <span>{recentVisibleModels.length}</span></div>
+                          {recentVisibleModels.map((item) => {
+                            const index = pickerModels.findIndex((candidate) => candidate.ref === item.ref);
+                            return (
+                                <button id={modelOptionId(item.ref)} key={`recent-${item.ref}`} role="menuitemradio" aria-checked={model === item.ref} className={index === modelActiveIndex ? "is-active" : ""} onMouseEnter={() => setModelActiveIndex(index)} onClick={() => selectModel(item)}>
+                                <Sparkles size={15} /><span><b>{modelLabel(item)}</b><small>{compactModelRef(item.ref)}</small></span>{item.isDefault && <span className="model-default-badge">Default</span>}<span className="model-row-meta">Recent</span>{model === item.ref && <Check size={13} className="success-text" />}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {visibleModelGroups.map((group) => (
+                        <div className="model-provider-group" key={group.key}>
+                          <div className="model-section-label"><span>{group.providerName}</span><small>{compactProviderId(group.provider)} · {group.models.length}</small></div>
+                          {group.models.filter((item) => !recentModelRefSet.has(item.ref)).map((item) => {
+                            const index = pickerModels.findIndex((candidate) => candidate.ref === item.ref);
+                            return (
+                              <button id={modelOptionId(item.ref)} key={item.ref} role="menuitemradio" aria-checked={model === item.ref} className={index === modelActiveIndex ? "is-active" : ""} onMouseEnter={() => setModelActiveIndex(index)} onClick={() => selectModel(item)}>
+                                <Sparkles size={15} /><span><b>{modelLabel(item)}</b><small>{compactModelRef(item.ref)}</small></span>{item.isDefault && <span className="model-default-badge">Default</span>}{model === item.ref && <Check size={13} className="success-text" />}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
@@ -1519,6 +1721,15 @@ export function ChatPanel({
                 <button className="composer-stop-button" type="button" aria-label="Stop run" title="Stop run (Escape)" onClick={stopRun}>
                   <Square size={13} />
                 </button>
+              )}
+              {/* steer: interrupt the current turn and send the draft now */}
+              {busy && run.jobId && (input.trim() || attachments.length > 0) && (
+                <IconButton
+                  label="Steer — interrupt and send now"
+                  className="steer-button"
+                  title="Steer — interrupt the current turn and send this message now"
+                  onClick={steer}
+                ><Zap size={14} /></IconButton>
               )}
               <button
                 className={`send-button ${busy && run.jobId && !input.trim() && !attachments.length ? "stop" : ""}`}
@@ -1577,11 +1788,13 @@ export function ChatPanel({
   );
 }
 
-// byline time — relative ("5m") by default, exact HH:MM when toggled
+// byline time — exact HH:MM by default (with a short date for older
+// messages), relative ("5m") when the Exact times toggle is off
 function Time({ createdAt, exact }: { createdAt: number; exact: boolean }) {
   const d = new Date(createdAt);
+  const hhmm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
   const label = exact
-    ? `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
+    ? (new Date().toDateString() === d.toDateString() ? hhmm : `${d.toLocaleDateString(undefined, { day: "numeric", month: "short" })} ${hhmm}`)
     : relativeTime(createdAt);
   return <time title={d.toLocaleString()}>{label}</time>;
 }

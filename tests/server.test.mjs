@@ -176,6 +176,42 @@ describe("auth", () => {
   });
 });
 
+describe("model catalog", () => {
+  it("returns configured display names and default markers without exposing provider secrets", async () => {
+    mkdirSync(join(home, "cli"), { recursive: true });
+    writeFileSync(join(home, "cli", "config.json"), JSON.stringify({
+      provider: {
+        zai: {
+          name: "Z.AI",
+          options: { apiKey: "secret-key", baseURL: "https://example.invalid" },
+          models: {
+            "glm-5.3": { name: "GLM 5.3" },
+            "glm-5.3-flash": {},
+          },
+        },
+        openai: {
+          name: "OpenAI",
+          options: { apiKey: "another-secret" },
+          models: { "gpt-5.2": { name: "GPT 5.2" } },
+        },
+      },
+      model: { main: "zai/glm-5.3" },
+    }));
+    const r = await fetch(`${BASE}/api/models`, { headers: auth });
+    assert.equal(r.status, 200);
+    const j = await r.json();
+    assert.deepEqual(j.models.map((m) => ({ ref: m.ref, providerName: m.providerName, displayName: m.displayName, isDefault: m.isDefault })), [
+      { ref: "zai/glm-5.3", providerName: "Z.AI", displayName: "GLM 5.3", isDefault: true },
+      { ref: "zai/glm-5.3-flash", providerName: "Z.AI", displayName: "glm-5.3-flash", isDefault: false },
+      { ref: "openai/gpt-5.2", providerName: "OpenAI", displayName: "GPT 5.2", isDefault: false },
+    ]);
+    assert.equal(JSON.stringify(j).includes("secret-key"), false, "model catalog must not expose provider secrets");
+    assert.equal(JSON.stringify(j).includes("another-secret"), false, "model catalog must not expose provider secrets");
+    assert.equal(j.models[0].apiKey, undefined);
+    assert.equal(j.models[0].baseURL, undefined);
+  });
+});
+
 describe("paste-attachment previews (desktop parity)", () => {
   it("serves text pasted into the CLI under zcodeHome/tmp/paste-attachments", async () => {
     const dir = join(home, "tmp", "paste-attachments", "2026-01-01");
@@ -839,7 +875,8 @@ describe("ZPAR-001 & ZPAR-002: Canonical session directory & auth bootstrap", as
     const dbPath = join(dbDir, "db.sqlite");
     const db = new DatabaseSync(dbPath);
     db.exec(`
-      CREATE TABLE IF NOT EXISTS session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT);
+      CREATE TABLE IF NOT EXISTS session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT, time_title_updated INTEGER,
+        title_source TEXT NOT NULL DEFAULT 'first_input' CHECK(title_source IN ('default','first_input','generated','custom')));
       CREATE TABLE IF NOT EXISTS message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, sequence INTEGER);
       CREATE TABLE IF NOT EXISTS part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT, sequence INTEGER);
       CREATE TABLE IF NOT EXISTS session_target (session_id TEXT PRIMARY KEY, objective TEXT, status TEXT, tokens_used INTEGER, time_used_seconds INTEGER, time_created INTEGER, time_updated INTEGER);
@@ -876,6 +913,21 @@ describe("ZPAR-001 & ZPAR-002: Canonical session directory & auth bootstrap", as
       body: JSON.stringify({ title: "renamed" }),
     });
     assert.equal(rRename.status, 403);
+
+    // 4b. A successful rename must satisfy the store's title_source CHECK
+    // (regression: writing 'user' violated the real schema's constraint and
+    // 500'd every web rename; the CLI's term is 'custom')
+    const rRenameOk = await fetch(`${BASE}/api/sessions/sess_other/rename`, {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ title: "renamed properly" }),
+    });
+    assert.equal(rRenameOk.status, 200);
+    const dbCheck = new DatabaseSync(dbPath);
+    const row = dbCheck.prepare("SELECT title, title_source FROM session WHERE id = 'sess_other'").get();
+    dbCheck.close();
+    assert.equal(row.title, "renamed properly");
+    assert.equal(row.title_source, "custom");
 
     // 5. Matching directory succeeds
     const rMatch = await chat({ text: "matching test", sessionId: "sess_other", cwd: otherProj });

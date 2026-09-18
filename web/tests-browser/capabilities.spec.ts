@@ -173,9 +173,10 @@ test("goal card and worked-time chip render from real session_target/turn_usage 
   await expect(progress.locator(".progress-item.is-completed")).toHaveCount(1);
   await expect(progress.locator(".progress-item.is-in_progress")).toHaveCount(1);
   await expect(progress.locator(".progress-item.is-pending")).toHaveCount(1);
-  // and the chat context strip carries the session-level "Worked for" figure
-  // (75s of completed turns; the desktop phrasing, not a bare minute count)
-  await expect(page.locator(".worked-chip")).toContainText(/Worked for (1m|75s)/);
+  // ZWUI-081: the chat context strip's "Worked for" chip is a WORKING
+  // indicator — hidden once no turn is running (the goal card and the
+  // transcript's Completed summaries carry the record)
+  await expect(page.locator(".worked-chip")).toHaveCount(0);
   // ZWUI-079: the topbar shows the same figure under the session title
   await expect(page.locator(".topbar-worked")).toContainText(/Worked for (1m|75s)/);
 });
