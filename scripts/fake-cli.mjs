@@ -54,13 +54,14 @@ if (args[0] === "commands" && args[1] === "list") {
 }
 
 let seq = 0;
-// One session id per PROMPT for fresh chats: the e2e server is shared across
-// the suite, and a fixed id lets one test's lingering long run mark the
-// session busy for every later test (sidebar loaders, locked composers).
-// Resumed runs keep the server-chosen id. Deterministic so specs can compute it.
+// Fresh chats get a session id unique to (prompt, process): the e2e server is
+// shared across the suite and several tests reuse the same literal prompt —
+// a per-prompt-only hash would let one test's lingering long run mark that
+// session busy for the next (sidebar loaders, locked composers). Resumed runs
+// keep the server-chosen id.
 import { createHash } from "node:crypto";
 const FAKE_SESSION_ID = resumedSessionId
-  || "sess_" + createHash("sha256").update(prompt).digest("hex").slice(0, 27);
+  || "sess_" + createHash("sha256").update(`${prompt}\u0000${process.pid}`).digest("hex").slice(0, 27);
 function emit(type, payload = {}) {
   seq += 1;
   process.stdout.write(

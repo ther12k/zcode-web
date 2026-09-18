@@ -648,8 +648,19 @@ test.describe("telemetry surfaces", () => {
     expect(Math.abs(headBox.y - scrollBox.y)).toBeLessThan(2);
   });
 
-  test("agent terminal drawer lists bash evidence and is read-only", async ({ page }) => {
-    await page.locator(".chat-context .context-menu-wrap button").click();
+  // Desktop parity: the collapsed tool row previews what it touched (the
+  // command/file), instead of a bare "Bash completed"
+  test("activity rows preview their command on the collapsed trigger", async ({ page }) => {
+    // tool rows live inside the turn's "Steps" fold — open it first
+    const fold = page.locator("details.history-thinking > summary").first();
+    await fold.click();
+    const trigger = page.locator(".activity-trigger", { hasText: "Bash" }).first();
+    await expect(trigger).toBeVisible();
+    await expect(trigger.locator(".activity-summary")).toHaveText("npm test");
+    await expect(trigger).toContainText("completed");
+  });
+
+  test("agent terminal drawer lists bash evidence and is read-only", async ({ page }) => {    await page.locator(".chat-context .context-menu-wrap button").click();
     await page.getByRole("menuitemcheckbox", { name: /Agent terminal/ }).click();
     const term = page.locator(".workspace-terminal");
     await expect(term).toBeVisible();
@@ -789,8 +800,10 @@ test("ZWUI-075b: queued follow-ups can be removed individually", async ({ page }
   await expect(page.locator(".queued-prompt-chip")).toHaveCount(1);
   await expect(page.locator(".queued-prompt-chip")).toContainText("item two to keep");
 
-  // clean up by stopping the long run
+  // clean up by stopping the long run — and WAIT for the cancellation: a
+  // run left mid-flight keeps the session marked busy for later tests
   await page.getByLabel("Stop run").click();
+  await expect(page.getByLabel("Send message")).toBeVisible({ timeout: 15_000 });
 });
 
 test("ZWUI-075: reload mid-run reattaches to the in-flight job stream", async ({ page }) => {

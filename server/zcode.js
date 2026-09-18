@@ -157,6 +157,15 @@ export class JobManager {
     return job && !TERMINAL.has(job.status) ? job : null;
   }
 
+  // The most recent job for a session REGARDLESS of status. The store's
+  // runActive heuristic reads the newest message's time.completed — a turn
+  // cancelled mid-stream leaves that null and looks busy for the recency
+  // window. The registry's terminal verdict is authoritative over it.
+  lastJobForSession(sessionId) {
+    if (!sessionId) return null;
+    return this.bySession.get(sessionId) ?? null;
+  }
+
   findByIdempotencyKey(requestId, payload) {
     if (!requestId) return null;
     const entry = this.byRequest.get(requestId);
@@ -305,8 +314,15 @@ export class JobManager {
 
     const finish = (exitCode, error) => {
       if (TERMINAL.has(job.status)) return;
-      if (job.sessionId && this.bySession.get(job.sessionId) === job) {
-        this.bySession.delete(job.sessionId);
+      job.finishedAt = Date.now();
+      // bySession KEEPS the terminal job: the session detail route reads its
+      // verdict to override the store's runActive heuristic (a cancelled
+      // turn's un-completed assistant message otherwise looks busy for the
+      // whole recency window). activeJobForSession filters terminals, and
+      // start()'s SESSION_BUSY guard ignores them, so this stays safe and
+      // bounded (one entry per session key).
+      if (job.resumeSessionId && this.bySession.get(job.resumeSessionId) === job) {
+        this.bySession.delete(job.resumeSessionId);
       }
       if (job.resumeSessionId && this.bySession.get(job.resumeSessionId) === job) {
         this.bySession.delete(job.resumeSessionId);
@@ -356,6 +372,7 @@ export class JobManager {
 
     proc.on("error", (err) => finish(null, err));
     proc.on("close", (code, signal) => {
+      if (process.env.ZCODE_DEBUG_CANCEL) console.error(`[close ${job.id.slice(0, 8)}] code=${code} signal=${signal} at +${Date.now() - job.createdAt}ms`);
       if (signal) job.killSignal = signal;
       if (job.timedOut) finish(code, null);
       else finish(code);
@@ -373,9 +390,13 @@ export class JobManager {
     if (job.status === "stopping") return true;
     job.cancelRequested = true;
     job.setStatus("stopping");
+    if (process.env.ZCODE_DEBUG_CANCEL) console.error(`[cancel ${jobId.slice(0, 8)}] SIGTERM at +${Date.now() - job.createdAt}ms pid=${job.proc?.pid}`);
     killTree(job.proc, "SIGTERM");
     setTimeout(() => {
-      if (!TERMINAL.has(job.status)) killTree(job.proc, "SIGKILL");
+      if (!TERMINAL.has(job.status)) {
+        if (process.env.ZCODE_DEBUG_CANCEL) console.error(`[cancel ${jobId.slice(0, 8)}] SIGKILL failsafe at +${Date.now() - job.createdAt}ms`);
+        killTree(job.proc, "SIGKILL");
+      }
     }, 5000).unref();
     return true;
   }

@@ -10,7 +10,9 @@ import { mkdtempSync, writeFileSync, mkdirSync, existsSync, symlinkSync, unlinkS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const PORT = 3471;
+// base port is env-overridable: a stale server in another container sharing
+// this network namespace can hold 3472 (PORT+1) and hang the second instance
+const PORT = Number(process.env.E2E_PORT_BASE ?? 3471);
 const BASE = `http://127.0.0.1:${PORT}`;
 const TOKEN = "test-token-123";
 const SERVER_ROOT = new URL("..", import.meta.url).pathname;

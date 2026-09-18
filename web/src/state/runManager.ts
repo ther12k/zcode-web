@@ -158,7 +158,7 @@ function scheduleEviction(key: RunKey, e: RunEntry) {
 // ---- transport ownership (moved out of the panel) ----
 
 function stopPolling(e: RunEntry) {
-  if (e.poll) { clearInterval(e.poll); e.poll = null; }
+  if (e.poll) { clearTimeout(e.poll); e.poll = null; }
   if (e.pollStop) { clearTimeout(e.pollStop); e.pollStop = null; }
 }
 
@@ -175,9 +175,11 @@ function startTransport(key: RunKey, e: RunEntry, jobId: string) {
   });
   e.controller = controller;
   controller.start();
-  // reconciliation poll: finalizes truthfully if the stream dies
+  // reconciliation poll: finalizes truthfully if the stream dies. The cadence
+  // adapts to transport health — a detached stream (network blip, ticket
+  // churn) polls tight so a finished run never looks busy for a full 5s+.
   stopPolling(e);
-  e.poll = setInterval(async () => {
+  const pollOnce = async () => {
     if (e.run.jobId !== jobId) { stopPolling(e); return; }
     try {
       const st = await client.job(jobId);
@@ -186,15 +188,20 @@ function startTransport(key: RunKey, e: RunEntry, jobId: string) {
       // the job id so the reducer rejects stale applications regardless
       if (e.run.jobId !== jobId) return;
       dispatch(key, e, { type: "job-status", jobId, status: st.status as never });
-      if (["succeeded", "failed", "cancelled", "timeout"].includes(st.status)) stopPolling(e);
+      if (["succeeded", "failed", "cancelled", "timeout"].includes(st.status)) { stopPolling(e); return; }
     } catch { /* transient */ }
-  }, POLL_MS);
+    e.poll = setTimeout(pollOnce, controller.attached ? POLL_MS : RUN_DETACHED_POLL_MS);
+  };
+  e.poll = setTimeout(pollOnce, POLL_MS);
   e.pollStop = setTimeout(stopPolling, 17 * 60_000, e);
 }
 
 // ---- public API ----
 
 const RUN_POLL_MS = 5000;
+// tight reconciliation while the SSE transport is down — caps how long a
+// finished run can still look busy to the user
+const RUN_DETACHED_POLL_MS = 1200;
 /** Test hook — the reconciliation cadence is data-independent. */
 export function __setPollIntervalForTests(ms: number) {
   POLL_MS = ms;

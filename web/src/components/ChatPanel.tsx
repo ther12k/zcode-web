@@ -1804,12 +1804,18 @@ function Time({ createdAt, exact }: { createdAt: number; exact: boolean }) {
 function ToolActivity({ name, status, detail, live = false }: { name: string; status: string; detail?: string; live?: boolean }) {
   const [openItem, setOpenItem] = useState(false);
   const done = status === "completed" || status === "succeeded";
+  // desktop-style collapsed row: the tool plus a one-line preview of what it
+  // touched (command, file, URL); the full detail still expands. MCP tools
+  // shorten to their server.tool form (mcp__node_repl__js → node_repl.js).
+  const label = name.startsWith("mcp__") ? name.split("__").slice(1).join(".") : name;
+  const summary = detail?.split("\n").map((l) => l.trim()).find((l) => l.length > 0)?.slice(0, 90) ?? "";
   return (
     <div className={`activity-item ${openItem ? "is-open" : ""}`}>
-      <button className="activity-trigger" onClick={() => setOpenItem(!openItem)} aria-expanded={openItem}>
+      <button className="activity-trigger" onClick={() => setOpenItem(!openItem)} aria-expanded={openItem} title={summary || name}>
         <ChevronRight size={12} className="activity-chevron" />
         {name === "Bash" ? <Terminal size={14} /> : <Wrench size={14} />}
-        <span>{name}</span>
+        <span>{label}</span>
+        {summary && <span className="activity-summary">{summary}</span>}
         <small>{live && !done ? "running" : status}</small>
         {done && <Check size={13} className="success-text" />}
       </button>

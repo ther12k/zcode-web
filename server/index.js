@@ -599,6 +599,7 @@ async function handleApi(req, res, url) {
       // the session row. Keep a reload in that short window on the live job
       // instead of returning 404 and losing the run's stream identity.
       const liveJob = jobs.activeJobForSession(sessionMatch[1]);
+      const lastJob = jobs.lastJobForSession(sessionMatch[1]);
       if (!session && liveJob) {
         session = {
           id: sessionMatch[1],
@@ -610,6 +611,21 @@ async function handleApi(req, res, url) {
         };
         page = { turns: [], total: 0, hasMore: false, tokensTotal: null, contextTokens: null };
         runInfo = { active: true, startedAt: liveJob.startedAt || liveJob.createdAt };
+      } else if (!session && lastJob && TERMINAL_STATUS.has(lastJob.status)) {
+        // A web-only session whose run just ended: the store never saw a row
+        // (the CLI owns store writes). Answer with the run's own record so
+        // the browser can settle to idle — a 404 here would leave the
+        // pre-cancel runActive=true stuck on the client.
+        session = {
+          id: sessionMatch[1],
+          title: String(lastJob.text || "New chat").slice(0, 200),
+          directory: lastJob.cwd,
+          createdAt: lastJob.createdAt,
+          updatedAt: lastJob.finishedAt ?? lastJob.createdAt,
+          goal: null,
+        };
+        page = { turns: [], total: 0, hasMore: false, tokensTotal: null, contextTokens: null };
+        runInfo = { active: false, startedAt: null };
       } else {
         if (!session) return sendJson(res, 404, { error: "session not found" });
         // ZWUI-060: containment verdict on the REAL path (symlink-aware)
@@ -623,6 +639,16 @@ async function handleApi(req, res, url) {
         runInfo = store.runInfo(session.id);
         workedMs = store.workedMs(session.id);
         todos = store.todos(session.id);
+        // The store's runActive heuristic reads the newest message's
+        // time.completed — a turn cancelled/failed mid-stream leaves that
+        // null and the session looks busy until the recency window expires.
+        // This server's own registry knows that run reached a terminal state;
+        // when it finished at/after the newest message started, its verdict
+        // wins. A NEWER turn from another writer re-arms activity honestly.
+        const lastJob = jobs.lastJobForSession(session.id);
+        if (runInfo.active && lastJob && TERMINAL_STATUS.has(lastJob.status) && lastJob.finishedAt && (runInfo.startedAt ?? 0) <= lastJob.finishedAt) {
+          runInfo = { active: false, startedAt: null };
+        }
       }
     } catch (e) {
       const status = e.code === "DB_MISSING" ? 503 : 500;
