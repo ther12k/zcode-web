@@ -163,6 +163,8 @@ export class JobManager {
   // runActive heuristic reads the newest message's time.completed — a turn
   // cancelled mid-stream leaves that null and looks busy for the recency
   // window. The registry's terminal verdict is authoritative over it.
+  // After the retention window the entry is a COMPACT terminal record
+  // (status/finishedAt + session descriptor), not a Job.
   lastJobForSession(sessionId) {
     if (!sessionId) return null;
     return this.bySession.get(sessionId) ?? null;
@@ -354,13 +356,27 @@ export class JobManager {
       clearTimeout(timer);
       // terminal jobs stay addressable (status + replay) for a window; the
       // session map only keeps a SMALL terminal record afterwards so replay
-      // buffers and process references cannot accumulate per session
+      // buffers and process references cannot accumulate per session. The
+      // record carries the session DESCRIPTOR (title text, cwd, createdAt)
+      // because the synthetic session-detail path serves web-only sessions
+      // from it after expiry. Full-job retention is bounded by this window;
+      // terminal-record cardinality itself is still unbounded — any future
+      // eviction policy must preserve reconciliation, not silently restore
+      // false busy states.
       setTimeout(() => {
         this.jobs.delete(job.id);
         if (job.requestId) this.byRequest.delete(job.requestId);
         for (const key of [job.sessionId, job.resumeSessionId]) {
           if (key && this.bySession.get(key) === job) {
-            this.bySession.set(key, { sessionId: key, status: job.status, finishedAt: job.finishedAt, terminalRecord: true });
+            this.bySession.set(key, {
+              sessionId: key,
+              status: job.status,
+              finishedAt: job.finishedAt,
+              text: String(job.text || "").slice(0, 200),
+              cwd: job.cwd,
+              createdAt: job.createdAt,
+              terminalRecord: true,
+            });
           }
         }
       }, config.jobRetentionMs).unref();

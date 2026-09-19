@@ -51,31 +51,40 @@ function startServer(extraEnv = {}) {
     stdio: ["ignore", "pipe", "pipe"],
   });
   server.stderr.on("data", (c) => process.stderr.write(c));
-  // readiness fails FAST and PROVABLY: child exit (e.g. EADDRINUSE from a
-  // stale port holder) rejects at once, a hard deadline replaces infinite
-  // polling, and the health nonce proves OUR build answered
+  return waitForVerifiedServer(server, BASE, nonce);
+}
+
+// ONE readiness implementation (startServer and bootServer share it). The
+// deadline and child-exit listener are INDEPENDENT of the polling loop, and
+// firing them ABORTS the in-flight health request — a listener that accepts
+// but never responds cannot park the helper inside await fetch() past the
+// deadline. The nonce proves OUR build answered, not whichever stale
+// listener holds the port.
+function waitForVerifiedServer(proc, base, nonce, timeoutMs = 10_000, label = "startServer") {
   return new Promise((resolve, reject) => {
     let settled = false;
-    const t = setInterval(async () => {
-      try {
-        const r = await fetch(`${BASE}/api/health`, { headers: { authorization: `Bearer ${TOKEN}` } });
-        if (!r.ok) return;
-        const body = await r.json().catch(() => null);
-        if (body?.instance !== nonce) return; // foreign listener — wait for ours or fail
-        finish(resolve);
-      } catch {}
-    }, 100);
-    const deadline = setTimeout(() => finish(reject, new Error(`startServer: no verified server at ${BASE} within 10s`)), 10_000);
-    const onExit = (code) => finish(reject, new Error(`startServer: server exited during startup (code ${code})`));
-    server.once("exit", onExit);
-    function finish(fn, arg) {
+    const ac = new AbortController();
+    const finish = (fn, arg) => {
       if (settled) return;
       settled = true;
       clearInterval(t);
       clearTimeout(deadline);
-      server.off("exit", onExit);
+      proc.off("exit", onExit);
+      ac.abort();
       fn(arg);
-    }
+    };
+    const onExit = (code) => finish(reject, new Error(`${label}: server exited during startup (code ${code})`));
+    proc.once("exit", onExit);
+    const deadline = setTimeout(() => finish(reject, new Error(`${label}: no verified server at ${base} within ${timeoutMs}ms`)), timeoutMs);
+    const t = setInterval(async () => {
+      try {
+        const r = await fetch(`${base}/api/health`, { headers: { authorization: `Bearer ${TOKEN}` }, signal: ac.signal });
+        if (!r.ok) return;
+        const body = await r.json().catch(() => null);
+        if (body?.instance !== nonce) return; // foreign listener — wait for ours or fail
+        finish(resolve);
+      } catch { /* aborted or not ready yet */ }
+    }, 100);
   });
 }
 
@@ -1753,7 +1762,8 @@ describe("JobManager stdout multibyte decoding", async () => {
 //    bounded retention, resolver consistency, startup fail-fast ──
 
 // boot an ISOLATED server on its own port+home (never touches the globals
-// the shared suite relies on); nonce-checked readiness like startServer
+// the shared suite relies on); readiness uses the SAME hard-deadline,
+// exit-listening, nonce-verified helper as startServer
 async function bootServer(port, { env = {}, homeDir, wsDir } = {}) {
   mkdirSync(join(homeDir, "cli", "db"), { recursive: true });
   mkdirSync(wsDir, { recursive: true });
@@ -1775,17 +1785,8 @@ async function bootServer(port, { env = {}, homeDir, wsDir } = {}) {
     stdio: ["ignore", "ignore", "pipe"],
   });
   const base = `http://127.0.0.1:${port}`;
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (proc.exitCode !== null) throw new Error(`bootServer exited early (code ${proc.exitCode})`);
-    try {
-      const r = await fetch(`${base}/api/health`, { headers: { authorization: `Bearer ${TOKEN}` } });
-      if (r.ok && (await r.json()).instance === nonce) return { proc, base };
-    } catch {}
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  proc.kill();
-  throw new Error(`bootServer: no verified server at ${base}`);
+  await waitForVerifiedServer(proc, base, nonce, 10_000, "bootServer");
+  return { proc, base };
 }
 
 describe("review follow-ups", () => {
@@ -1891,10 +1892,16 @@ describe("review follow-ups", () => {
       await new Promise((r) => setTimeout(r, 900));
       const reaped = await fetch(`${base}/api/jobs/${jobId}`, { headers: H });
       assert.equal(reaped.status, 404, "replay window closed");
-      // …but the web-only session still settles idle via the small record
+      // …but the compact terminal record still serves the web-only session
+      // WITH its metadata — title, directory, and createdAt ride along on
+      // the record, not just the idle verdict
       const detail = await fetch(`${base}/api/sessions/${sid}`, { headers: H });
       assert.equal(detail.status, 200, "synthetic detail from terminal record");
-      assert.equal((await detail.json()).runActive, false);
+      const dj = await detail.json();
+      assert.equal(dj.runActive, false);
+      assert.equal(dj.session.directory, ws2, "directory preserved by the record");
+      assert.equal(dj.session.title, "retention probe", "title preserved by the record");
+      assert.ok(Number(dj.session.createdAt) > 0, "createdAt preserved by the record");
     } finally {
       proc.kill();
     }
@@ -1911,6 +1918,24 @@ describe("review follow-ups", () => {
     });
     assert.notEqual(code, "timeout", "bind failure must exit promptly, not hang");
     assert.notEqual(code, 0, "double-bind cannot succeed");
+  });
+
+  it("readiness helper is deadline-bound even when a listener accepts and never responds", async () => {
+    // the failure mode under test: the poll's fetch parks forever on a
+    // hanging listener, so loop-internal deadline checks never re-run
+    const { createServer: makeRaw } = await import("node:http");
+    const hanger = makeRaw(() => { /* accept and withhold the response */ });
+    await new Promise((r) => hanger.listen(0, "127.0.0.1", r));
+    const port = hanger.address().port;
+    const stubProc = { once() {}, off() {}, exitCode: null };
+    const t0 = Date.now();
+    await assert.rejects(
+      waitForVerifiedServer(stubProc, `http://127.0.0.1:${port}`, "nonce-that-never-answers", 1_200, "probe"),
+      /no verified server/,
+    );
+    const elapsed = Date.now() - t0;
+    hanger.close();
+    assert.ok(elapsed < 4_000, `deadline must abort the parked request (took ${elapsed}ms)`);
   });
 
   it("cancellation SIGKILLs the process GROUP — an orphan ignoring SIGTERM dies too", async () => {

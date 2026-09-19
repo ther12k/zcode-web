@@ -644,7 +644,12 @@ async function handleApi(req, res, url) {
         // A web-only session whose run just ended: the store never saw a row
         // (the CLI owns store writes). Answer with the run's own record so
         // the browser can settle to idle — a 404 here would leave the
-        // pre-cancel runActive=true stuck on the client.
+        // pre-cancel runActive=true stuck on the client. The entry may be a
+        // full Job OR the compact terminal record; both carry the session
+        // descriptor (text/cwd/createdAt), which is all this path may use.
+        // In-memory only: a server restart loses this evidence for web runs
+        // and desktop runs alike — an incomplete persisted assistant row
+        // then falls back to the store's recency heuristic.
         session = {
           id: sessionMatch[1],
           title: String(lastJob.text || "New chat").slice(0, 200),

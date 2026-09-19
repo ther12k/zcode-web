@@ -1620,13 +1620,27 @@ test("hidden tab keeps the polling loop alive for continued sync", async ({ page
   await expect(page.getByLabel("Message Zcode")).toBeVisible();
   await expect(page.locator(".agent-message").or(page.locator(".markdown")).first()).toContainText("first marker", { timeout: 8000 });
 
-  // hide the tab long enough for a scheduled tick to fire while hidden —
-  // a REAL hide via another tab taking foreground (fires visibilitychange)
-  const other = await page.context().newPage();
-  await other.bringToFront();
-  await page.waitForTimeout(2500);
-  await page.bringToFront();
-  await other.close();
+  // Hide the document LONGER than the idle poll interval (10s), via a
+  // visibilityState override (headless Chromium does not background tabs,
+  // and CDP 'frozen' suspends timers — the override keeps timers running so
+  // the pending tick REALLY fires in the hidden branch, which is what the
+  // old code killed: it returned early without rescheduling).
+  let hiddenRequests = 0;
+  page.on("request", (r) => { if (/\/api\/sessions\/sess_/.test(r.url())) hiddenRequests += 1; });
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect.poll(() => page.evaluate(() => document.visibilityState), { timeout: 5000 }).toBe("hidden");
+  // no detail requests while hidden — the tick fired but skipped its fetch
+  const beforeHidden = hiddenRequests;
+  await page.waitForTimeout(12_000);
+  expect(hiddenRequests - beforeHidden).toBe(0);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect.poll(() => page.evaluate(() => document.visibilityState), { timeout: 5000 }).toBe("visible");
 
   // first post-restore mutation: the loop must pick this up…
   seedText("second marker");
