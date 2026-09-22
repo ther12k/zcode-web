@@ -15,6 +15,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { stopCohort } from "./cleanup.js";
 
 export const config = {
   cliEntry: process.env.ZCODE_CLI_ENTRY || "/opt/zcode/zcode.cjs",
@@ -80,6 +81,11 @@ class Job {
     this.exitCode = null;
     this.error = null;
     this.stderrTail = "";
+    // cleanup outcome is SEPARATE from execution status: a job may be
+    // terminal (cancelled/timeout/...) while its process-cohort cleanup is
+    // still pending / terminated / incomplete (inv/cleanup-verify)
+    this.cleanup = { state: "none" };
+    this.cleanupHandle = null;
   }
 
   setStatus(next) {
@@ -103,9 +109,13 @@ class Job {
 
 const TERMINAL = new Set(["succeeded", "failed", "cancelled", "timeout"]);
 
-// ZWUI-072: signal the whole process group (POSIX — spawn runs detached) so
-// tool subprocesses die with the CLI. Falls back to the direct child when
-// the group is gone or on platforms without negative-PID signals.
+// ZWUI-072: signal the CLI's process group (POSIX — spawn runs detached) so
+// same-group members die with the CLI. Falls back to the direct child when
+// the group is gone or on platforms without negative-PID signals. NOTE
+// (inv/cleanup-verify): the CLI's tools run as their OWN session leaders, so
+// a group signal can never reach them — the shared stop lifecycle
+// (stopJobWork below) captures the descendant cohort and escalates against
+// individual survivors; this group signal only covers same-group members.
 function killTree(proc, signal) {
   if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
   try {
@@ -138,6 +148,71 @@ export class JobManager {
     this.bySession = new Map();
     // ZWUI-008: bounded replay buffers per job (SSE v2 Last-Event-ID)
     this.replayMax = Number(process.env.ZCODE_SSE_REPLAY_MAX || 4000);
+    // Jobs whose process-cohort cleanup is still pending (terminal jobs stay
+    // here until their cleanup resolves — a terminal execution status never
+    // discards cleanup targets). Shutdown drains this set.
+    this.pendingCleanups = new Set();
+    // Shutdown admission gate: once true, start() rejects new jobs.
+    this.admissionClosed = false;
+  }
+
+  /** Shared stop lifecycle (cancel / timeout / shutdown). Captures the
+   *  cohort BEFORE the caller's group signal, escalates against
+   *  identity-validated survivors, and records the cleanup outcome on the
+   *  job — separate from the execution outcome. Idempotent per job. MUST be
+   *  awaited-before-first-signal ordering-wise: call this, THEN killTree. */
+  stopJobWork(job, { firstSignal = "SIGTERM" } = {}) {
+    if (job.cleanupHandle) return job.cleanupHandle;
+    const pid = job.proc?.pid ?? null;
+    const handle = stopCohort(pid, { firstSignal });
+    job.cleanupHandle = handle;
+    job.cleanup = { state: "pending" };
+    this.pendingCleanups.add(job);
+    handle.done.then((outcome) => {
+      job.cleanup = outcome;
+      if (outcome.state !== "pending") this.pendingCleanups.delete(job);
+    });
+    return handle;
+  }
+
+  /** Shutdown: stop all non-terminal jobs (preserving each job's own reason
+   *  semantics — a shutdown stop marks cancelRequested so the CLI's death
+   *  settles the job as cancelled, never mislabeled succeeded) and await
+   *  EVERY pending cleanup — including jobs already terminal but still
+   *  cleaning. `remainingMs` may be a duration or a () => ms function polled
+   *  each tick (so an escalated shutdown can shorten a running drain).
+   *  Resolves with an honest summary. */
+  async shutdownDrain(remainingMs = 8000) {
+    this.admissionClosed = true;
+    const remain = () => {
+      const v = typeof remainingMs === "function" ? remainingMs() : remainingMs;
+      return Math.max(0, Number(v) || 0);
+    };
+    for (const job of this.jobs.values()) {
+      if (!TERMINAL.has(job.status)) {
+        job.cancelRequested = true;
+        job.setStatus("stopping");
+        this.stopJobWork(job, { firstSignal: "SIGTERM" });
+        killTree(job.proc, "SIGTERM");
+      }
+    }
+    const deadline = Date.now() + remain();
+    while (Date.now() < deadline) {
+      if (this.pendingCleanups.size === 0) break;
+      await new Promise((r) => setTimeout(r, Math.min(200, Math.max(1, deadline - Date.now()))));
+    }
+    const unresolved = [...this.pendingCleanups];
+    let incomplete = 0;
+    for (const job of unresolved) {
+      incomplete++;
+      job.cleanup = { state: "incomplete", survivors: [], note: "shutdown deadline exceeded before cleanup resolved" };
+      this.pendingCleanups.delete(job);
+    }
+    // also count cleanups that resolved incomplete during the drain
+    for (const job of this.jobs.values()) {
+      if (job.cleanup?.state === "incomplete" && !unresolved.includes(job)) incomplete++;
+    }
+    return { drained: unresolved.length === 0, incomplete, stopped: this.jobs.size };
   }
 
   get activeCount() {
@@ -187,6 +262,10 @@ export class JobManager {
   }
 
   start({ text, sessionId, cwd, mode, model, modelApiKey, modelBaseUrl, attachments, requestId }) {
+    // shutdown admission gate: once draining, no new work is accepted
+    if (this.admissionClosed) {
+      throw Object.assign(new Error("Server is shutting down"), { status: 503 });
+    }
     // idempotent resubmission returns the original job (or rejects on conflict)
     const fp = requestId ? requestFingerprint({ text, sessionId, cwd, mode, model, attachments }) : null;
     if (requestId) {
@@ -386,6 +465,10 @@ export class JobManager {
       if (!TERMINAL.has(job.status)) {
         job.timedOut = true;
         record({ kind: "timeout" });
+        // shared stop lifecycle: capture the cohort BEFORE the group signal
+        // (timeout keeps its own reason — timedOut stays set, the settle
+        // path below reports "timeout", never a plain cancellation)
+        this.stopJobWork(job, { firstSignal: "SIGKILL" });
         killTree(proc, "SIGKILL");
       }
     }, config.jobTimeoutMs);
@@ -410,13 +493,15 @@ export class JobManager {
     if (job.status === "stopping") return true;
     job.cancelRequested = true;
     job.setStatus("stopping");
+    // shared stop lifecycle FIRST: the descendant cohort must be captured
+    // before any signal can destroy the parent-child edges (own-session
+    // tools are unreachable by the group signal alone)
+    this.stopJobWork(job, { firstSignal: "SIGTERM" });
     killTree(job.proc, "SIGTERM");
-    // Escalation targets the PROCESS GROUP and runs even after the job goes
-    // terminal: the CLI can exit promptly on SIGTERM while a tool subprocess
-    // it spawned ignores the term signal — "group leader exited" is not
-    // proof the owned group is empty. ESRCH means the group is gone (the
-    // clean case); pid reuse before this fires would require the entire
-    // group to die and a new session leader to take the id.
+    // Group escalation still runs (same-group members the cohort walk cannot
+    // see, e.g. non-descendant group members). The cohort's individual,
+    // identity-checked SIGKILL escalation runs inside stopJobWork — a
+    // terminal job status never cancels it.
     const pgid = job.proc?.pid;
     setTimeout(() => {
       if (!job.cancelRequested || !pgid) return;

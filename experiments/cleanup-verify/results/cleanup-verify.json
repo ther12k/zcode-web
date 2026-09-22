@@ -7,20 +7,165 @@
   "harness": "real server/index.js + real CLI, disposable profile, allowlist env builder"
  },
  "cases": {
-  "C-timeout-long": {
-   "tag": "C-timeout-long",
-   "kind": "job-timeout",
+  "A-cancel-fresh": {
+   "tag": "A-cancel-fresh",
+   "kind": "cancel-fresh",
    "sep": false,
-   "startedAt": "2026-09-22T13:14:42.690Z",
-   "jobId": "18c73e6b-e959-4ee7-9474-8d2667a48efe",
+   "startedAt": "2026-09-22T15:30:01.060Z",
+   "jobId": "06ddd026-db2e-412b-a630-f40527ccce3f",
    "identities": {
     "fixture": {
-     "markerStart": "start 1 355261 ppid=354530 pgid=355261 sid=355261 opts=plain",
+     "markerStart": "start 1 495947 ppid=495805 pgid=495947 sid=495947 opts=plain",
      "info": {
-      "pid": 355261,
-      "ppid": 354530,
-      "pgid": 355261,
-      "sid": 355261,
+      "pid": 495947,
+      "ppid": 495805,
+      "pgid": 495947,
+      "sid": 495947,
+      "state": "S"
+     }
+    },
+    "cli": null,
+    "fixtureInCliGroup": null,
+    "fixtureOwnSession": true
+   },
+   "cancelHttp": 200,
+   "settlement": {
+    "status": "cancelled",
+    "ms": 306,
+    "sessionId": "sess_800a4b86-b0c2-4c77-930d-57c2fb903987"
+   },
+   "execution": {
+    "stoppedAdvancing": true,
+    "lastSeq": 2,
+    "pidDead": true,
+    "census": null
+   },
+   "cliAfter": null,
+   "verdict": "PASS",
+   "trace": [
+    "30:08.593 fixture pid 495947 pgid=495947 sid=495947; cli pid null pgid=undefined; sameGroup=null",
+    "30:09.014 cancel POST -> 200",
+    "30:09.320 job settled: cancelled (+306ms)",
+    "30:13.023 execution stopped=true fixtureDead=true cliDead=undefined"
+   ],
+   "harnessCleanup": "performed (excluded from verdict)",
+   "stderrTail": "(node:495798) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the warning was created)\n"
+  },
+  "A-cancel-fresh-sep": {
+   "tag": "A-cancel-fresh-sep",
+   "kind": "cancel-fresh",
+   "sep": true,
+   "startedAt": "2026-09-22T15:30:15.699Z",
+   "jobId": "133c4741-88eb-4ef7-9821-f83007b90ec0",
+   "identities": {
+    "fixture": {
+     "markerStart": "start 1 496294 ppid=2385 pgid=496294 sid=496294 opts=ignores-sigterm",
+     "info": {
+      "pid": 496294,
+      "ppid": 2385,
+      "pgid": 496294,
+      "sid": 496294,
+      "state": "S"
+     }
+    },
+    "cli": null,
+    "fixtureInCliGroup": null,
+    "fixtureOwnSession": true
+   },
+   "cancelHttp": 200,
+   "settlement": {
+    "status": "cancelled",
+    "ms": 307,
+    "sessionId": "sess_4e69e646-5150-49ec-8da5-95b6a667ed53"
+   },
+   "execution": {
+    "stoppedAdvancing": false,
+    "lastSeq": 10,
+    "pidDead": false,
+    "census": {
+     "pid": 496294,
+     "ppid": 2385,
+     "pgid": 496294,
+     "sid": 496294,
+     "state": "S"
+    }
+   },
+   "cliAfter": null,
+   "verdict": "FAIL(settled cancelled but execution continues: stopped=false dead=false)",
+   "trace": [
+    "30:27.240 fixture pid 496294 pgid=496294 sid=496294; cli pid null pgid=undefined; sameGroup=null",
+    "30:27.663 cancel POST -> 200",
+    "30:27.970 job settled: cancelled (+307ms)",
+    "30:31.675 execution stopped=false fixtureDead=false cliDead=undefined"
+   ],
+   "harnessCleanup": "performed (excluded from verdict)",
+   "stderrTail": "(node:496073) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the warning was created)\n"
+  },
+  "B-cancel-resumed": {
+   "tag": "B-cancel-resumed",
+   "kind": "cancel-resumed",
+   "sep": false,
+   "startedAt": "2026-09-22T15:30:35.593Z",
+   "warmTurn": {
+    "status": "succeeded",
+    "ms": 6947,
+    "sessionId": "sess_c447243e-9554-49a0-9687-11b31db8e570"
+   },
+   "jobId": "53971af7-da49-422f-9b0a-eac54badd420",
+   "identities": {
+    "fixture": {
+     "markerStart": "start 1 496867 ppid=496556 pgid=496867 sid=496867 opts=plain",
+     "info": {
+      "pid": 496867,
+      "ppid": 496556,
+      "pgid": 496867,
+      "sid": 496867,
+      "state": "S"
+     }
+    },
+    "cli": null,
+    "fixtureInCliGroup": null,
+    "fixtureOwnSession": true
+   },
+   "cancelHttp": 200,
+   "settlement": {
+    "status": "cancelled",
+    "ms": 1818,
+    "sessionId": "sess_c447243e-9554-49a0-9687-11b31db8e570"
+   },
+   "execution": {
+    "stoppedAdvancing": true,
+    "lastSeq": 2,
+    "pidDead": true,
+    "census": null
+   },
+   "cliAfter": null,
+   "sessionRetained": true,
+   "verdict": "PASS",
+   "trace": [
+    "30:42.553 warm turn settled succeeded sessionId=yes",
+    "30:52.101 fixture pid 496867 pgid=496867 sid=496867; cli pid null pgid=undefined; sameGroup=null",
+    "30:52.520 cancel POST -> 200",
+    "30:54.338 job settled: cancelled (+1818ms)",
+    "30:58.040 execution stopped=true fixtureDead=true cliDead=undefined"
+   ],
+   "harnessCleanup": "performed (excluded from verdict)",
+   "stderrTail": "(node:496437) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the warning was created)\n"
+  },
+  "C-timeout-sep": {
+   "tag": "C-timeout-sep",
+   "kind": "job-timeout",
+   "sep": true,
+   "startedAt": "2026-09-22T15:31:00.040Z",
+   "jobId": "dca0de03-981b-48ac-9dbe-b5366452e0b0",
+   "identities": {
+    "fixture": {
+     "markerStart": "start 1 497539 ppid=2385 pgid=497539 sid=497539 opts=ignores-sigterm",
+     "info": {
+      "pid": 497539,
+      "ppid": 2385,
+      "pgid": 497539,
+      "sid": 497539,
       "state": "S"
      }
     },
@@ -29,25 +174,137 @@
     "fixtureOwnSession": true
    },
    "settlement": {
-    "status": "succeeded",
-    "ms": 12091,
-    "sessionId": "sess_d0dce38e-71ae-4b3f-b65f-fd8bf19cd579"
+    "status": "timeout",
+    "ms": 2113,
+    "sessionId": "sess_0ced3ed2-cfaa-4bd0-85fb-41514ce83135"
+   },
+   "execution": {
+    "stoppedAdvancing": false,
+    "lastSeq": 13,
+    "pidDead": false,
+    "census": {
+     "pid": 497539,
+     "ppid": 2385,
+     "pgid": 497539,
+     "sid": 497539,
+     "state": "S"
+    }
+   },
+   "cliAfter": null,
+   "verdict": "FAIL(settled timeout but execution continues: stopped=false dead=false)",
+   "trace": [
+    "31:22.855 fixture pid 497539 pgid=497539 sid=497539; cli pid null pgid=undefined; sameGroup=null",
+    "31:25.368 job settled: timeout (+2113ms)",
+    "31:29.070 execution stopped=false fixtureDead=false cliDead=undefined"
+   ],
+   "harnessCleanup": "performed (excluded from verdict)",
+   "stderrTail": "(node:497165) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the warning was created)\n"
+  },
+  "D-shutdown": {
+   "tag": "D-shutdown",
+   "kind": "server-shutdown",
+   "sep": false,
+   "startedAt": "2026-09-22T15:31:31.015Z",
+   "jobId": "afb817d3-bd98-4bb2-bbba-4e5c5001e900",
+   "identities": {
+    "fixture": {
+     "markerStart": "start 1 497787 ppid=497686 pgid=497787 sid=497787 opts=plain",
+     "info": {
+      "pid": 497787,
+      "ppid": 497686,
+      "pgid": 497787,
+      "sid": 497787,
+      "state": "S"
+     }
+    },
+    "cli": null,
+    "fixtureInCliGroup": null,
+    "fixtureOwnSession": true
+   },
+   "serverExited": true,
+   "settlement": {
+    "status": "SERVER-EXITED",
+    "ms": 6250
    },
    "execution": {
     "stoppedAdvancing": true,
-    "lastSeq": 22,
+    "lastSeq": 2,
     "pidDead": true,
     "census": null
    },
-   "cliAfter": null,
-   "verdict": "PASS",
+   "cliAfterShutdown": null,
+   "verdict": "PASS(shutdown stopped owned tool work)",
    "trace": [
-    "15:01.281 fixture pid 355261 pgid=355261 sid=355261; cli pid null pgid=undefined; sameGroup=null",
-    "15:13.772 job settled: succeeded (+12091ms)",
-    "15:17.473 execution stopped=true fixtureDead=true cliDead=undefined"
+    "31:38.296 fixture pid 497787 pgid=497787 sid=497787; cli pid null pgid=undefined; sameGroup=null",
+    "31:38.697 SIGTERM -> server",
+    "31:44.947 server exited=true",
+    "31:48.652 execution stopped=true fixtureDead=true cliDead=undefined"
    ],
    "harnessCleanup": "performed (excluded from verdict)",
-   "stderrTail": "(node:354522) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the warning was created)\n"
+   "stderrTail": "(node:497679) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the warning was created)\n"
+  },
+  "D-shutdown-sep": {
+   "tag": "D-shutdown-sep",
+   "kind": "server-shutdown",
+   "sep": true,
+   "startedAt": "2026-09-22T15:31:50.508Z",
+   "jobId": "822617e0-b615-4059-a69c-3029c563e974",
+   "identities": {
+    "fixture": {
+     "markerStart": "start 1 498680 ppid=2385 pgid=498680 sid=498680 opts=ignores-sigterm",
+     "info": {
+      "pid": 498680,
+      "ppid": 2385,
+      "pgid": 498680,
+      "sid": 498680,
+      "state": "S"
+     }
+    },
+    "cli": null,
+    "fixtureInCliGroup": null,
+    "fixtureOwnSession": true
+   },
+   "serverExited": true,
+   "settlement": {
+    "status": "SERVER-EXITED",
+    "ms": 6225
+   },
+   "execution": {
+    "stoppedAdvancing": false,
+    "lastSeq": 21,
+    "pidDead": false,
+    "census": {
+     "pid": 498680,
+     "ppid": 2385,
+     "pgid": 498680,
+     "sid": 498680,
+     "state": "S"
+    }
+   },
+   "cliAfterShutdown": null,
+   "verdict": "FAIL(graceful shutdown left owned tool work running)",
+   "trace": [
+    "32:05.058 fixture pid 498680 pgid=498680 sid=498680; cli pid null pgid=undefined; sameGroup=null",
+    "32:05.459 SIGTERM -> server",
+    "32:11.684 server exited=true",
+    "32:15.388 execution stopped=false fixtureDead=false cliDead=undefined"
+   ],
+   "harnessCleanup": "performed (excluded from verdict)",
+   "stderrTail": "(node:497998) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the warning was created)\n"
   }
+ },
+ "remediationRun": {
+  "at": "2026-09-22T15:34:11.186Z",
+  "branch": "fix/cleanup-shutdown",
+  "verdicts": {
+   "A-cancel-fresh": "PASS",
+   "A-cancel-fresh-sep": "FAIL — REMAINING GAP (see attribution)",
+   "B-cancel-resumed": "PASS",
+   "C-timeout-sep": "FAIL — REMAINING GAP",
+   "D-shutdown": "PASS(shutdown stopped owned tool work)",
+   "D-shutdown-sep": "FAIL — REMAINING GAP"
+  },
+  "attributionFinding": "real-CLI tools invoked via shell `setsid` are ORPHANED AT CREATION (fixture ancestry: marker → systemd → systemd; no /proc descent from the CLI job exists at any time). The cohort mechanism verifies and terminates every CAPTURED descendant (fixture/unit/server tests), and the shutdown handler now drains all jobs (D-ordinary PASS on the REAL CLI). The setsid class is not attributable by any process-tree means; containment requires an ownership mechanism outside this patch scope (per-job cgroup). cwd/env-based matching was considered and REJECTED (production cwds are user projects — an editor terminal would match).",
+  "note": "fixture-based server tests passed for the setsid-exec-in-place shape; the real-CLI shell+setsid shape orphans instantly — recorded, not claimed fixed"
  }
 }

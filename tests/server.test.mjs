@@ -1974,3 +1974,191 @@ describe("review follow-ups", () => {
     }
   });
 });
+
+// ---------- cleanup lifecycle (inv/cleanup-verify remediation) ----------
+// These regressions FAIL against 7acfa87's behavior: the resistant class
+// (own-session, SIGTERM-ignoring tool) survives group-only signalling there,
+// and graceful shutdown performed no job cleanup at all.
+describe("cleanup lifecycle (inv/cleanup-verify remediation)", () => {
+  const FIXTURE_CLI = join(SERVER_ROOT, "tests", "fixtures", "cli-with-tool.mjs");
+  const markerPath = () => join(tmpdir(), `cv-${randomUUID()}.log`);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const beats = (m) => { try { return readFileSync(m, "utf8").trim().split("\n").filter(Boolean).length; } catch { return 0; } };
+  const aliveP = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const waitMarker = async (m) => { for (let i = 0; i < 100; i++) { if (beats(m) > 0) return true; await sleep(80); } return false; };
+  const waitCleanup = async (job, capMs = 15000) => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < capMs && job.cleanup?.state === "pending") await sleep(150);
+    return job.cleanup;
+  };
+
+  // fixture pid from the marker's start line (3rd token)
+  const fixturePidOf = (m) => { try { return Number(readFileSync(m, "utf8").split("\n")[0].split(" ")[2]); } catch { return 0; } };
+
+  const withFixtureCli = async (fn, { timeoutMs } = {}) => {
+    const { JobManager, config } = await import("../server/zcode.js");
+    const prevEntry = config.cliEntry;
+    const prevTimeout = config.jobTimeoutMs;
+    config.cliEntry = FIXTURE_CLI;
+    if (timeoutMs) config.jobTimeoutMs = timeoutMs;
+    const mgr = new JobManager();
+    try {
+      return await fn(mgr);
+    } finally {
+      config.cliEntry = prevEntry;
+      config.jobTimeoutMs = prevTimeout;
+      // harness-level safety net (NOT verdict evidence): clear stragglers
+      for (const job of mgr.jobs.values()) {
+        try { job.proc?.kill("SIGKILL"); } catch {}
+      }
+    }
+  };
+
+  it("cancel terminates an own-session SIGTERM-ignoring tool (resistant class)", { timeout: 30000 }, async () => {
+    await withFixtureCli(async (mgr) => {
+      const marker = markerPath();
+      const { job } = mgr.start({ text: marker, cwd: ws, mode: "plan" });
+      assert.ok(await waitMarker(marker), "tool never started");
+      const pid = fixturePidOf(marker);
+      assert.ok(pid > 0 && aliveP(pid));
+      assert.equal(mgr.cancel(job.id), true);
+      const cleanup = await waitCleanup(job);
+      assert.equal(cleanup.state, "terminated", JSON.stringify(cleanup));
+      const frozen = beats(marker);
+      await sleep(1000);
+      assert.equal(beats(marker), frozen, "tool work continued after cleanup terminated");
+      assert.equal(aliveP(pid), false);
+    });
+  });
+
+  it("timeout preserves its reason AND captures/stops the cohort", { timeout: 30000 }, async () => {
+    await withFixtureCli(async (mgr) => {
+      const marker = markerPath();
+      const { job } = mgr.start({ text: marker, cwd: ws, mode: "plan" }, { timeoutMs: 1500 });
+      assert.ok(await waitMarker(marker), "tool never started");
+      const pid = fixturePidOf(marker);
+      // wait for the server-owned deadline to fire while the tool is active
+      for (let i = 0; i < 60 && job.status !== "timeout"; i++) await sleep(150);
+      assert.equal(job.status, "timeout", "server deadline must be the stop reason");
+      assert.equal(job.timedOut, true);
+      const cleanup = await waitCleanup(job);
+      assert.equal(cleanup.state, "terminated", JSON.stringify(cleanup));
+      assert.equal(aliveP(pid), false);
+    }, { timeoutMs: 1500 });
+  });
+
+  it("shutdownDrain stops active jobs, closes admission, and awaits cleanup", { timeout: 30000 }, async () => {
+    await withFixtureCli(async (mgr) => {
+      const marker = markerPath();
+      const { job } = mgr.start({ text: marker, cwd: ws, mode: "plan" });
+      assert.ok(await waitMarker(marker), "tool never started");
+      const pid = fixturePidOf(marker);
+      const result = await mgr.shutdownDrain(10000);
+      assert.equal(result.drained, true, JSON.stringify(result));
+      assert.equal(job.cleanup.state, "terminated");
+      assert.equal(aliveP(pid), false);
+      assert.ok(["cancelled", "failed", "timeout"].includes(job.status), `shutdown must not mislabel the job: ${job.status}`);
+      // admission is closed after drain
+      assert.throws(() => mgr.start({ text: "x", cwd: ws, mode: "plan" }), /shutting down/);
+    });
+  });
+
+  it("shutdown includes a job cancelled moments earlier (cleanup pending, already terminal)", { timeout: 30000 }, async () => {
+    await withFixtureCli(async (mgr) => {
+      const marker = markerPath();
+      const { job } = mgr.start({ text: marker, cwd: ws, mode: "plan" });
+      assert.ok(await waitMarker(marker), "tool never started");
+      const pid = fixturePidOf(marker);
+      mgr.cancel(job.id); // cohort escalation (5s) still pending
+      for (let i = 0; i < 40 && job.status !== "cancelled"; i++) await sleep(100);
+      assert.equal(job.status, "cancelled");
+      const result = await mgr.shutdownDrain(10000); // must await the pending escalation
+      assert.equal(result.drained, true, JSON.stringify(result));
+      assert.equal(job.cleanup.state, "terminated");
+      assert.equal(aliveP(pid), false, "cancelled-then-shutdown job's tool must not survive");
+    });
+  });
+
+  it("cancelling job A does not touch job B's tool or an unrelated sentinel", { timeout: 40000 }, async () => {
+    await withFixtureCli(async (mgr) => {
+      const markerA = markerPath();
+      const markerB = markerPath();
+      const sentinelMarker = markerPath();
+      const { spawn } = await import("node:child_process");
+      const sentinel = spawn("setsid", [process.execPath, join(SERVER_ROOT, "tests", "fixtures", "marker-fixture.cjs"), sentinelMarker], {
+        env: { ...process.env, FIXTURE_IGNORE_SIGTERM: "1" }, stdio: "ignore",
+      });
+      try {
+        const a = mgr.start({ text: markerA, cwd: ws, mode: "plan" });
+        const b = mgr.start({ text: markerB, cwd: ws, mode: "plan" });
+        assert.ok(await waitMarker(markerA) && await waitMarker(markerB), "tools never started");
+        assert.ok(await waitMarker(sentinelMarker), "sentinel never started");
+        const pidA = fixturePidOf(markerA), pidB = fixturePidOf(markerB);
+        assert.equal(mgr.cancel(a.job.id), true);
+        const cleanupA = await waitCleanup(a.job);
+        assert.equal(cleanupA.state, "terminated");
+        assert.equal(aliveP(pidA), false, "A's tool stopped");
+        const beatsB = beats(markerB), beatsS = beats(sentinelMarker);
+        await sleep(1000);
+        assert.ok(aliveP(pidB), "B's tool must be untouched");
+        assert.ok(beats(markerB) > beatsB, "B's tool must keep working");
+        assert.ok(beats(sentinelMarker) > beatsS, "unrelated sentinel must keep working");
+        assert.ok(aliveP(sentinel.pid), "sentinel process untouched");
+        // then stop B through its own path
+        assert.equal(mgr.cancel(b.job.id), true);
+        const cleanupB = await waitCleanup(b.job);
+        assert.equal(cleanupB.state, "terminated");
+        assert.equal(aliveP(pidB), false);
+      } finally {
+        try { process.kill(sentinel.pid, "SIGKILL"); } catch {}
+      }
+    });
+  });
+
+  it("graceful SIGTERM to the real server stops an active resistant tool before exit", { timeout: 40000 }, async () => {
+    const marker = markerPath();
+    const proc = spawn(process.execPath, [join(SERVER_ROOT, "server", "index.js")], {
+      env: {
+        ...process.env,
+        PORT: String(PORT + 11), HOST: "127.0.0.1", ZCODE_WEB_TOKEN: TOKEN,
+        ZCODE_INSTANCE_ID: randomUUID(),
+        ZCODE_CLI_ENTRY: FIXTURE_CLI,
+        ZCODE_WORKSPACE_ROOT: ws, ZCODE_HOME: home,
+        ZCODE_JOB_TIMEOUT_MS: String(10 * 60_000),
+        ZCODE_SHUTDOWN_DRAIN_MS: "9000",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let out = "";
+    proc.stdout.on("data", (c) => (out += c));
+    proc.stderr.on("data", (c) => (out += c));
+    try {
+      // readiness
+      const base = `http://127.0.0.1:${PORT + 11}`;
+      for (let i = 0; i < 60; i++) {
+        const ok = await fetch(`${base}/api/health`, { headers: { authorization: `Bearer ${TOKEN}` } }).then((r) => r.ok).catch(() => false);
+        if (ok) break;
+        await sleep(200);
+      }
+      const chat = await fetch(`${base}/api/chat`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+        body: JSON.stringify({ text: marker, cwd: ws, mode: "plan" }),
+      });
+      assert.ok(chat.ok || chat.status === 202, `chat status ${chat.status}`);
+      assert.ok(await waitMarker(marker), "tool never started");
+      const pid = fixturePidOf(marker);
+      proc.kill("SIGTERM");
+      const code = await new Promise((r) => { const t = setTimeout(() => r("timeout"), 20000); proc.once("exit", (c) => { clearTimeout(t); r(c); }); });
+      assert.equal(code, 0, `server must exit cleanly after draining (out: ${out.slice(-300)})`);
+      const frozen = beats(marker);
+      await sleep(1200);
+      assert.equal(beats(marker), frozen, "resistant tool kept working after server exit");
+      assert.equal(aliveP(pid), false, "resistant tool must be terminated by shutdown");
+    } finally {
+      try { proc.kill("SIGKILL"); } catch {}
+      const pid = fixturePidOf(marker);
+      if (pid) { try { process.kill(pid, "SIGKILL"); } catch {} }
+    }
+  });
+});

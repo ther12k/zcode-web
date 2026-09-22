@@ -71,3 +71,36 @@ shutdown gap is ours alone.
 
 Stop here per investigation scope: evidence + recommendation recorded;
 implementation, merge, and deployment are separate decisions.
+
+## Remediation result (fix/cleanup-shutdown — implementation candidate)
+
+Shipped in this branch (implementation candidate for review; NOT merged/deployed):
+- server/cleanup.js — shared stop lifecycle: cohort capture BEFORE the first
+  signal on ALL paths (cancel, timeout, shutdown), identity-checked
+  (pid+starttime; pid-reuse NEVER signalled), individual TERM→SIGKILL
+  escalation, terminated/incomplete verification; failures and unreadable
+  enumeration are INCOMPLETE, never success; the target set is never widened.
+- zcode.js — cancel/timeout route through stopJobWork (reasons preserved:
+  timeout still settles "timeout"); terminal jobs keep cleanup targets;
+  pendingCleanups set; admission gate (start() → 503 once draining).
+- index.js — graceful shutdown: reject admission → server.close() (not
+  awaited before cleanup) → drain ALL cleanups (incl. terminal-but-cleaning
+  jobs) under ZCODE_SHUTDOWN_DRAIN_MS (default 8000 < compose's 10s grace) →
+  closeAllConnections → exit 0 clean / 1 incomplete. Idempotent; a repeated
+  signal shortens the remaining window instead of restarting it.
+
+Evidence: tests/cleanup.test.mjs (7/7 — resistant-class termination, EPERM →
+incomplete, pid-reuse guard, enumeration guard); six new server regressions
+(81/0 suite; all six FAIL against 7acfa87 — verified on a temp old checkout);
+real-CLI acceptance: A-ordinary, B-resumed, **D-shutdown(ordinary) PASS** —
+graceful shutdown now stops owned work. /api/jobs exposes cleanup state.
+
+**Remaining gap, precisely characterized (not claimed fixed):** real-CLI tools
+invoked through a shell `setsid` are orphaned AT CREATION — recorded ancestry
+marker → systemd → systemd — so no /proc-descent capture can attribute them
+at any time. Fixture-level setsid (exec-in-place) IS captured and terminated;
+the shell+setsid shape is not. cwd/env heuristics were considered and
+REJECTED (production job cwds are user projects — an editor terminal would
+match and be killed). Containment for this class requires an ownership
+mechanism outside this patch's scope (per-job cgroup). Probe rows
+A/C/D-sep on the real CLI are labeled REMAINING GAP in results.

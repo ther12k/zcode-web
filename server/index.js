@@ -973,6 +973,9 @@ async function handleApi(req, res, url) {
       exitCode: job.exitCode,
       error: job.error,
       timedOut: job.timedOut,
+      // cleanup outcome is distinct from execution status (inv/cleanup-verify):
+      // none | pending | terminated | incomplete
+      cleanup: job.cleanup?.state ?? "none",
     });
   }
 
@@ -1397,3 +1400,53 @@ server.listen(PORT, HOST, () => {
   console.log(`  workspace : ${WORKSPACE_ROOT}`);
   console.log(`  auth      : ${TOKEN ? "bearer token required" : "OPEN (set ZCODE_WEB_TOKEN!)"}`);
 });
+
+// ---------- graceful shutdown (inv/cleanup-verify remediation) ----------
+// SIGTERM/SIGINT previously killed the server with no job cleanup at all:
+// the CLI runs in a detached group and simply kept running orphaned. The
+// handler below orchestrates an awaited drain. Installing a signal listener
+// removes Node's default exit behavior, so the handler MUST complete the
+// shutdown itself. Idempotent: the FIRST signal starts the sequence; a
+// repeated signal escalates (shortens the deadline) instead of restarting it.
+const SHUTDOWN_DRAIN_MS = Number(process.env.ZCODE_SHUTDOWN_DRAIN_MS || 8000); // < compose's default 10s stop grace
+let shutdownStarted = false;
+let shutdownDeadlineAt = 0;
+const beginShutdown = (signal) => {
+  if (shutdownStarted) {
+    // repeated signal: bounded escalation — cut the remaining drain window
+    // to 1s rather than restarting the sequence or duplicating cleanup
+    shutdownDeadlineAt = Math.min(shutdownDeadlineAt, Date.now() + 1000);
+    console.log(`shutdown: repeated ${signal}, escalating (drain window shortened)`);
+    return;
+  }
+  shutdownStarted = true;
+  shutdownDeadlineAt = Date.now() + SHUTDOWN_DRAIN_MS;
+  console.log(`shutdown: ${signal} received — stopping admission and draining job cleanup`);
+  // 1) reject new job admission (JobManager.start + /api/chat surface 503)
+  jobs.admissionClosed = true;
+  // 2) stop accepting NEW connections; do NOT await this before job cleanup —
+  //    server.close() waits on active keep-alive/SSE responses
+  server.close(() => {});
+  // 3+4) stop all non-terminal jobs and await EVERY pending cleanup
+  //      (including terminal-but-still-cleaning jobs) under the deadline.
+  //      Cleanup timers are unref'd, but the http server and job pipes keep
+  //      the loop alive until we close them AFTER the drain.
+  (async () => {
+    const remaining = () => Math.max(0, shutdownDeadlineAt - Date.now());
+    const result = await jobs.shutdownDrain(remaining);
+    // 5) close remaining streams/connections so the process can exit
+    server.closeAllConnections?.();
+    server.close(() => {});
+    const incomplete = result.incomplete;
+    console.log(`shutdown: drained=${result.drained} incomplete=${incomplete} jobs=${result.stopped}`);
+    // 6) exit with an accurate outcome: 0 clean (or nothing to clean),
+    //    1 when cleanup could not be verified complete
+    process.exitCode = incomplete > 0 ? 1 : 0;
+    process.exit(process.exitCode);
+  })().catch((e) => {
+    console.error("shutdown: drain failed:", e?.message ?? e);
+    process.exit(1);
+  });
+};
+process.on("SIGTERM", () => beginShutdown("SIGTERM"));
+process.on("SIGINT", () => beginShutdown("SIGINT"));
