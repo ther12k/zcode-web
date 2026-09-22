@@ -1,0 +1,53 @@
+{
+ "identity": {
+  "serverCommit": "7acfa87 (inv/cleanup-verify worktree)",
+  "cli": "/home/ther12k/Workspace/ZCode/zcode-web/cli/zcode.cjs",
+  "cliSha": "e9f1868c0fdb8635",
+  "node": "v24.11.0",
+  "harness": "real server/index.js + real CLI, disposable profile, allowlist env builder"
+ },
+ "cases": {
+  "C-timeout-long": {
+   "tag": "C-timeout-long",
+   "kind": "job-timeout",
+   "sep": false,
+   "startedAt": "2026-09-22T13:14:42.690Z",
+   "jobId": "18c73e6b-e959-4ee7-9474-8d2667a48efe",
+   "identities": {
+    "fixture": {
+     "markerStart": "start 1 355261 ppid=354530 pgid=355261 sid=355261 opts=plain",
+     "info": {
+      "pid": 355261,
+      "ppid": 354530,
+      "pgid": 355261,
+      "sid": 355261,
+      "state": "S"
+     }
+    },
+    "cli": null,
+    "fixtureInCliGroup": null,
+    "fixtureOwnSession": true
+   },
+   "settlement": {
+    "status": "succeeded",
+    "ms": 12091,
+    "sessionId": "sess_d0dce38e-71ae-4b3f-b65f-fd8bf19cd579"
+   },
+   "execution": {
+    "stoppedAdvancing": true,
+    "lastSeq": 22,
+    "pidDead": true,
+    "census": null
+   },
+   "cliAfter": null,
+   "verdict": "PASS",
+   "trace": [
+    "15:01.281 fixture pid 355261 pgid=355261 sid=355261; cli pid null pgid=undefined; sameGroup=null",
+    "15:13.772 job settled: succeeded (+12091ms)",
+    "15:17.473 execution stopped=true fixtureDead=true cliDead=undefined"
+   ],
+   "harnessCleanup": "performed (excluded from verdict)",
+   "stderrTail": "(node:354522) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the warning was created)\n"
+  }
+ }
+}
