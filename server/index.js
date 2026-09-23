@@ -1438,10 +1438,13 @@ const beginShutdown = (signal) => {
     server.closeAllConnections?.();
     server.close(() => {});
     const incomplete = result.incomplete;
-    // scoped wording: exit 0 means cleanup completed under the documented
-    // SNAPSHOT policy — captured descendants terminated, ownership coverage
-    // best effort — never "no job-created process remains anywhere"
-    console.log(`shutdown: ${result.drained ? "captured-descendant cleanup complete under snapshot policy (ownership coverage best effort)" : "cleanup incomplete"} drained=${result.drained} incomplete=${incomplete} jobs=${result.stopped}`);
+    // scoped wording: success requires every cleanup attempt to have settled
+    // AND none reported incomplete — "drained" alone only means nothing is
+    // still pending (a settled INCOMPLETE attempt must not log as complete,
+    // review P2). Exit 0 under this policy means captured-descendant cleanup
+    // completed; ownership coverage remains best effort.
+    const cleanupSucceeded = result.drained && result.incomplete === 0;
+    console.log(`shutdown: ${cleanupSucceeded ? "captured-descendant cleanup complete under snapshot policy (ownership coverage best effort)" : "cleanup incomplete"} drained=${result.drained} incomplete=${incomplete} jobs=${result.stopped}`);
     // 6) exit with an accurate outcome: 0 clean (or nothing to clean),
     //    1 when cleanup could not be verified complete
     process.exitCode = incomplete > 0 ? 1 : 0;

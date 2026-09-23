@@ -2063,6 +2063,25 @@ describe("cleanup lifecycle (inv/cleanup-verify remediation)", () => {
     });
   });
 
+  it("P2: a shortened shutdown window ESCALATES the captured cohort (never abandons to a timer exit would kill)", { timeout: 30000 }, async () => {
+    await withFixtureCli(async (mgr) => {
+      const marker = markerPath();
+      const { job } = mgr.start({ text: marker, cwd: ws, mode: "plan" });
+      assert.ok(await waitMarker(marker), "tool never started");
+      const pid = fixturePidOf(marker);
+      mgr.cancel(job.id); // stopCohort escalation still behind its 5s grace
+      for (let i = 0; i < 40 && job.status !== "cancelled"; i++) await sleep(100);
+      assert.equal(job.status, "cancelled");
+      // tiny remaining window (the repeat-signal shape): the drain must
+      // force the terminal signal NOW — pre-fix, the 5s escalation never
+      // ran and the tool survived with drained=false
+      const result = await mgr.shutdownDrain(() => 300);
+      assert.equal(result.drained, true, JSON.stringify(result));
+      assert.equal(job.cleanup.state, "terminated", JSON.stringify(job.cleanup));
+      assert.equal(aliveP(pid), false, "tool survived a shortened shutdown window");
+    });
+  });
+
   it("shutdown includes a job cancelled moments earlier (cleanup pending, already terminal)", { timeout: 30000 }, async () => {
     await withFixtureCli(async (mgr) => {
       const marker = markerPath();
@@ -2117,11 +2136,12 @@ describe("cleanup lifecycle (inv/cleanup-verify remediation)", () => {
 
   it("graceful SIGTERM to the real server stops an active resistant tool before exit", { timeout: 40000 }, async () => {
     const marker = markerPath();
+    const nonce = randomUUID(); // verified startup: proves OUR build answered
     const proc = spawn(process.execPath, [join(SERVER_ROOT, "server", "index.js")], {
       env: {
         ...process.env,
         PORT: String(PORT + 11), HOST: "127.0.0.1", ZCODE_WEB_TOKEN: TOKEN,
-        ZCODE_INSTANCE_ID: randomUUID(),
+        ZCODE_INSTANCE_ID: nonce,
         ZCODE_CLI_ENTRY: FIXTURE_CLI,
         ZCODE_WORKSPACE_ROOT: ws, ZCODE_HOME: home,
         ZCODE_JOB_TIMEOUT_MS: String(10 * 60_000),
@@ -2133,17 +2153,17 @@ describe("cleanup lifecycle (inv/cleanup-verify remediation)", () => {
     proc.stdout.on("data", (c) => (out += c));
     proc.stderr.on("data", (c) => (out += c));
     try {
-      // readiness
+      // verified startup: shared contract — expected nonce, child-exit
+      // rejection, independently abortable deadline (review: the previous
+      // r.ok-only loop could park on a hanging listener and never proved
+      // OUR build answered)
       const base = `http://127.0.0.1:${PORT + 11}`;
-      for (let i = 0; i < 60; i++) {
-        const ok = await fetch(`${base}/api/health`, { headers: { authorization: `Bearer ${TOKEN}` } }).then((r) => r.ok).catch(() => false);
-        if (ok) break;
-        await sleep(200);
-      }
+      await waitForVerifiedServer(proc, base, nonce, 10_000, "cleanup-shutdown");
       const chat = await fetch(`${base}/api/chat`, {
         method: "POST",
         headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
         body: JSON.stringify({ text: marker, cwd: ws, mode: "plan" }),
+        signal: AbortSignal.timeout(15_000),
       });
       assert.ok(chat.ok || chat.status === 202, `chat status ${chat.status}`);
       assert.ok(await waitMarker(marker), "tool never started");

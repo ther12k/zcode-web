@@ -207,17 +207,36 @@ export class JobManager {
       await new Promise((r) => setTimeout(r, Math.min(200, Math.max(1, deadline - Date.now()))));
     }
     const unresolved = [...this.pendingCleanups];
+    // A shortened window must ESCALATE the captured cohort, not abandon it:
+    // stopCohort's SIGKILL pass may still be behind its 5s grace when the
+    // drain ends, and process.exit() would never let that timer fire
+    // (review P2). escalateNow() forces the terminal signal immediately
+    // (identity-checked, idempotent, no recapture); then a bounded grace
+    // lets verification settle so the summary reports the REAL outcome.
+    for (const job of unresolved) job.cleanupHandle?.escalateNow?.();
+    // bounded verification grace AFTER the deadline: the forced SIGKILLs are
+    // already sent — exiting instantly would report incomplete while the
+    // outcome was verifiable. Fixed 2s (covers stopCohort's 1.2s verify)
+    // keeps the worst case well inside compose's 10s stop grace.
+    const graceMs = unresolved.length > 0 ? 2000 : 0;
+    if (unresolved.length > 0 && graceMs > 0) {
+      await Promise.race([
+        Promise.all(unresolved.map((j) => j.cleanupHandle?.done ?? Promise.resolve())),
+        new Promise((r) => setTimeout(r, graceMs)),
+      ]);
+    }
     let incomplete = 0;
-    for (const job of unresolved) {
-      incomplete++;
+    const stillPending = unresolved.filter((job) => job.cleanup?.state === "pending");
+    for (const job of stillPending) {
       job.cleanup = { state: "incomplete", survivors: [], note: "shutdown deadline exceeded before cleanup resolved" };
       this.pendingCleanups.delete(job);
     }
+    incomplete += stillPending.length;
     // also count cleanups that resolved incomplete during the drain
     for (const job of this.jobs.values()) {
-      if (job.cleanup?.state === "incomplete" && !unresolved.includes(job)) incomplete++;
+      if (job.cleanup?.state === "incomplete" && !stillPending.includes(job) && !unresolved.includes(job)) incomplete++;
     }
-    return { drained: unresolved.length === 0, incomplete, stopped: this.jobs.size };
+    return { drained: stillPending.length === 0, incomplete, stopped: this.jobs.size };
   }
 
   get activeCount() {

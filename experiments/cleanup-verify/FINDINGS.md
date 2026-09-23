@@ -113,3 +113,47 @@ REJECTED (production job cwds are user projects — an editor terminal would
 match and be killed). Containment for this class requires an ownership
 mechanism outside this patch's scope (per-job cgroup). Probe rows
 A/C/D-sep on the real CLI are labeled REMAINING GAP in results.
+
+## Review corrections (independent source review of f35fe02 — all four accepted & fixed)
+
+The reviewer's probes (extracted methods + injected faults + real processes)
+reproduced four candidate defects; fixes verified by mutation:
+
+1. **P1 unknown-becomes-success**: readStat collapsed missing/unreadable/
+   malformed to null and verification read null as "gone" → a live captured
+   member whose stat turned unreadable was reported `terminated`. Fixed with
+   a tri-state probeProc (absent / unknown / present+state): unknown at
+   verification contributes to INCOMPLETE (survivor
+   `identity-unknown-after-escalation`); snapshot unknown still flags
+   enumerationIncomplete. Conservative signalling unchanged.
+2. **P2 repeated signal = abandonment**: shortening the window left
+   stopCohort's SIGKILL behind its 5s grace and process.exit() killed the
+   host first. Fixed: handles gained idempotent `escalateNow()` (resolves an
+   escalation gate; no recapture); shutdownDrain forces it on every still-
+   pending cohort when the window ends, then a fixed 2s verification grace
+   (covers the 1.2s verify; worst case still ≪ compose 10s) lets the REAL
+   outcome settle before exit-code selection.
+3. **P2 "cleanup complete" logged for settled-incomplete**: success label now
+   requires `drained && incomplete === 0`; `drained` remains a diagnostic.
+   Exit code logic unchanged (already honest).
+4. **P2 zombie = "still executing"**: stat state preserved; state Z at
+   verification is recorded as `unreaped` ("terminated; reaping outstanding")
+   inside a `terminated` outcome — not a running survivor, no extra signals.
+
+Test corrections: the identity test now drives stopCohort through capture →
+mismatch/unknown injection (injected probe + recording kill) and asserts the
+SIGNALS (only the legitimate capture-time TERM; no escalation to an
+unvalidated/reused identity); the enumeration test now injects UNKNOWN
+deterministically and asserts incomplete explicitly; new regressions for P1,
+zombie classification, and escalateNow acceleration; a shortened-window
+shutdownDrain integration test (drained=true, tool dead); the HTTP shutdown
+test now uses the shared waitForVerifiedServer contract (nonce + child-exit
+rejection + abortable deadline).
+
+Mutation evidence (fixed code, each mutation reintroduces its defect):
+- M1 unknown treated as gone → P1 test FAILS (+ enumeration test).
+- M2 escalation identity-guard removed → mismatch test FAILS.
+- M3 escalateNow no-op → acceleration test FAILS.
+Suites after corrections: cleanup 10/10 · server 82/0 · unit 109/109 ·
+browser 73/73. The escaping-tool (shell-setsid, orphaned before capture)
+finding remains OPEN; cgroup containment remains a separate decision.
