@@ -11,14 +11,22 @@
 //   request individual termination, later SIGKILL identity-validated
 //   survivors, then verify and report honestly.
 //
-// Honest boundary (by design): a periodic /proc snapshot can miss processes
-// created after enumeration or already orphaned from the tree; pid+starttime
-// revalidation is best-effort, not pidfd-backed; a pid whose identity no
-// longer matches is NEVER signalled. Claim this can make: "the captured,
-// identity-validated descendants were terminated on the tested stop paths" —
-// never "every descendant is guaranteed dead." Unreadable identity and
-// permission failures are recorded as INCOMPLETE cleanup, never success, and
-// the target set is never widened beyond the captured cohort.
+// Honest boundaries (by design):
+//  - SNAPSHOT SCOPE: a periodic /proc snapshot can miss processes created
+//    after enumeration, or already outside the job descendant tree when
+//    captured (e.g. a shell-setsid tool orphaned to systemd at creation) —
+//    stop-time enumeration cannot attribute those.
+//  - IDENTITY CHECKS ARE BEST-EFFORT: read-stat → compare → signal-numeric-
+//    pid is NOT atomic; a process can exit and its pid be reused between
+//    revalidation and the signal (Linux documents this; pidfd signalling is
+//    the stable-reference alternative). What the gate DOES guarantee: any
+//    target whose identity MISMATCH is observed at revalidation is skipped.
+// Claim this can make: "the captured, identity-validated descendants were
+// terminated on the tested stop paths; ownership coverage is best effort" —
+// never "every descendant is guaranteed dead" or "no job-created process
+// remains anywhere." Unreadable identity and permission failures are
+// recorded as INCOMPLETE cleanup, never success, and the target set is never
+// widened beyond the captured cohort.
 
 import { readdirSync, readFileSync } from "node:fs";
 

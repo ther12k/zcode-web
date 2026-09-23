@@ -95,6 +95,15 @@ incomplete, pid-reuse guard, enumeration guard); six new server regressions
 real-CLI acceptance: A-ordinary, B-resumed, **D-shutdown(ordinary) PASS** —
 graceful shutdown now stops owned work. /api/jobs exposes cleanup state.
 
+**Scope of the candidate (acceptance wording):** this candidate adds
+coordinated shutdown and best-effort termination of attributable,
+identity-checked descendants. It does NOT guarantee termination of
+job-created processes that lose their ancestry before capture. Exit 0 means
+"shutdown completed under the documented snapshot policy — captured
+descendants terminated; ownership coverage best effort", never "no
+job-created process remains anywhere." The ORIGINAL resistant-tool finding
+remains OPEN (the production-equivalent escaping case still FAILs).
+
 **Remaining gap, precisely characterized (not claimed fixed):** real-CLI tools
 invoked through a shell `setsid` are orphaned AT CREATION — recorded ancestry
 marker → systemd → systemd — so no /proc-descent capture can attribute them

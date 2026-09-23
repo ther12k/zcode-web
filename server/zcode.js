@@ -196,9 +196,14 @@ export class JobManager {
         killTree(job.proc, "SIGTERM");
       }
     }
-    const deadline = Date.now() + remain();
+    let deadline = Date.now() + remain();
     while (Date.now() < deadline) {
       if (this.pendingCleanups.size === 0) break;
+      // re-clamp each tick: an escalated shutdown (repeat signal shortened
+      // shutdownDeadlineAt) must shorten THIS drain too — never restart it,
+      // and jobs still pending when the window closes are reported
+      // incomplete below (never silently dropped)
+      deadline = Math.min(deadline, Date.now() + remain());
       await new Promise((r) => setTimeout(r, Math.min(200, Math.max(1, deadline - Date.now()))));
     }
     const unresolved = [...this.pendingCleanups];

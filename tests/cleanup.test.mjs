@@ -126,14 +126,16 @@ describe("stopCohort", () => {
     }
   });
 
-  it("NEVER signals a pid whose identity changed (pid reuse protection)", async () => {
+  it("skips a target whose identity MISMATCH is observed at revalidation (detected pid reuse)", async () => {
     const signalled = [];
     // member captured with a mismatched starttime: alive pid, wrong identity
     const stale = { pid: process.pid, starttime: "99999999", name: "stale" };
     const handle = stopCohort(null, {}); // no root → none outcome
     assert.equal((await handle.done).state, "none");
-    // identityValid gate: a stale member is never signalled by the loop —
-    // proven by driving the loop body's guard directly
+    // identityValid gate: an observed mismatch is skipped — proven by
+    // driving the loop body's guard directly. This does NOT prove reuse
+    // is impossible between the check and a later numeric-pid signal; the
+    // identity check and the signal are not atomic (documented best-effort).
     assert.equal(identityValid(stale), false);
     void signalled;
   });
