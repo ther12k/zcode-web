@@ -3,6 +3,8 @@
 
 
 cli/zcode.cjs
+# proprietary builtin provider config — never commit (see cli/README.md)
+cli/provider/
 data/
 .DS_Store
 .e2e-home/

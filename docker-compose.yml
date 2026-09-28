@@ -14,6 +14,9 @@ services:
     volumes:
       # bring-your-own CLI bundle (also baked in at build time if present in ./cli)
       - ./cli/zcode.cjs:/opt/zcode/zcode.cjs:ro
+      # REQUIRED by CLI >= 0.16.9: builtin provider config, staged next to the
+      # bundle (see cli/README.md)
+      - ./cli/provider/zcode-builtin.json:/opt/zcode/provider/zcode-builtin.json:ro
       # CLI state: config.json, sessions db, credentials — set up once (see README)
       - ./data/zcode:/data/zcode
       # your projects live here

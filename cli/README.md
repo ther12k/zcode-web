@@ -1,26 +1,32 @@
 # Bring your own CLI bundle
 
 ZCode Desktop ships its CLI engine as a single self-contained Node bundle:
-`zcode.cjs` (~12.6 MB). It is Z.AI's proprietary code, so this repo does not
-include it and you may not redistribute it.
+`zcode.cjs` (~15 MB). The CLI source is now open (github.com/zai-org/ZCode,
+Apache-2.0) but the desktop bundle itself is a build artifact — this repo does
+not include it.
 
 ## Where to get it
 
-Install the [ZCode Desktop](https://zcode.z.ai) app, then copy the bundle:
+Install the [ZCode Desktop](https://zcode.z.ai) app, then copy:
 
-| Platform | Path |
-| --- | --- |
-| Linux | `/opt/ZCode/resources/glm/zcode.cjs` |
-| macOS | `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs` |
-| Windows | `C:\Program Files\ZCode\resources\glm\zcode.cjs` |
+| File | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| `zcode.cjs` | `/opt/ZCode/resources/glm/zcode.cjs` | `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs` | `C:\Program Files\ZCode\resources\glm\zcode.cjs` |
+| `provider/zcode-builtin.json` | `/opt/ZCode/resources/config/provider/zcode-builtin.json` | `/Applications/ZCode.app/Contents/Resources/config/provider/zcode-builtin.json` | `C:\Program Files\ZCode\resources\config\provider\zcode-builtin.json` |
 
 ## Use it
 
 ```bash
-cp /opt/ZCode/resources/glm/zcode.cjs ./cli/zcode.cjs   # baked in at docker build
-# or mount it at runtime (docker-compose.yml already does this):
-#   ./cli/zcode.cjs:/opt/zcode/zcode.cjs:ro
+cp /opt/ZCode/resources/glm/zcode.cjs ./cli/zcode.cjs
+cp /opt/ZCode/resources/config/provider/zcode-builtin.json ./cli/provider/zcode-builtin.json
+# both baked in at docker build, or mounted at runtime (docker-compose.yml
+# already mounts both)
 ```
+
+**CLI >= 0.16.9 REQUIRES `provider/zcode-builtin.json`** staged next to the
+bundle (`/opt/zcode/provider/` in this image): without it every prompt job
+exits at boot with `无法定位 CLI ZCode Built-in Provider Config`. CLI 0.16.5
+and earlier did not need it.
 
 It runs with any Node.js >= 24 — no Electron needed:
 
@@ -29,4 +35,18 @@ node cli/zcode.cjs --help
 node cli/zcode.cjs doctor
 ```
 
-The bundle is gitignored (`cli/zcode.cjs`); only this README is committed.
+Both files are gitignored (`cli/zcode.cjs`, `cli/provider/`); only this README
+is committed.
+
+## Version notes
+
+- Verified against the desktop bundle at CLI **0.16.9** (ZCode Desktop
+  3.14.3): prompt mode, `--resume`, `--attach`, `--mode build|plan|edit|yolo`,
+  and the `ZCODE_MODEL`/`ZCODE_API_KEY`/`ZCODE_BASE_URL` env contract all work
+  unchanged from 0.16.5 (evidence: experiments/native-stop-eval on branch
+  exp/native-stop-eval — legacy-config probe P1/P2 PASS).
+- `--model` is NOT a CLI flag on 0.16.9 — the server passes the model via env
+  (as it always has), so nothing to change there.
+- Offline containers log a benign `ZCode Built-in 刷新失败: HTTP 404` /
+  `ZCode Built-in missing` line on the CLI's stderr when it cannot refresh the
+  builtin config remotely; turns are unaffected.

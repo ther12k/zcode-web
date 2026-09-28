@@ -28,9 +28,14 @@ COPY public ./public
 COPY --from=webbuild /web/dist ./web/dist
 
 # CLI bundle staging (cli/ contains at least a README; zcode.cjs is optional)
+# CLI >= 0.16.9 also REQUIRES the builtin provider config staged at
+# /opt/zcode/provider/zcode-builtin.json (looked up next to the bundle) —
+# without it every prompt job exits at boot ("无法定位 CLI ZCode Built-in
+# Provider Config").
 RUN mkdir -p /opt/zcode /data/zcode /data/workspace
 COPY cli/ /opt/zcode-staging/
 RUN if [ -f /opt/zcode-staging/zcode.cjs ]; then mv /opt/zcode-staging/zcode.cjs /opt/zcode/zcode.cjs; fi \
+ && if [ -f /opt/zcode-staging/provider/zcode-builtin.json ]; then mkdir -p /opt/zcode/provider && mv /opt/zcode-staging/provider/zcode-builtin.json /opt/zcode/provider/zcode-builtin.json; fi \
  && rm -rf /opt/zcode-staging
 
 # The CLI stores its state in ~/.zcode — point it at the data volume.
