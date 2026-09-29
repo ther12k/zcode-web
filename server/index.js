@@ -531,7 +531,7 @@ async function handleApi(req, res, url) {
       // boot identity (test harnesses verify readiness against THIS build,
       // not whichever stale listener happens to hold the port)
       instance: process.env.ZCODE_INSTANCE_ID ?? null,
-      cli: { entry: cli.entry, present: cli.present },
+      cli: { entry: cli.entry, engine: cli.engine, present: cli.present },
       cliRuntime: { ...runtime, warning: runtime.present ? null : "ZCODE_CLI_NODE not found — job spawns will fail" },
       db: { path: cli.dbPath, present: cli.dbPresent },
       providerConfigured: providerConfigured(),
