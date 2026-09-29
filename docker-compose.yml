@@ -9,6 +9,10 @@ services:
       ZCODE_WEB_TOKEN: ${ZCODE_WEB_TOKEN:?Set a strong ZCODE_WEB_TOKEN (required — no insecure default)}
       # Permission modes exposed in the UI (plan is safest default)
       ZCODE_ALLOWED_MODES: ${ZCODE_ALLOWED_MODES:-plan,build,edit,yolo}
+      # Execution engine: agent = long-lived agent-server per workspace with
+      # native session/stop cancellation (set to `prompt` for instant
+      # rollback to the one-shot-CLI-per-message engine)
+      ZCODE_BRIDGE_ENGINE: ${ZCODE_BRIDGE_ENGINE:-agent}
       ZCODE_MAX_JOBS: ${ZCODE_MAX_JOBS:-3}
       ZCODE_JOB_TIMEOUT_MS: ${ZCODE_JOB_TIMEOUT_MS:-900000}
     volumes:
