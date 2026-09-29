@@ -374,6 +374,12 @@ test("agent engine: workflow artifact read faces (runs, artifacts, data, chunked
       /unknown session/,
     );
 
+    // a missing artifact version maps the CLI's journal fault to 404, not 500
+    await assert.rejects(
+      () => mgr.readWorkflowArtifact({ sessionId, cwd: ROOT, runId, artifactId: "nope", version: 1 }),
+      (e) => e.status === 404 && e.code === "ARTIFACT_NOT_FOUND" && /fault\.workflowRunArtifactRead\.notFound/.test(e.message),
+    );
+
     // prompt-engine managers refuse with 501 (no agent hosts)
     const promptMgr = new JobManager();
     // JobManager reads the engine at construction; simulate by deleting hosts

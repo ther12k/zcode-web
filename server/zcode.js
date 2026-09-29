@@ -683,7 +683,16 @@ export class JobManager {
 
   async readWorkflowArtifact({ sessionId, cwd, runId, artifactId, version }) {
     const host = await this.#requireAgent(cwd, sessionId);
-    return host.readWorkflowArtifact(sessionId, runId, artifactId, version);
+    try {
+      return await host.readWorkflowArtifact(sessionId, runId, artifactId, version);
+    } catch (e) {
+      // the CLI's journal lookup reports a missing version as a structured
+      // fault — a client asking for a stale/absent version gets 404, not 500
+      if (/fault\.workflowRunArtifactRead\.notFound/.test(e.message || "")) {
+        throw Object.assign(e, { status: 404, code: "ARTIFACT_NOT_FOUND" });
+      }
+      throw e;
+    }
   }
 
   // Bounded fallback when a native stop never produces a terminal event:

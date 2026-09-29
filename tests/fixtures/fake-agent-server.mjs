@@ -214,7 +214,8 @@ const handlers = {
   },
   "v4/conversation/workflowRunArtifactRead": (params) => {
     if (params.artifactId !== "summary") {
-      return { __error: { code: -32002, message: `unknown artifact ${params.artifactId}` } };
+      // the real CLI's structured journal fault (verified live in prod)
+      return { __error: { code: -32603, message: `fault.workflowRunArtifactRead.notFound: ${params.runId}/${params.artifactId}@${params.version}` } };
     }
     const body = params.version >= 2
       ? `# Fixture deliverable\n\nversion ${params.version} for ${params.sessionId}`
