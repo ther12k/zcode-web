@@ -1,0 +1,242 @@
+// Agent-bridge tests (Path 2): protocol client against a fake agent-server,
+// legacy→v4 provider translation, and JobManager's agent engine end-to-end —
+// including the load-bearing property: NATIVE cancel (session/stop) ends the
+// turn while the HOST and SESSION stay alive for the next message.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { execFileSync } from "node:child_process";
+
+const ROOT = join(dirname(new URL(import.meta.url).pathname), "..");
+const FIXTURE = join(ROOT, "tests", "fixtures", "fake-agent-server.mjs");
+
+// env must be in place BEFORE zcode.js reads it at module init
+const home = mkdtempSync(join(tmpdir(), "zc-agent-test-"));
+mkdirSync(join(home, "provider"), { recursive: true });
+writeFileSync(join(home, "provider", "zcode-builtin.json"), "{}");
+const scenarioFile = join(home, "scenario");
+writeFileSync(scenarioFile, "plain");
+process.env.ZCODE_HOME = home;
+process.env.ZCODE_CLI_ENTRY = FIXTURE; // client spawns [node, FIXTURE, "agent-server"]
+process.env.ZCODE_CLI_NODE = process.execPath;
+process.env.ZCODE_BRIDGE_ENGINE = "agent";
+process.env.ZCODE_JOB_TIMEOUT_MS = String(30_000);
+process.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE = join(home, "provider", "zcode-builtin.json");
+// the fake re-reads this file per turn, letting tests flip behavior mid-run
+process.env.FAKE_SCENARIO_FILE = scenarioFile;
+
+const { JobManager, config } = await import("../server/zcode.js");
+const { translateLegacyProviders, resolveBuiltinProviderPath } = await import("../server/agent-host.mjs");
+const { ProtocolClient } = await import("../server/protocol-client.mjs");
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const waitFor = async (fn, timeoutMs = 10_000, what = "condition") => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const v = fn();
+    if (v) return v;
+    await sleep(50);
+  }
+  throw new Error(`timeout waiting for ${what}`);
+};
+
+function newManager() {
+  return new JobManager();
+}
+
+async function disposeManager(mgr) {
+  await mgr.agentHosts?.shutdownAll(1500);
+}
+
+// ---------------------------------------------------------------------------
+
+test("default engine stays prompt when ZCODE_BRIDGE_ENGINE is unset", () => {
+  const childEnv = { ...process.env };
+  delete childEnv.ZCODE_BRIDGE_ENGINE;
+  const out = execFileSync(process.execPath, [
+    "--input-type=module", "-e",
+    'const { config } = await import("./server/zcode.js"); process.stdout.write(config.bridgeEngine)',
+  ], { cwd: ROOT, env: childEnv }).toString();
+  assert.equal(out, "prompt");
+});
+
+test("translateLegacyProviders maps kinds, models, defaults, and reasoning", () => {
+  const legacy = {
+    model: { main: "builtin:mockprov/m1" },
+    provider: {
+      mockprov: {
+        name: "Mock Prov",
+        kind: "openai-compatible",
+        options: { apiKey: "k", baseURL: "http://x/v1" },
+        models: {
+          m1: { name: "M1" },
+          m2: { reasoning: { enabled: true, variants: ["low", "high"] } },
+        },
+      },
+      weird: { kind: " exotic ", options: {} },
+    },
+  };
+  const { doc, skipped } = translateLegacyProviders(legacy);
+  assert.equal(doc.schemaVersion, 1);
+  const rule = doc.config.providerConfigRules.providerRules[0];
+  assert.equal(rule.providerId, "mockprov");
+  assert.equal(rule.config.api.type, "openai-chat-completions");
+  assert.equal(rule.config.api.baseUrl, "http://x/v1");
+  assert.deepEqual(rule.config.personalModelIds, ["m1", "m2"]);
+  assert.deepEqual(doc.config.modelConfigRules.providerModelRules, [
+    { providerId: "mockprov", modelId: "m2", config: { optionSpecs: { reasoningLevel: { values: ["low", "high"], map: "{}" } } } },
+  ]);
+  assert.deepEqual(doc.config.defaultModelSelection, { providerId: "mockprov", modelId: "m1" });
+  assert.equal(skipped.length, 1);
+  assert.match(skipped[0], /weird/);
+});
+
+test("resolveBuiltinProviderPath honors the env override", () => {
+  assert.equal(resolveBuiltinProviderPath("/nonexistent/cli.cjs"), join(home, "provider", "zcode-builtin.json"));
+});
+
+test("ProtocolClient correlates requests and routes notifications", async () => {
+  const notifications = [];
+  const client = new ProtocolClient({
+    command: process.execPath,
+    args: [FIXTURE, "agent-server"],
+    cwd: ROOT,
+    env: { ...process.env, FAKE_SCENARIO: "plain" },
+    onNotification: (n) => notifications.push(n),
+  });
+  try {
+    const caps = await client.request("runtime/capabilities", {});
+    assert.equal(caps.protocol.name, "ZCode Protocol");
+    const created = await client.request("session/create", { workspace: { workspacePath: "/tmp", workspaceKey: "/tmp" }, mode: "build" });
+    assert.match(created.sessionId, /^sess_fake_\d+$/);
+    // the fake never sends server requests; unknown methods error cleanly
+    await assert.rejects(() => client.request("no/such-method", {}), /method not found/);
+  } finally {
+    await client.dispose(1500);
+  }
+});
+
+test("agent engine: plain turn succeeds with the SSE line/done contract", async () => {
+  writeFileSync(scenarioFile, "plain");
+  const mgr = newManager();
+  try {
+    const { job } = mgr.start({ text: "hello", sessionId: null, cwd: ROOT, mode: "build", model: null });
+    assert.equal(job.status, "running");
+    const done = await waitFor(
+      () => job.lines.find((l) => l.kind === "done"),
+      15_000,
+      "done event",
+    );
+    assert.equal(done.status, "succeeded");
+    assert.equal(done.resultType, "success");
+    assert.equal(job.lines[job.lines.length - 1].kind, "done", "done must be the last event");
+    const types = job.lines.filter((l) => l.kind === "line").map((l) => l.line.type);
+    assert.deepEqual(types, [
+      "session.created",
+      "session.titleUpdated",
+      "turn.started",
+      "session.updated",
+      "model.streaming",
+      "model.streaming",
+      "model.streaming",
+      "turn.completed",
+    ]);
+    assert.ok(job.sessionId, "job adopts the protocol sessionId");
+    assert.equal(mgr.agentHosts.hosts.size, 1, "one host per cwd");
+  } finally {
+    await disposeManager(mgr);
+  }
+});
+
+test("agent engine: NATIVE cancel ends the turn and the host+session survive", async () => {
+  writeFileSync(scenarioFile, "hold");
+  const mgr = newManager();
+  try {
+    const { job } = mgr.start({ text: "long task", sessionId: null, cwd: ROOT, mode: "build", model: null });
+    await waitFor(() => job.lines.some((l) => l.line?.type === "turn.started"), 15_000, "turn.started");
+    const host = job.agent.host;
+    const hostPid = host.client.proc.pid;
+    const sessionId = job.sessionId;
+
+    assert.equal(mgr.cancel(job.id), true);
+    assert.equal(job.status, "stopping");
+    const done = await waitFor(() => job.lines.find((l) => l.kind === "done"), 10_000, "done after cancel");
+    assert.equal(done.status, "cancelled");
+    assert.equal(done.resultType, "cancelled");
+    assert.equal(done.killSignal, null, "no process kill involved");
+    const cancelledLine = job.lines.find((l) => l.line?.type === "turn.completed");
+    assert.equal(cancelledLine.line.payload.resultType, "cancelled");
+
+    // THE property the prompt engine cannot have: same host process, same
+    // session, next message just works
+    assert.equal(host.client.exited, false, "host survives cancel");
+    writeFileSync(scenarioFile, "plain");
+    const { job: job2 } = mgr.start({ text: "follow-up", sessionId, cwd: ROOT, mode: "build", model: null });
+    const done2 = await waitFor(() => job2.lines.find((l) => l.kind === "done"), 15_000, "follow-up done");
+    assert.equal(done2.status, "succeeded");
+    assert.equal(job2.sessionId, sessionId, "follow-up resumes the same session");
+    assert.equal(mgr.agentHosts.hosts.get(ROOT)?.client.proc.pid, hostPid, "still the same host process");
+  } finally {
+    await disposeManager(mgr);
+  }
+});
+
+test("agent engine: turn failure surfaces as a failed job with the CLI's error", async () => {
+  writeFileSync(scenarioFile, "fail");
+  const mgr = newManager();
+  try {
+    const { job } = mgr.start({ text: "boom", sessionId: null, cwd: ROOT, mode: "build", model: null });
+    const done = await waitFor(() => job.lines.find((l) => l.kind === "done"), 15_000, "done");
+    assert.equal(done.status, "failed");
+    assert.match(done.error, /fake model failure/);
+  } finally {
+    await disposeManager(mgr);
+  }
+});
+
+test("agent engine: host crash fails active jobs and the next job respawns", async () => {
+  writeFileSync(scenarioFile, "crash");
+  const mgr = newManager();
+  try {
+    const { job } = mgr.start({ text: "crashy", sessionId: null, cwd: ROOT, mode: "build", model: null });
+    const done = await waitFor(() => job.lines.find((l) => l.kind === "done"), 15_000, "done after crash");
+    assert.equal(done.status, "failed");
+    assert.match(done.error, /agent-server exited/);
+
+    // registry clears the dead entry; the next start spawns a fresh host
+    writeFileSync(scenarioFile, "plain");
+    const { job: job2 } = mgr.start({ text: "after crash", sessionId: null, cwd: ROOT, mode: "build", model: null });
+    const done2 = await waitFor(() => job2.lines.find((l) => l.kind === "done"), 15_000, "post-crash done");
+    assert.equal(done2.status, "succeeded");
+  } finally {
+    await disposeManager(mgr);
+  }
+});
+
+test("agent engine: resume path uses session/resume and model selection rides on send", async () => {
+  writeFileSync(scenarioFile, "plain");
+  const logFile = join(home, "frames.log");
+  const mgr = new JobManager();
+  // point this manager's hosts at a frame log via env inheritance: the fake
+  // reads FAKE_LOG from its environment, which the host passes through
+  process.env.FAKE_LOG = logFile;
+  try {
+    const { job } = mgr.start({ text: "first", sessionId: null, cwd: ROOT, mode: "build", model: "mockprov/m1" });
+    const done = await waitFor(() => job.lines.find((l) => l.kind === "done"), 15_000, "first done");
+    assert.equal(done.status, "succeeded");
+
+    const { job: job2 } = mgr.start({ text: "second", sessionId: job.sessionId, cwd: ROOT, mode: "build", model: "mockprov/m1" });
+    await waitFor(() => job2.lines.find((l) => l.kind === "done"), 15_000, "second done");
+
+    const frames = readFileSync(logFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const methods = frames.map((f) => f.method);
+    assert.ok(methods.includes("session/resume"), "follow-up goes through session/resume");
+    const send = frames.filter((f) => f.method === "session/send").pop();
+    assert.deepEqual(send.params.modelSelection, { providerId: "mockprov", modelId: "m1" });
+  } finally {
+    delete process.env.FAKE_LOG;
+    await disposeManager(mgr);
+  }
+});

@@ -1650,3 +1650,101 @@ test("hidden tab keeps the polling loop alive for continued sync", async ({ page
   seedText("third marker");
   await expect(page.locator(".agent-message").or(page.locator(".markdown")).first()).toContainText("third marker", { timeout: 15_000 });
 });
+
+// Path 2 (agent bridge): the SAME UI, unchanged, driving a server instance
+// whose execution engine is the long-lived agent-server protocol bridge
+// (ZCODE_BRIDGE_ENGINE=agent + the fake agent-server as the "CLI"). This is
+// the end-to-end proof that the frontend needs no changes for the engine
+// swap — and that native cancellation (session/stop) leaves the session
+// immediately usable for the next message.
+test.describe("agent bridge engine (Path 2)", () => {
+  test.setTimeout(120_000);
+  let agentServer: import("node:child_process").ChildProcess;
+  const AGENT_PORT = Number(process.env.E2E_PORT_BASE ?? "3481") + 20;
+  const AGENT_BASE = `http://127.0.0.1:${AGENT_PORT}`;
+  let scenarioFile: string;
+
+  test.beforeAll(async () => {
+    const { spawn } = await import("node:child_process");
+    const { mkdtempSync, writeFileSync: wf } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { fileURLToPath } = await import("node:url");
+    const { dirname, join: j } = await import("node:path");
+    const repoRoot = j(dirname(fileURLToPath(import.meta.url)), "..", "..");
+    scenarioFile = j(tmpdir(), `zc-e2e-agent-${Date.now()}.scenario`);
+    wf(scenarioFile, "plain");
+    agentServer = spawn("npm", ["run", "serve:test"], {
+      cwd: repoRoot,
+      // own process group: teardown must kill npm's whole tree (sh + node +
+      // the fake agent-server), or orphaned servers hold the port and later
+      // runs silently talk to a stale leftover
+      detached: true,
+      env: {
+        ...process.env,
+        // serve:test derives its listen port from E2E_PORT (not PORT)
+        E2E_PORT: String(AGENT_PORT),
+        ZCODE_BRIDGE_ENGINE: "agent",
+        ZCODE_CLI_ENTRY: j(repoRoot, "tests", "fixtures", "fake-agent-server.mjs"),
+        FAKE_SCENARIO_FILE: scenarioFile,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    // readiness: health endpoint answers
+    const deadline = Date.now() + 20_000;
+    for (;;) {
+      try {
+        // health is token-protected: any HTTP answer (incl. 401) means up
+        const res = await fetch(`${AGENT_BASE}/api/health`);
+        if (res.status < 500) break;
+      } catch { /* not up yet */ }
+      if (Date.now() > deadline) throw new Error("agent-engine test server did not become ready");
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  });
+
+  test.afterAll(async () => {
+    if (agentServer?.pid) {
+      try { process.kill(-agentServer.pid, "SIGTERM"); } catch { /* gone */ }
+      await new Promise((r) => setTimeout(r, 500));
+      try { process.kill(-agentServer.pid, "SIGKILL"); } catch { /* gone */ }
+    }
+  });
+
+  test("chat streams, native stop cancels, and the same session takes the next message", async ({ page }) => {
+    const { writeFileSync: wf } = await import("node:fs");
+    await page.goto(`${AGENT_BASE}/w/default`);
+    await page.evaluate((t) => localStorage.setItem("zcode-web-token", t), TOKEN);
+    await page.goto(`${AGENT_BASE}/w/default`);
+    await page.reload();
+    await expect(page.getByLabel("Message Zcode")).toBeVisible({ timeout: 10_000 });
+
+    // 1) a plain turn streams through the protocol engine and completes
+    const input = page.getByLabel("Message Zcode");
+    await input.fill("agent bridge hello");
+    await input.press("Enter");
+    await expect(page.locator(".user-message-block.echo")).toContainText("agent bridge hello", { timeout: 5000 });
+    await expect(page.locator(".agent-message")).toContainText("echo:agent bridge hello", { timeout: 25_000 });
+    await expect(page).toHaveURL(/\/s\/sess_/, { timeout: 10_000 });
+    const sessionUrl = page.url();
+
+    // 2) a held turn is cancelled NATIVELY (session/stop, no process kill)
+    wf(scenarioFile, "hold");
+    await input.fill("hold this turn");
+    await input.press("Enter");
+    await expect(page.getByLabel("Stop run")).toBeVisible({ timeout: 10_000 });
+    await page.getByLabel("Stop run").click();
+    await expect(page.locator(".message-duration")).toHaveText(/cancelled/, { timeout: 15_000 });
+    // settle fully before typing: a draft submitted while the cancel is still
+    // settling is QUEUED, and cancelled runs retain the queue by design
+    await expect(page.locator(".message-footer")).toContainText("Run stopped", { timeout: 10_000 });
+
+    // 3) the session survives the native stop: the very next message runs
+    //    on the same live host (the property process-kill cancel cannot have)
+    wf(scenarioFile, "plain");
+    await input.fill("after native stop");
+    await input.press("Enter");
+    await expect(page.locator(".agent-message").last()).toContainText("echo:after native stop", { timeout: 25_000 });
+    // still the same session — no respawn, no new session id
+    await expect(page).toHaveURL(new RegExp(sessionUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), { timeout: 5000 });
+  });
+});

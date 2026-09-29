@@ -15,6 +15,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { AgentHostRegistry } from "./agent-host.mjs";
 
 export const config = {
   cliEntry: process.env.ZCODE_CLI_ENTRY || "/opt/zcode/zcode.cjs",
@@ -32,6 +33,11 @@ export const config = {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean),
+  // Execution engine (Path 2): "prompt" = one-shot CLI per message (default),
+  // "agent" = long-lived agent-server per cwd with native session/stop
+  // cancellation. Attachment jobs always use the prompt engine (--attach is
+  // a prompt-mode flag; the protocol attachment surface is not wired yet).
+  bridgeEngine: (process.env.ZCODE_BRIDGE_ENGINE || "prompt").trim(),
 };
 
 export function uploadsDir() {
@@ -49,6 +55,7 @@ export function cliRuntimeStatus() {
 export function cliStatus() {
   return {
     entry: config.cliEntry,
+    engine: config.bridgeEngine,
     present: existsSync(config.cliEntry),
     dbPath: join(config.zcodeHome, "cli", "db", "db.sqlite"),
     dbPresent: existsSync(join(config.zcodeHome, "cli", "db", "db.sqlite")),
@@ -74,6 +81,7 @@ class Job {
     this.cancelRequested = false;
     this.killSignal = null;
     this.hasTurnFailed = false;
+    this.resultType = null;
     this.createdAt = Date.now();
     this.startedAt = null;
     this.finishedAt = null;
@@ -138,6 +146,22 @@ export class JobManager {
     this.bySession = new Map();
     // ZWUI-008: bounded replay buffers per job (SSE v2 Last-Event-ID)
     this.replayMax = Number(process.env.ZCODE_SSE_REPLAY_MAX || 4000);
+    // Path 2: cwd -> agent-server host (lazily created — a registry at boot
+    // would spawn processes even when every job uses the prompt engine)
+    this.agentHosts = null;
+    if (config.bridgeEngine === "agent") {
+      this.agentHosts = new AgentHostRegistry({
+        cliNode: config.cliNode,
+        cliEntry: config.cliEntry,
+        zcodeHome: config.zcodeHome,
+        log: (m) => console.log(m),
+      });
+      // best-effort host shutdown (the prompt engine has no long-lived
+      // children; graceful-request drain is the separate cleanup branch)
+      const shutdown = () => { try { this.agentHosts?.shutdownAll(2000); } catch {} };
+      process.once("SIGTERM", shutdown);
+      process.once("SIGINT", shutdown);
+    }
   }
 
   get activeCount() {
@@ -224,6 +248,19 @@ export class JobManager {
     const job = new Job({ text, sessionId, cwd, mode, requestId });
     if (requestId) this.byRequest.set(requestId, { job, fingerprint: fp });
     if (sessionId) this.bySession.set(sessionId, job);
+
+    // Path 2: long-lived agent-server engine with native cancellation.
+    // Attachment jobs stay on the prompt engine (--attach is prompt-only).
+    if (this.agentHosts && !(attachments || []).length) {
+      // async on purpose: the API returns 202 immediately and the SSE stream
+      // carries session events once the host is up; setup failures terminate
+      // the job through the same terminal-event contract as the prompt path
+      this.startAgentJob(job, { text, mode, model });
+      this.jobs.set(job.id, job);
+      job.setStatus("running");
+      return { job, replayed: false };
+    }
+
     const args = [
       config.cliEntry,
       "--prompt", text,
@@ -363,23 +400,7 @@ export class JobManager {
       // terminal-record cardinality itself is still unbounded — any future
       // eviction policy must preserve reconciliation, not silently restore
       // false busy states.
-      setTimeout(() => {
-        this.jobs.delete(job.id);
-        if (job.requestId) this.byRequest.delete(job.requestId);
-        for (const key of [job.sessionId, job.resumeSessionId]) {
-          if (key && this.bySession.get(key) === job) {
-            this.bySession.set(key, {
-              sessionId: key,
-              status: job.status,
-              finishedAt: job.finishedAt,
-              text: String(job.text || "").slice(0, 200),
-              cwd: job.cwd,
-              createdAt: job.createdAt,
-              terminalRecord: true,
-            });
-          }
-        }
-      }, config.jobRetentionMs).unref();
+      setTimeout(() => this.evictJob(job), config.jobRetentionMs).unref();
     };
 
     const timer = setTimeout(() => {
@@ -404,12 +425,242 @@ export class JobManager {
     return { job, replayed: false };
   }
 
+  // ---- Path 2: agent-server engine --------------------------------------
+  //
+  // One TURN per job, executed on a long-lived per-cwd agent-server via the
+  // ZCode Protocol. session/event notifications carry the SAME envelope shape
+  // the prompt engine's stream-json lines do ({eventId,payload,seq,
+  // sessionId,timestamp,type}), so they are recorded as {kind:"line"} events
+  // and the SSE/ frontend contract is unchanged. Cancellation is NATIVE:
+  // session/stop aborts the turn and the CLI itself tree-kills the turn's
+  // tools (pinned-verified on 0.16.9) — no process kill, session stays
+  // usable, host stays alive for the next message.
+  async startAgentJob(job, { text, mode, model }) {
+    let lastEventId = 0;
+    const record = (event) => {
+      event.id = ++lastEventId;
+      job.lines.push(event);
+      if (job.lines.length > this.replayMax) job.lines.shift();
+      job.publish(event);
+      return event;
+    };
+
+    let settled = false;
+    const finishAgent = (error) => {
+      if (TERMINAL.has(job.status)) return;
+      job.finishedAt = Date.now();
+      job.exitCode = null;
+      job.error = error ? String(error) : (job.hasTurnFailed && !job.error ? "turn failed" : job.error);
+      if (job.status === "stopping") job.setStatus("cancelled");
+      else if (job.timedOut) job.setStatus("timeout");
+      else if (error || job.hasTurnFailed || job.resultType === "error_during_execution") job.setStatus("failed");
+      else job.setStatus("succeeded");
+      // same authoritative terminal contract as the prompt engine (ZWUI-040)
+      record({
+        kind: "done",
+        exitCode: null,
+        error: job.error,
+        sessionId: job.sessionId,
+        stderrTail: job.stderrTail,
+        status: job.status,
+        timedOut: job.timedOut,
+        cancelRequested: job.cancelRequested,
+        killSignal: null,
+        ...(job.resultType ? { resultType: job.resultType } : {}),
+      });
+      settled = true;
+      clearTimeout(timeoutTimer);
+      host?.listeners?.delete(listener);
+      setTimeout(() => this.evictJob(job), config.jobRetentionMs).unref();
+    };
+
+    // routed notifications for THIS job's session
+    let host = null;
+    let modelRef = model && model.includes("/") ? model : null;
+    let levelRetried = false;
+    const listener = (n) => {
+      if (n.method === "__host_exited") {
+        if (!TERMINAL.has(job.status)) {
+          finishAgent(`agent-server exited (${n.params?.code ?? n.params?.signal ?? "unknown"})`);
+        }
+        return;
+      }
+      if (n.method !== "session/event" || !n.params) return;
+      const ev = n.params;
+      if (ev.sessionId && ev.sessionId !== job.sessionId) return; // other sessions on the shared host
+      if (ev.type === "turn.failed") {
+        job.hasTurnFailed = true;
+        if (ev.payload?.error?.message) job.error = String(ev.payload.error.message);
+        // self-heal the known first-turn shape: the registry demands a
+        // reasoning level, and the level list only arrives on the state
+        // patch that FOLLOWS this failure — wait briefly for it, resend once
+        if (
+          !levelRetried && modelRef && job.status === "running"
+          && /reasoning level is required/i.test(String(ev.payload?.error?.message || ""))
+        ) {
+          levelRetried = true;
+          record({ kind: "line", line: ev });
+          job.hasTurnFailed = false;
+          job.error = null;
+          const deadline = Date.now() + 1500;
+          const tryResend = async () => {
+            while (Date.now() < deadline && !host?.levelFor(job.sessionId, modelRef)) {
+              await new Promise((r) => setTimeout(r, 50));
+            }
+            const level = host?.levelFor(job.sessionId, modelRef);
+            if (!level || TERMINAL.has(job.status)) {
+              job.hasTurnFailed = true;
+              job.error = String(ev.payload?.error?.message || "turn failed");
+              finishAgent(job.error);
+              return;
+            }
+            try {
+              const slash = modelRef.indexOf("/");
+              await host.send(job.sessionId, job.text, {
+                providerId: modelRef.slice(0, slash),
+                modelId: modelRef.slice(slash + 1),
+                options: { reasoningLevel: level },
+              });
+            } catch (e) {
+              finishAgent(e?.message || String(e));
+            }
+          };
+          tryResend();
+          return;
+        }
+      }
+      if (ev.type === "turn.completed" || ev.type === "turn.failed") {
+        // per-session send lock means the terminal turn event arriving while
+        // this job is active IS this job's turn
+        job.resultType = ev.payload?.resultType ?? null;
+        if (job.status === "stopping" || ev.payload?.resultType === "cancelled") {
+          // stopping → cancelled; a completed turn after a stop request is
+          // still a cancelled RUN even if the CLI finished the sentence
+          job.resultType = "cancelled";
+        }
+        record({ kind: "line", line: ev });
+        finishAgent(job.hasTurnFailed ? (job.error || "turn failed") : null);
+        return;
+      }
+      record({ kind: "line", line: ev });
+    };
+
+    const timeoutTimer = setTimeout(() => {
+      if (TERMINAL.has(job.status)) return;
+      job.timedOut = true;
+      record({ kind: "timeout" });
+      // native stop, then a bounded wait; a wedged agent must not hold the
+      // job addressable forever (the host itself is reaped independently)
+      host?.stop(job.sessionId).catch(() => {});
+      setTimeout(() => {
+        if (!settled && !TERMINAL.has(job.status)) finishAgent("timeout waiting for turn to settle after session/stop");
+      }, 8000).unref();
+    }, config.jobTimeoutMs);
+    timeoutTimer.unref();
+
+    try {
+      host = await this.agentHosts.acquire(job.cwd, (tail) => { job.stderrTail = tail.slice(-4000); });
+      host.listeners.add(listener);
+      job.agent = { host, sessionId: job.resumeSessionId };
+
+      const { sessionId, resumed } = await host.ensureSession({ resumeId: job.resumeSessionId, mode });
+      job.sessionId = sessionId;
+      job.agent.sessionId = sessionId;
+      this.bySession.set(sessionId, job);
+      // follow-ups may change the mode (the UI sends it with every message);
+      // resume keeps the session's old mode, so reconcile before sending
+      const stored = host.sessions.get(sessionId);
+      if (mode && stored && stored.mode !== mode) {
+        await host.setMode(sessionId, mode).catch(() => {});
+        stored.mode = mode;
+      }
+      if (!resumed && !job.resumeSessionId) {
+        record({ kind: "line", line: { type: "session.created", sessionId, payload: {} } });
+      }
+
+      if (modelRef) {
+        const slash = modelRef.indexOf("/");
+        const base = { providerId: modelRef.slice(0, slash), modelId: modelRef.slice(slash + 1) };
+        // the registry demands an explicit reasoning level whenever the
+        // merged spec declares values — send the advertised default up front
+        const level = host.levelFor(sessionId, modelRef);
+        await host.send(sessionId, text, level
+          ? { ...base, options: { reasoningLevel: level } }
+          : base);
+        // a level-requiring model with no cached level fails its first turn;
+        // the listener self-heals that (see turn.failed above)
+      } else {
+        await host.send(sessionId, text, null);
+      }
+      // turn events now stream through `listener` until the terminal event
+    } catch (e) {
+      finishAgent(e?.message || String(e));
+    }
+  }
+
+  // Bounded fallback when a native stop never produces a terminal event:
+  // the run verdict is cancelled (the stop WAS requested); any events that
+  // arrive later are recorded but cannot resurrect the job.
+  settleAgentCancelled(job) {
+    if (TERMINAL.has(job.status)) return;
+    job.error = null;
+    job.hasTurnFailed = false;
+    job.resultType = "cancelled";
+    job.setStatus("cancelled");
+    job.finishedAt = Date.now();
+    const done = {
+      kind: "done",
+      id: (job.lines[job.lines.length - 1]?.id || 0) + 1,
+      exitCode: null,
+      error: null,
+      sessionId: job.sessionId,
+      status: job.status,
+      timedOut: false,
+      cancelRequested: true,
+      killSignal: null,
+      resultType: "cancelled",
+      lateSettlement: true,
+    };
+    job.lines.push(done);
+    job.publish(done);
+    setTimeout(() => this.evictJob(job), config.jobRetentionMs).unref();
+  }
+
+  // Shared terminal retention: drop the full job after the window, keep a
+  // compact terminal record in the session map (see finish() notes).
+  evictJob(job) {
+    this.jobs.delete(job.id);
+    if (job.requestId) this.byRequest.delete(job.requestId);
+    for (const key of [job.sessionId, job.resumeSessionId]) {
+      if (key && this.bySession.get(key) === job) {
+        this.bySession.set(key, {
+          sessionId: key,
+          status: job.status,
+          finishedAt: job.finishedAt,
+          text: String(job.text || "").slice(0, 200),
+          cwd: job.cwd,
+          createdAt: job.createdAt,
+          terminalRecord: true,
+        });
+      }
+    }
+  }
+
   cancel(jobId) {
     const job = this.jobs.get(jobId);
     if (!job || TERMINAL.has(job.status)) return false;
     if (job.status === "stopping") return true;
     job.cancelRequested = true;
     job.setStatus("stopping");
+    if (job.agent) {
+      // NATIVE cancellation: session/stop aborts the turn and the CLI kills
+      // the turn's tools itself; the host and session stay alive. A bounded
+      // fallback settles the job if the terminal event never arrives — a
+      // late terminal event is then recorded but the verdict stands.
+      job.agent.host.stop(job.agent.sessionId).catch(() => {});
+      setTimeout(() => this.settleAgentCancelled(job), 8000).unref();
+      return true;
+    }
     killTree(job.proc, "SIGTERM");
     // Escalation targets the PROCESS GROUP and runs even after the job goes
     // terminal: the CLI can exit promptly on SIGTERM while a tool subprocess

@@ -93,7 +93,8 @@ UI (`+ project`) or `git clone` into the volume.
 | `ZCODE_WORKSPACE_ROOT` | `~/Workspace` | Root dir for projects (cwd of agent runs) |
 | `ZCODE_ALLOWED_MODES` | `plan,build,edit,yolo` | Permission modes offered in the UI |
 | `ZCODE_MAX_JOBS` | `3` | Concurrent CLI runs |
-| `ZCODE_JOB_TIMEOUT_MS` | `900000` | Hard kill for a single agent run (15 min) |
+| `ZCODE_JOB_TIMEOUT_MS` | `900000` | Hard stop for a single agent run (15 min) |
+| `ZCODE_BRIDGE_ENGINE` | `prompt` | Execution engine: `prompt` = one-shot CLI per message; `agent` = long-lived agent-server per workspace with native `session/stop` cancellation (CLI ≥ 0.16.9; attachment uploads still use the prompt engine) |
 | `ZCODE_CLI_NODE` | *(inherited runtime)* | Explicit Node ≥ 24 executable that runs the CLI child (required under a Bun-hosted server) |
 | `ZCODE_ENABLE_FILES` | `0` | Read-only file list/read API for the Code inspector |
 | `ZCODE_ENABLE_GIT` | `0` | Read-only git status/diff API for the Changes inspector and branch chip |
