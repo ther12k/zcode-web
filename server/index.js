@@ -967,6 +967,42 @@ async function handleApi(req, res, url) {
     }
   }
 
+  // Session fork — branch a session at a message boundary (agent engine
+  // only: protocol session/fork). The CLI persists the child session in the
+  // parent's directory, so it appears in the sidebar through normal listing.
+  const forkMatch = route.match(/^\/api\/sessions\/(sess_[A-Za-z0-9_-]+)\/fork$/);
+  if (forkMatch && req.method === "POST") {
+    let messageId = "";
+    try {
+      const body = JSON.parse(await readBody(req, 8192));
+      messageId = typeof body.messageId === "string" ? body.messageId.trim().slice(0, 128) : "";
+    } catch {
+      messageId = ""; // empty body = fork from the latest checkpoint
+    }
+    let sess;
+    try {
+      sess = store.get(forkMatch[1]);
+    } catch (e) {
+      if (e.code !== "DB_MISSING") return sendJson(res, 500, { error: e.message });
+    }
+    const cwd = sess?.directory;
+    if (!cwd || !insideAllowedRoots(realpathOf(cwd))) {
+      return sendJson(res, 404, { error: "session not found (or outside allowed roots)" });
+    }
+    try {
+      const result = await jobs.forkSession({ sessionId: forkMatch[1], cwd, messageId });
+      const fork = result.result || {};
+      return sendJson(res, 200, {
+        engine: "agent",
+        forkedSessionId: typeof fork.forkedSessionId === "string" ? fork.forkedSessionId : null,
+        parentSessionId: typeof fork.parentSessionId === "string" ? fork.parentSessionId : forkMatch[1],
+        response: typeof fork.response === "string" ? fork.response.slice(0, 4000) : "",
+      });
+    } catch (e) {
+      return sendJson(res, e.status || 500, { error: e.message, code: e.code });
+    }
+  }
+
   if (route === "/api/chat" && req.method === "POST") {
     const body = JSON.parse(await readBody(req, 1024 * 1024));
     let text = String(body.text || "").trim();

@@ -3,7 +3,7 @@
 // zcode-web agent bridge speaks (see server/protocol-client.mjs and
 // server/agent-host.mjs):
 //   runtime/capabilities, session/create, session/resume, session/setMode,
-//   session/send, session/stop, session/close
+//   session/send, session/stop, session/compact, session/fork, session/close
 // plus the server-initiated requests a host MUST answer
 // (session/requestRuntimePreferences).
 //
@@ -129,6 +129,24 @@ const handlers = {
       response: params.instructions ? `compacted with: ${params.instructions}` : "compacted",
       snapshot: { protocol: { name: "ZCode Protocol", version: 1 } },
       compact: { state: "accepted" },
+    };
+  },
+  "session/fork": (params) => {
+    if (!sessions.has(params.sessionId)) {
+      return { __error: { code: -32001, message: `unknown session ${params.sessionId}` } };
+    }
+    const s = sessions.get(params.sessionId);
+    if (s.turnActive) {
+      return { __error: { code: -32030, message: "Cannot fork while a prompt is running" } };
+    }
+    const forkedSessionId = `sess_fake_fork_${++sessionCounter}`;
+    sessions.set(forkedSessionId, { turnActive: false, mode: s.mode });
+    return {
+      forkedSessionId,
+      parentSessionId: params.sessionId,
+      ...(params.target?.messageId ? { targetMessageId: params.target.messageId } : {}),
+      response: "session forked",
+      snapshot: { protocol: { name: "ZCode Protocol", version: 1 } },
     };
   },
   "session/close": (params) => {

@@ -300,6 +300,20 @@ export class AgentHost {
     }, 180_000);
   }
 
+  /** Fork the session at a message boundary (protocol session/fork). The
+   *  session must be idle; the CLI copies history up to and including the
+   *  target message into a NEW persisted child session (same directory), so
+   *  it appears in the sidebar through normal listing. No target = fork from
+   *  the latest checkpoint (the protocol's default). */
+  async fork(sessionId, target) {
+    return this.client.request("session/fork", {
+      sessionId,
+      ...(target?.kind === "message" && target.messageId
+        ? { target: { kind: "message", messageId: String(target.messageId).slice(0, 128) } }
+        : {}),
+    }, 60_000);
+  }
+
   async close(sessionId) {
     this.sessions.delete(sessionId);
     try {

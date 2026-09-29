@@ -277,3 +277,54 @@ test("agent engine: compact goes through strict resume + session/compact, busy s
     await disposeManager(mgr);
   }
 });
+
+test("agent engine: fork goes through strict resume + session/fork with message target, busy and CLI-side guards", async () => {
+  writeFileSync(scenarioFile, "plain");
+  const logFile = join(home, "fork-frames.log");
+  process.env.FAKE_LOG = logFile;
+  const mgr = newManager();
+  try {
+    const { job } = mgr.start({ text: "first", sessionId: null, cwd: ROOT, mode: "build", model: null });
+    await waitFor(() => job.lines.find((l) => l.kind === "done"), 15_000, "first done");
+    const sessionId = job.sessionId;
+
+    // fork at a message boundary: strict resume + the protocol call, and the
+    // message target rides on the frame verbatim
+    const r = await mgr.forkSession({ sessionId, cwd: ROOT, messageId: "msg_boundary_1" });
+    assert.equal(r.engine, "agent");
+    assert.ok(r.result.forkedSessionId, "fork reports the child session id");
+    assert.equal(r.result.parentSessionId, sessionId);
+    const forkFrame = readFileSync(logFile, "utf8").split("\n").filter(Boolean)
+      .map((l) => JSON.parse(l)).filter((f) => f.method === "session/fork").pop();
+    assert.deepEqual(forkFrame.params, { sessionId, target: { kind: "message", messageId: "msg_boundary_1" } });
+
+    // the CLI's own active-turn guard maps to the same busy verdict even when
+    // OUR job table never saw the run — a raw session/send (hold scenario)
+    // through the host's client leaves the turn active only inside the fake
+    writeFileSync(scenarioFile, "hold");
+    const host = mgr.agentHosts.hosts.get(ROOT);
+    await host.client.request("session/send", { sessionId, content: "held elsewhere" });
+    await assert.rejects(
+      () => mgr.forkSession({ sessionId, cwd: ROOT }),
+      (e) => e.status === 409 && e.code === "SESSION_BUSY" && /cannot fork/i.test(e.message),
+    );
+    await host.client.request("session/stop", { sessionId });
+    writeFileSync(scenarioFile, "plain");
+
+    // unknown session id must NOT silently create a fresh session
+    await assert.rejects(
+      () => mgr.forkSession({ sessionId: "sess_unknown_000000000000000000000000", cwd: ROOT }),
+      /unknown session/,
+    );
+    assert.equal(mgr.agentHosts.hosts.get(ROOT).sessions.has("sess_unknown_000000000000000000000000"), false,
+      "no phantom session created by a failed fork");
+
+    // the forked session is resumable through the same host (follow-up chat)
+    const { job: follow } = mgr.start({ text: "in the fork", sessionId: r.result.forkedSessionId, cwd: ROOT, mode: "build", model: null });
+    const done = await waitFor(() => follow.lines.find((l) => l.kind === "done"), 15_000, "fork follow-up done");
+    assert.equal(done.status, "succeeded");
+  } finally {
+    delete process.env.FAKE_LOG;
+    await disposeManager(mgr);
+  }
+});

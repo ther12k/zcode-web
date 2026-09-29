@@ -1901,3 +1901,49 @@ test("session menu offers history compaction and reports the result", async ({ p
   assert.ok(compactCall, "compact POST fired");
   assert.equal((compactCall as { id: string }).id, sessionId);
 });
+
+// Session fork: an assistant reply carries "Fork from here"; the boundary
+// message id rides on the POST, the result toast confirms, and the forked
+// session is opened (busy/engine paths covered by unit suites).
+test("assistant turns offer Fork from here and open the forked session", async ({ page }) => {
+  await page.route(/\/api\/sessions\/sess_.+\?limit=/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        session: { id: "sess_forkparent000000000000000000000", title: "fork source" },
+        transcript: [
+          { id: "msg_user_1", role: "user", text: "seed the conversation", timeline: [] },
+          { id: "msg_boundary_1", role: "assistant", text: "the reply to fork from", tokens: 1200, durationMs: 4200, timeline: [] },
+        ],
+        total: 2,
+        hasMore: false,
+      }),
+    });
+  });
+  await page.goto("/w/default/s/sess_forkparent000000000000000000000");
+  await page.waitForLoadState("domcontentloaded");
+  await expect(page.locator(".chat-loader")).toBeHidden({ timeout: 5000 });
+
+  let forkCall: { id: string; body: unknown } | null = null;
+  await page.route(/\/api\/sessions\/.+\/fork$/, async (route) => {
+    forkCall = {
+      id: new URL(route.request().url()).pathname.split("/")[3],
+      body: route.request().postDataJSON(),
+    };
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ engine: "agent", forkedSessionId: "sess_forkchild0000000000000000000000", parentSessionId: "sess_forkparent000000000000000000000", response: "" }),
+    });
+  });
+
+  const forkButton = page.locator(".agent-message", { hasText: "the reply to fork from" }).getByLabel("Fork from here");
+  await expect(forkButton).toBeVisible();
+  await forkButton.click();
+  await expect(page.locator(".toast")).toContainText("Forked — new session", { timeout: 8000 });
+  await expect(page).toHaveURL(/sess_forkchild0000000000000000000000/, { timeout: 8000 });
+  assert.ok(forkCall, "fork POST fired");
+  assert.equal((forkCall as { id: string }).id, "sess_forkparent000000000000000000000");
+  assert.deepEqual((forkCall as { body: unknown }).body, { messageId: "msg_boundary_1" });
+});

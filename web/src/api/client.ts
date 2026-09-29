@@ -261,6 +261,15 @@ export class ApiClient {
       { method: "POST", body: JSON.stringify({ instructions: instructions || "" }) },
     );
   }
+  /** Fork the session at an assistant message boundary (its history is copied
+   *  up to and including that reply into a new session). No messageId = fork
+   *  from the latest checkpoint. */
+  forkSession(sessionId: string, messageId?: string) {
+    return this.request<{ engine: "agent" | "prompt"; forkedSessionId: string | null; parentSessionId?: string; response?: string }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/fork`,
+      { method: "POST", body: JSON.stringify(messageId ? { messageId } : {}) },
+    );
+  }
   cancel(jobId: string) {
     return this.request<{ canceled: boolean }>(`/api/jobs/${jobId}/cancel`, { method: "POST" });
   }

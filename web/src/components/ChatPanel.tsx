@@ -530,6 +530,29 @@ export function ChatPanel({
     }
   }
 
+  // Session fork (agent engine): copy this session's history up to and
+  // including the chosen reply into a NEW session, then open it. The CLI
+  // persists the child session itself — the sidebar refresh rides the same
+  // onSessionCreated path a freshly created session uses.
+  const [forking, setForking] = useState<string | null>(null);
+  const forkFromHere = useCallback(async (messageId: string) => {
+    if (!sessionId || forking) return;
+    setForking(messageId);
+    try {
+      const r = await client.forkSession(sessionId, messageId);
+      if (r.forkedSessionId) {
+        onNotify("Forked — new session with the history up to this reply.", "success");
+        onSessionCreated?.(r.forkedSessionId);
+      } else {
+        onNotify("Fork completed but the new session id was not reported.", "error");
+      }
+    } catch (e) {
+      onNotify(e instanceof Error ? e.message : "Fork failed.", "error");
+    } finally {
+      setForking(null);
+    }
+  }, [sessionId, forking, client, onNotify, onSessionCreated]);
+
   // multi-file attach: preflight against the server-advertised caps BEFORE
   // any base64 read — an oversized file must fail in a millisecond, not after
   // a full FileReader round trip — then upload the valid remainder
@@ -1361,6 +1384,16 @@ export function ChatPanel({
                     </span>
                   )}
                   <span className="message-footer-actions">
+                    {t.id && sessionId && (
+                      <IconButton
+                        label="Fork from here"
+                        title="New session with the history up to this reply"
+                        disabled={busy || !!forking}
+                        onClick={() => t.id && void forkFromHere(t.id)}
+                      >
+                        {forking === t.id ? <LoaderCircle size={13} className="spin" /> : <GitBranch size={13} />}
+                      </IconButton>
+                    )}
                     <IconButton label="Copy response" onClick={() => void copyText(`h${i}`, t.text)}>
                       {copied === `h${i}` ? <CheckCheck size={13} /> : <Copy size={13} />}
                     </IconButton>

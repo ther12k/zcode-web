@@ -623,6 +623,35 @@ export class JobManager {
     return { engine: "prompt", jobId: job.id };
   }
 
+  /** Fork a session at a message boundary. Agent-engine only — the prompt
+   *  engine has no fork concept. The CLI persists the child session itself
+   *  (parent's directory), so it lands in the sidebar via normal listing;
+   *  history is copied up to and including the boundary message. */
+  async forkSession({ sessionId, cwd, messageId }) {
+    if (!sessionId) throw Object.assign(new Error("sessionId is required"), { status: 400 });
+    const active = this.bySession.get(sessionId);
+    if (active && !TERMINAL.has(active.status)) {
+      throw Object.assign(new Error("Session is busy with an active run"), { status: 409, code: "SESSION_BUSY" });
+    }
+    if (!this.agentHosts) {
+      throw Object.assign(new Error("session fork requires the agent engine"), { status: 501, code: "ENGINE_UNSUPPORTED" });
+    }
+    const host = await this.agentHosts.acquire(cwd);
+    // strict: forking must target THIS session — never a fresh one
+    await host.ensureSession({ resumeId: sessionId, strict: true });
+    try {
+      const result = await host.fork(sessionId, messageId ? { kind: "message", messageId } : undefined);
+      return { engine: "agent", result };
+    } catch (e) {
+      // the CLI's own guard fires when ANY writer (desktop, CLI) holds the
+      // session — surface it as the same busy verdict our fast path returns
+      if (/cannot fork/i.test(e.message || "")) {
+        throw Object.assign(e, { status: 409, code: "SESSION_BUSY" });
+      }
+      throw e;
+    }
+  }
+
   // Bounded fallback when a native stop never produces a terminal event:
   // the run verdict is cancelled (the stop WAS requested); any events that
   // arrive later are recorded but cannot resurrect the job.

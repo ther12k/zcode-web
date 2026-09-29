@@ -2092,3 +2092,52 @@ describe("session compact (prompt engine)", () => {
     assert.equal(unknown.status, 404);
   });
 });
+
+// Session fork is agent-engine-only (protocol session/fork has no prompt-mode
+// counterpart): under the default prompt engine the endpoint must say so
+// explicitly, and the same store resolution / roots guard applies.
+describe("session fork route (prompt engine)", () => {
+  it("answers 501 for a known session and 404 for unknown/root-escaping ones", async () => {
+    const chat = await fetch(`${BASE}/api/chat`, {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({ text: "fork setup", cwd: ws, mode: "plan" }),
+    });
+    const accepted = await chat.json();
+    const jobId = accepted.jobId;
+    await (async () => {
+      const deadline = Date.now() + 15000;
+      while (Date.now() < deadline) {
+        const j = await (await fetch(`${BASE}/api/jobs/${jobId}`, { headers: auth })).json();
+        if (j.status && j.status !== "running" && j.status !== "queued") return;
+        await new Promise((r) => setTimeout(r, 150));
+      }
+    })();
+    const job = await (await fetch(`${BASE}/api/jobs/${jobId}`, { headers: auth })).json();
+
+    const { DatabaseSync } = await import("node:sqlite");
+    const dbDir = join(home, "cli", "db");
+    mkdirSync(dbDir, { recursive: true });
+    const db = new DatabaseSync(join(dbDir, "db.sqlite"));
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT);
+    `);
+    db.prepare("INSERT OR REPLACE INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)")
+      .run(job.sessionId, "fork test", ws, Date.now(), Date.now());
+    db.close();
+
+    const fork = await fetch(`${BASE}/api/sessions/${job.sessionId}/fork`, {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({ messageId: "msg_boundary_1" }),
+    });
+    assert.equal(fork.status, 501);
+    const body = await fork.json();
+    assert.equal(body.code, "ENGINE_UNSUPPORTED");
+
+    const unknown = await fetch(`${BASE}/api/sessions/sess_nope_not_a_real/fork`, {
+      method: "POST", headers: { ...auth, "content-type": "application/json" }, body: "{}",
+    });
+    assert.equal(unknown.status, 404);
+  });
+});
