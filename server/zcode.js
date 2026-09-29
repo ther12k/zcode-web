@@ -126,13 +126,14 @@ function killTree(proc, signal) {
   }
 }
 
-function requestFingerprint({ text, sessionId, cwd, mode, model, attachments }) {
+function requestFingerprint({ text, sessionId, cwd, mode, model, reasoningLevel, attachments }) {
   return JSON.stringify({
     text: String(text || "").trim(),
     sessionId: sessionId || null,
     cwd: cwd || null,
     mode: mode || null,
     model: model || null,
+    reasoningLevel: reasoningLevel || null,
     attachments: (attachments || []).map(String).sort(),
   });
 }
@@ -210,9 +211,9 @@ export class JobManager {
     return entry.job;
   }
 
-  start({ text, sessionId, cwd, mode, model, modelApiKey, modelBaseUrl, attachments, requestId }) {
+  start({ text, sessionId, cwd, mode, model, reasoningLevel, modelApiKey, modelBaseUrl, attachments, requestId }) {
     // idempotent resubmission returns the original job (or rejects on conflict)
-    const fp = requestId ? requestFingerprint({ text, sessionId, cwd, mode, model, attachments }) : null;
+    const fp = requestId ? requestFingerprint({ text, sessionId, cwd, mode, model, reasoningLevel, attachments }) : null;
     if (requestId) {
       const existing = this.byRequest.get(requestId);
       if (existing) {
@@ -255,7 +256,7 @@ export class JobManager {
       // async on purpose: the API returns 202 immediately and the SSE stream
       // carries session events once the host is up; setup failures terminate
       // the job through the same terminal-event contract as the prompt path
-      this.startAgentJob(job, { text, mode, model });
+      this.startAgentJob(job, { text, mode, model, reasoningLevel });
       this.jobs.set(job.id, job);
       job.setStatus("running");
       return { job, replayed: false };
@@ -286,7 +287,7 @@ export class JobManager {
         // wrong endpoint auth).
         ...(model
           ? {
-              ZCODE_MODEL: model,
+              ZCODE_MODEL: reasoningLevel ? `${model}$${reasoningLevel}` : model,
               ...(modelApiKey ? { ZCODE_API_KEY: modelApiKey } : {}),
               ...(modelBaseUrl ? { ZCODE_BASE_URL: modelBaseUrl } : {}),
             }
@@ -435,7 +436,7 @@ export class JobManager {
   // session/stop aborts the turn and the CLI itself tree-kills the turn's
   // tools (pinned-verified on 0.16.9) — no process kill, session stays
   // usable, host stays alive for the next message.
-  async startAgentJob(job, { text, mode, model }) {
+  async startAgentJob(job, { text, mode, model, reasoningLevel }) {
     let lastEventId = 0;
     const record = (event) => {
       event.id = ++lastEventId;
@@ -581,9 +582,10 @@ export class JobManager {
       if (modelRef) {
         const slash = modelRef.indexOf("/");
         const base = { providerId: modelRef.slice(0, slash), modelId: modelRef.slice(slash + 1) };
-        // the registry demands an explicit reasoning level whenever the
-        // merged spec declares values — send the advertised default up front
-        const level = host.levelFor(sessionId, modelRef);
+        // an explicit user choice wins; otherwise the registry demands a
+        // level whenever the merged spec declares values — send the
+        // advertised default up front
+        const level = reasoningLevel || host.levelFor(sessionId, modelRef);
         await host.send(sessionId, text, level
           ? { ...base, options: { reasoningLevel: level } }
           : base);

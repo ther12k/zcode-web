@@ -207,6 +207,62 @@ describe("auth", () => {
   });
 });
 
+describe("reasoning levels (derived from builtin rules + legacy variants)", () => {
+  it("layers modelMatch rules, exact provider overrides, and personal variants onto /api/models", async () => {
+    // dedicated instance: the builtin fixture makes derivation deterministic
+    // (the shared instance may see a real desktop install on this machine)
+    if (server && server.exitCode === null) {
+      server.kill();
+      await new Promise((r) => server.once("exit", r));
+    }
+    await startServer({ ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: join(SERVER_ROOT, "tests", "fixtures", "zcode-builtin-reasoning.json") });
+    mkdirSync(join(home, "cli"), { recursive: true });
+    writeFileSync(join(home, "cli", "config.json"), JSON.stringify({
+      provider: {
+        prov: {
+          name: "Prov",
+          kind: "openai-compatible",
+          options: { apiKey: "k", baseURL: "https://example.invalid/v1" },
+          models: {
+            "plain-1": {},
+            "deep-think-1": {},
+            "exact-override": {},
+            "custom-levels": { reasoning: { enabled: true, variants: ["alpha", "beta"] } },
+          },
+        },
+      },
+    }));
+    const r = await fetch(`${BASE}/api/models`, { headers: auth });
+    const j = await r.json();
+    const by = Object.fromEntries(j.models.map((m) => [m.model, m]));
+    assert.deepEqual(by["plain-1"].reasoningLevels, ["disabled", "enabled"], "catch-all rule applies");
+    assert.deepEqual(by["deep-think-1"].reasoningLevels, ["low", "high", "max"], "later specific rule overrides the catch-all");
+    assert.deepEqual(by["exact-override"].reasoningLevels, ["only"], "exact provider/model rule wins over patterns");
+    assert.deepEqual(by["custom-levels"].reasoningLevels, ["alpha", "beta"], "personal variants override builtin");
+    assert.equal(by["custom-levels"].defaultReasoningLevel, "alpha");
+  });
+
+  it("accepts a valid reasoningLevel on /api/chat and rejects unknown ones with the level list", async () => {
+    const bad = await fetch(`${BASE}/api/chat`, {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({ text: "hi", cwd: ws, mode: "plan", model: "prov/plain-1", reasoningLevel: "ultra" }),
+    });
+    assert.equal(bad.status, 400);
+    const err = await bad.json();
+    assert.match(err.error, /not one of/);
+    assert.deepEqual(err.levels, ["disabled", "enabled"]);
+
+    // valid level is accepted (the fake CLI just echoes; the job starts)
+    const ok = await fetch(`${BASE}/api/chat`, {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({ text: "hello reasoning", cwd: ws, mode: "plan", model: "prov/plain-1", reasoningLevel: "enabled" }),
+    });
+    assert.equal(ok.status, 202);
+  });
+});
+
 describe("model catalog", () => {
   it("returns configured display names and default markers without exposing provider secrets", async () => {
     mkdirSync(join(home, "cli"), { recursive: true });

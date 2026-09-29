@@ -4,7 +4,7 @@
 // ZWUI-016 reducer; transport from the ZWUI-017 controller.
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, lazy, Suspense, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { ArrowLeftRight, ArrowUp, ArrowUpRight, BadgeCheck, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Coins, Copy, Eye, EyeOff, FileText, FoldVertical, FolderClosed, GitBranch, LoaderCircle, MessageSquare, MoreHorizontal, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Sparkles, Square, SquarePen, SquareTerminal, Terminal, Unplug, Wrench, X, Zap } from "lucide-react";
+import { ArrowLeftRight, ArrowUp, ArrowUpRight, BadgeCheck, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Coins, Copy, Eye, EyeOff, FileText, FoldVertical, FolderClosed, GitBranch, LoaderCircle, MessageSquare, MoreHorizontal, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Sparkles, Square, SquarePen, SquareTerminal, Terminal, Unplug, Wrench, X, Zap, BrainCircuit} from "lucide-react";
 import { ZLogo, IconButton, Markdown, CheckMark, useDialogA11y, overlayOpen, relativeTime, formatBytes } from "../ui";
 import { randomUUID } from "../lib/uuid";
 import { ApiError, type ApiClient, type CommandInfo, type FileCard, type ModelInfo, type SessionDetail, type SessionInfo, type TimelineEvent, type TodoItem, type TranscriptTurn } from "../api/client";
@@ -97,7 +97,7 @@ export function ChatPanel({
   const modelLoadSeq = useRef(0);
   const [mode, setMode] = useState(defaultMode);
   const [model, setModel] = useState("");
-  const [menu, setMenu] = useState<"mode" | "model" | "project" | "view" | null>(null);
+  const [menu, setMenu] = useState<"mode" | "model" | "project" | "view" | "reasoning" | null>(null);
   // per-turn action menu ("…" byline control) — keyed by turn id
   const [turnMenu, setTurnMenu] = useState<string | null>(null);
   // project switcher data (roots → projects), fetched on first open
@@ -701,13 +701,41 @@ export function ChatPanel({
     return () => window.removeEventListener("keydown", interrupt);
   }, [busy, menu, turnMenu, cmdQuery]);
 
+  // per-model reasoning level (device-local pref); "" = the model's default.
+  // Declared before the submission callbacks — their DEPS arrays read it at
+  // render time, so a later declaration would be a temporal dead zone.
+  const [reasoningLevelPrefs, setReasoningLevelPrefs] = useState<Record<string, string>>(() => loadPrefs().reasoningLevels);
+  const reasoningMeta = useMemo(() => {
+    const m = models.find((item) => item.ref === model) || null;
+    const levels = m?.reasoningLevels;
+    return {
+      levels: levels && levels.length > 1 ? levels : null,
+      defaultLevel: m?.defaultReasoningLevel ?? null,
+      label: m ? modelLabel(m) : "",
+    };
+  }, [models, model]);
+  const selectedReasoningLevel = useMemo(() => {
+    if (!reasoningMeta.levels) return "";
+    const stored = reasoningLevelPrefs[model];
+    return stored && reasoningMeta.levels.includes(stored) ? stored : "";
+  }, [reasoningMeta, reasoningLevelPrefs, model]);
+  const pickReasoningLevel = useCallback((level: string) => {
+    if (!model) return;
+    const next = { ...loadPrefs().reasoningLevels };
+    if (level) next[model] = level;
+    else delete next[model];
+    savePrefs({ reasoningLevels: next });
+    setReasoningLevelPrefs(next);
+    setMenu(null);
+  }, [model]);
+
   const queueCurrentDraft = useCallback(() => {
     const text = input.trim();
     if ((!text && !attachments.length) || uploading > 0 || !providerLive) return false;
     const sub = snapshotSubmission({
       draftKey, revision: draftRevRef.current,
       projectKey: cwd, cwd, sessionId,
-      text, model: model || "", mode,
+      text, model: model || "", reasoningLevel: selectedReasoningLevel, mode,
       attachments: attachments.map((a) => ({ uploadRef: a.path, name: a.name })),
     }, randomUUID());
     setQueuedSubmissions((q) => [...q, sub]);
@@ -716,7 +744,7 @@ export function ChatPanel({
     touchDraft();
     saveDraft(draftKey, "");
     return true;
-  }, [input, attachments, uploading, providerLive, draftKey, cwd, sessionId, model, mode, touchDraft]);
+  }, [input, attachments, uploading, providerLive, draftKey, cwd, sessionId, model, selectedReasoningLevel, mode, touchDraft]);
 
   // ZWUI-050: the manager owns the POST, the stream and the poll; this panel
   // only supplies view concerns. Submissions are immutable snapshots built
@@ -784,13 +812,13 @@ export function ChatPanel({
     const sub = snapshotSubmission({
       draftKey, revision: draftRevRef.current,
       projectKey: cwd, cwd, sessionId,
-      text, model: model || "", mode,
+      text, model: model || "", reasoningLevel: selectedReasoningLevel, mode,
       attachments: attachments.map((a) => ({ uploadRef: a.path, name: a.name })),
     }, randomUUID());
     setSteerPending(sub);
     setInput(""); setAttachments([]); touchDraft(); saveDraft(draftKey, "");
     stopRun();
-  }, [input, attachments, uploading, providerLive, busy, run.jobId, draftKey, cwd, sessionId, model, mode, touchDraft, stopRun]);
+  }, [input, attachments, uploading, providerLive, busy, run.jobId, draftKey, cwd, sessionId, model, selectedReasoningLevel, mode, touchDraft, stopRun]);
 
   const steerSettling = useRef(false);
   useEffect(() => {
@@ -819,10 +847,10 @@ export function ChatPanel({
     submitWith(snapshotSubmission({
       draftKey, revision: draftRevRef.current,
       projectKey: cwd, cwd, sessionId,
-      text, model: model || "", mode,
+      text, model: model || "", reasoningLevel: selectedReasoningLevel, mode,
       attachments: attachments.map((a) => ({ uploadRef: a.path, name: a.name })),
     }, randomUUID()), { clearDraft: true, submitView: runKey });
-  }, [guard, busy, queueCurrentDraft, input, attachments, draftKey, cwd, sessionId, mode, model, runKey, submitWith]);
+  }, [guard, busy, queueCurrentDraft, input, attachments, draftKey, cwd, sessionId, mode, model, selectedReasoningLevel, runKey, submitWith]);
 
   // ambiguous delivery: the POST threw, so the server may have already
   // accepted the request. Reuse the SAME request id and exact payload — the
@@ -853,9 +881,9 @@ export function ChatPanel({
     submitWith(snapshotSubmission({
       draftKey, revision: draftRevRef.current,
       projectKey: cwd, cwd, sessionId,
-      text, model: model || "", mode, attachments: [],
+      text, model: model || "", reasoningLevel: selectedReasoningLevel, mode, attachments: [],
     }, randomUUID()), { clearDraft: false, submitView: runKey });
-  }, [guard, draftKey, cwd, sessionId, mode, model, runKey, submitWith]);
+  }, [guard, draftKey, cwd, sessionId, mode, model, runKey, submitWith, selectedReasoningLevel]);
 
   // "Edit and resend" loads a historical prompt into the composer — an
   // explicit replace of the draft, surfaced to the user when one existed
@@ -1647,6 +1675,37 @@ export function ChatPanel({
                   </div>
                 )}
               </div>
+              {reasoningMeta.levels && (
+                <div className="composer-menu-wrap">
+                  <button
+                    className="mode-picker"
+                    aria-haspopup="menu"
+                    aria-expanded={menu === "reasoning"}
+                    aria-label={`Reasoning level: ${selectedReasoningLevel || "Auto"}`}
+                    title={`Reasoning effort for ${model} — Auto uses the model default`}
+                    onClick={() => setMenu(menu === "reasoning" ? null : "reasoning")}
+                  >
+                    <BrainCircuit size={13} /><span>{selectedReasoningLevel || "Auto"}</span><ChevronDown size={11} />
+                  </button>
+                  {menu === "reasoning" && (
+                    <div className="popover mode-popover reasoning-popover" role="menu" aria-label="Reasoning level">
+                      <div className="popover-label">REASONING · {reasoningMeta.label}</div>
+                      <button role="menuitemradio" aria-checked={!selectedReasoningLevel} onClick={() => pickReasoningLevel("")}>
+                        <Sparkles size={15} />
+                        <span><b>Auto</b><small>Use the model's default effort</small></span>
+                        {!selectedReasoningLevel && <Check size={13} className="success-text" />}
+                      </button>
+                      {reasoningMeta.levels.map((level) => (
+                        <button key={level} role="menuitemradio" aria-checked={selectedReasoningLevel === level} onClick={() => pickReasoningLevel(level)}>
+                          <BrainCircuit size={15} />
+                          <span><b>{level}</b><small>{reasoningMeta.defaultLevel === level ? "Model default" : `Reasoning effort: ${level}`}</small></span>
+                          {selectedReasoningLevel === level && <Check size={13} className="success-text" />}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
             <div className="composer-right">
               <div className="composer-menu-wrap">

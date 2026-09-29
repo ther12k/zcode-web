@@ -48,6 +48,10 @@ export type ModelInfo = {
   /** Human-friendly name from the provider config, with model id fallback. */
   displayName?: string;
   isDefault: boolean;
+  /** Reasoning levels derived from the CLI's builtin model rules (or the
+   *  user's per-model variants). Absent when the model has none. */
+  reasoningLevels?: string[];
+  defaultReasoningLevel?: string;
 };
 
 /** Provider settings (server redacts API keys — apiKeyConfigured only). */
@@ -245,7 +249,7 @@ export class ApiClient {
       body: JSON.stringify({ name, data }),
     });
   }
-  chat(input: { text: string; sessionId?: string | null; cwd?: string; mode?: string; model?: string; attachments?: string[]; requestId: string }) {
+  chat(input: { text: string; sessionId?: string | null; cwd?: string; mode?: string; model?: string; reasoningLevel?: string; attachments?: string[]; requestId: string }) {
     return this.request<ChatAccepted>("/api/chat", { method: "POST", body: JSON.stringify(input) });
   }
   job(jobId: string) {

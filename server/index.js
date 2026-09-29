@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 
 import { JobManager, cliStatus, cliRuntimeStatus, config, uploadsDir } from "./zcode.js";
 import { readSettings, writeSettings, regenerateAgentProviderConfig } from "./settings.mjs";
+import { resolveBuiltinProviderPath } from "./agent-host.mjs";
 import { ContentSearchIndex, renameSession } from "./sessions.js";
 import { SessionStore } from "./sessions.js";
 import { githubCapability, fetchIssue, fetchComments, validOwner, validRepo } from "./github.js";
@@ -316,6 +317,50 @@ function providerConfigured() {  try {
   }
 }
 
+// Reasoning levels per model, derived the way the CLI registry does it:
+// builtin zcode-builtin.json modelMatch rules (later rules layer over
+// earlier; exact provider/model rules override patterns), with the legacy
+// config's per-model reasoning.variants as the final personal override.
+// Cached on the builtin file's mtime.
+const reasoningCache = { mtime: 0, rules: null };
+function builtinReasoningRules() {
+  const path = resolveBuiltinProviderPath(config.cliEntry);
+  if (!path) return [];
+  try {
+    const mtime = statSync(path).mtimeMs;
+    if (reasoningCache.rules && reasoningCache.mtime === mtime) return reasoningCache.rules;
+    const doc = JSON.parse(readFileSync(path, "utf8"));
+    const rules = doc?.config?.modelConfigRules || {};
+    const parsed = [];
+    // order mirrors the registry's rule array: modelRules first, exact
+    // builtin provider rules last (they win)
+    for (const r of rules.modelRules || []) {
+      if (r?.modelMatch) parsed.push({ match: r.modelMatch, values: r.config?.optionSpecs?.reasoningLevel?.values });
+    }
+    for (const r of rules.builtinProviderModelRules || []) {
+      if (r?.providerId && r?.modelId) parsed.push({ provider: r.providerId, model: r.modelId, values: r.config?.optionSpecs?.reasoningLevel?.values });
+    }
+    reasoningCache.mtime = mtime;
+    reasoningCache.rules = parsed;
+    return parsed;
+  } catch {
+    return [];
+  }
+}
+
+function deriveReasoningLevels(providerId, modelId, legacyModelCfg) {
+  let levels = null;
+  for (const rule of builtinReasoningRules()) {
+    const matches = rule.provider
+      ? rule.provider === providerId && rule.model === modelId
+      : (() => { try { return new RegExp(`^(?:${rule.match})$`).test(modelId); } catch { return false; } })();
+    if (matches && Array.isArray(rule.values) && rule.values.length) levels = rule.values;
+  }
+  const variants = legacyModelCfg?.reasoning?.variants;
+  if (Array.isArray(variants) && variants.length) levels = variants.map(String);
+  return levels && levels.length ? levels : null;
+}
+
 // Enumerate provider/model pairs from the CLI's user config, for the UI
 // selector. Internal entries carry the provider apiKey (server-side only —
 // never send to the client). Returns [] when unconfigured.
@@ -333,6 +378,7 @@ function listModels({ withKeys = false } = {}) {
         const displayName = typeof modelConfig === "object" && modelConfig?.name
           ? String(modelConfig.name)
           : modelId;
+        const levels = deriveReasoningLevels(id, modelId, modelConfig);
         out.push({
           ref,
           provider: id,
@@ -340,6 +386,7 @@ function listModels({ withKeys = false } = {}) {
           model: modelId,
           displayName,
           isDefault: ref === main,
+          ...(levels ? { reasoningLevels: levels, defaultReasoningLevel: levels[0] } : {}),
           ...(withKeys
             ? { apiKey: p.options?.apiKey || null, baseURL: p.options?.baseURL || null }
             : {}),
@@ -921,6 +968,20 @@ async function handleApi(req, res, url) {
 
     const mode = config.allowedModes.includes(body.mode) ? body.mode : "plan";
     const modelEntry = listModels({ withKeys: true }).find((m) => m.ref === body.model) || null;
+    // reasoning level: optional per-send choice, validated against the
+    // model's derived levels (builtin rules or the user's variants)
+    let reasoningLevel = typeof body.reasoningLevel === "string" ? body.reasoningLevel.trim() : "";
+    if (reasoningLevel) {
+      if (!modelEntry?.reasoningLevels?.includes(reasoningLevel)) {
+        return sendJson(res, 400, {
+          error: `reasoningLevel "${reasoningLevel}" is not one of ${modelEntry?.ref ?? body.model}'s levels`,
+          levels: modelEntry?.reasoningLevels ?? [],
+        });
+      }
+    } else if (modelEntry?.reasoningLevels?.length === 1) {
+      // single-level models resolve without an explicit choice
+      reasoningLevel = "";
+    }
     const attachments = [];
     // attachments must be files previously uploaded to the uploads dir
     const upDir = uploadsDir();
@@ -950,6 +1011,7 @@ async function handleApi(req, res, url) {
         mode,
         model: modelEntry?.ref || null,
         attachments,
+        reasoningLevel,
       });
       if (existing) {
         return sendJson(res, 200, {
@@ -968,6 +1030,7 @@ async function handleApi(req, res, url) {
         cwd,
         mode,
         model: modelEntry?.ref || null,
+        ...(reasoningLevel ? { reasoningLevel } : {}),
         modelApiKey: modelEntry?.apiKey || null,
         modelBaseUrl: modelEntry?.baseURL || null,
         attachments,

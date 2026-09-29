@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "revision": "test-fixture",
+  "config": {
+    "modelConfigRules": {
+      "modelRules": [
+        { "modelMatch": ".*", "config": { "optionSpecs": { "reasoningLevel": { "values": ["disabled", "enabled"] } } } },
+        { "modelMatch": ".*deep-think.*", "config": { "optionSpecs": { "reasoningLevel": { "values": ["low", "high", "max"] } } } }
+      ],
+      "modelApiRules": [],
+      "providerSiteRules": [],
+      "templateModelRules": [],
+      "builtinProviderModelRules": [
+        { "providerId": "prov", "modelId": "exact-override", "config": { "optionSpecs": { "reasoningLevel": { "values": ["only"] } } } }
+      ]
+    }
+  }
+}

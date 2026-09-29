@@ -832,3 +832,6 @@ body.is-col-resizing .workspace-main{pointer-events:none}
 .provider-editor-error{display:flex;align-items:center;gap:10px;flex-wrap:wrap;border:1px solid #7e6740;background:#3f3922;color:#e0cda1;border-radius:7px;padding:11px 13px;font-size:12px;margin-bottom:12px}
 .provider-editor-saved{display:flex;align-items:center;gap:6px;color:#b7c9a4;font-size:12px;margin-top:10px}
 @media(max-width:560px){.provider-editor-grid{grid-template-columns:1fr}.provider-model-row{grid-template-columns:1fr 28px}.provider-model-row input:nth-child(2),.provider-model-row input:nth-child(3){display:none}.provider-default-picker{margin-left:0;width:100%}}
+
+/* reasoning picker shares the mode-picker chrome */
+.reasoning-popover{left:-8px}

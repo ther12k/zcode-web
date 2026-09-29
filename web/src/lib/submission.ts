@@ -46,6 +46,7 @@ export interface DraftInput {
   readonly sessionId: string | null;
   readonly text: string;
   readonly model: string;
+  readonly reasoningLevel: string;
   readonly mode: string;
   readonly attachments: readonly Readonly<{ uploadRef: string; name: string }>[];
 }

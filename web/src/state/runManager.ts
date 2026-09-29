@@ -280,6 +280,7 @@ export async function submitRun(key: RunKey, submission: Submission, client: Api
       cwd: submission.cwd,
       mode: submission.mode,
       model: submission.model || undefined,
+      reasoningLevel: submission.reasoningLevel || undefined,
       attachments: submission.attachments.length
         ? submission.attachments.map((a) => (typeof a === "string" ? a : a.uploadRef))
         : undefined,

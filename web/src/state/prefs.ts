@@ -14,6 +14,8 @@ export type Preferences = {
   model: string;
   /** Recently selected model refs, newest first, device-local. */
   recentModels: string[];
+  /** Per-model reasoning level choice, device-local (model ref → level). */
+  reasoningLevels: Record<string, string>;
   mode: string;
   rootPath: string;
   fontSize: FontSize;         // chat text scale, device-local
@@ -26,6 +28,7 @@ const DEFAULT_PREFS: Preferences = {
   version: PREFS_VERSION,
   model: "",
   recentModels: [],
+  reasoningLevels: {},
   mode: "plan",
   rootPath: "",
   fontSize: "m",
@@ -49,6 +52,14 @@ export function loadPrefs(): Preferences {
       recentModels: Array.isArray(parsed.recentModels)
         ? parsed.recentModels.filter((ref): ref is string => typeof ref === "string" && ref.length > 0).slice(0, 8)
         : [],
+      reasoningLevels:
+        parsed.reasoningLevels && typeof parsed.reasoningLevels === "object" && !Array.isArray(parsed.reasoningLevels)
+          ? Object.fromEntries(
+              Object.entries(parsed.reasoningLevels)
+                .filter(([, v]) => typeof v === "string" && v.length > 0)
+                .slice(0, 64),
+            )
+          : {},
     };
   } catch {
     return { ...DEFAULT_PREFS };

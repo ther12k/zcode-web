@@ -10,7 +10,7 @@ beforeEach(() => {
 describe("preferences store", () => {
   it("returns defaults when nothing is stored", () => {
     const p = loadPrefs();
-    expect(p).toMatchObject({ version: 1, mode: "plan", model: "", recentModels: [], fontSize: "m", hiddenSessions: [], pinnedSessions: [], displayAliases: {} });
+    expect(p).toMatchObject({ version: 1, mode: "plan", model: "", recentModels: [], fontSize: "m", hiddenSessions: [], pinnedSessions: [], displayAliases: {}, reasoningLevels: {} });
   });
 
   it("resets quietly on a future version (migration hook)", () => {
@@ -57,4 +57,13 @@ describe("per-session drafts", () => {
     saveDraft("sess_a", "");
     expect(loadDraft("sess_a")).toBe("");
   });
+});
+
+it("reasoning level prefs round-trip per model and drop junk", () => {
+  localStorage.setItem("zcode-web-prefs", JSON.stringify({
+    version: 1,
+    reasoningLevels: { "prov/m1": "high", "bad": "", "prov/m2": 7, "prov/m3": "max" },
+  }));
+  const p = loadPrefs();
+  expect(p.reasoningLevels).toEqual({ "prov/m1": "high", "prov/m3": "max" });
 });

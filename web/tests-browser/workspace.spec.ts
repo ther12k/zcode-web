@@ -1505,7 +1505,8 @@ test("model picker groups providers, searches flexibly, and refreshes live confi
 });
 
 test("ZWUI-080: composer and shell menus expose menu semantics", async ({ page }) => {
-  const modeButton = page.locator(".mode-picker");
+  // role+name, not .mode-picker: the reasoning picker shares that class
+  const modeButton = page.getByRole("button", { name: "plan", exact: true });
   await expect(modeButton).toHaveAttribute("aria-haspopup", "menu");
   await expect(modeButton).toHaveAttribute("aria-expanded", "false");
   await modeButton.click();
@@ -1819,4 +1820,56 @@ test("settings dialog manages providers end-to-end (sanitized read, save, refres
   // the save signals the composer to refresh the model list
   await page.waitForTimeout(300);
   assert.ok(modelsCalls >= 1, "model list re-fetched after save");
+});
+
+// Reasoning-level picker: models whose derived spec has multiple levels get a
+// composer control; an explicit choice rides on /api/chat and persists.
+test("composer exposes a reasoning picker for multi-level models and sends the choice", async ({ page }) => {
+  await page.route(/\/api\/models$/, async (route) => {
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ models: [
+        { ref: "zai/glm-5.3", provider: "zai", providerName: "Z.AI", model: "glm-5.3", displayName: "GLM 5.3", isDefault: true,
+          reasoningLevels: ["low", "high", "max"], defaultReasoningLevel: "low" },
+        { ref: "zai/plain", provider: "zai", providerName: "Z.AI", model: "plain", displayName: "Plain", isDefault: false },
+      ] }),
+    });
+  });
+  let chatBody: Record<string, unknown> | null = null;
+  await page.route(/\/api\/chat$/, async (route) => {
+    chatBody = route.request().postDataJSON();
+    return route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ jobId: "j-reasoning", sessionId: null, cwd: "/x", mode: "plan", model: null }) });
+  });
+
+  await page.reload();
+  await page.waitForLoadState("domcontentloaded");
+  await expect(page.getByLabel("Message Zcode")).toBeVisible();
+
+  // default model (glm-5.3) has levels → picker is visible and reads Auto
+  const picker = page.getByRole("button", { name: /^Reasoning level:/ });
+  await expect(picker).toBeVisible({ timeout: 8000 });
+  await expect(picker).toHaveText(/Auto/);
+
+  // choose "max" and verify the aria state
+  await picker.click();
+  await page.getByRole("menuitemradio", { name: /^max/ }).click();
+  await expect(picker).toHaveText(/max/);
+
+  // send and assert the choice rides on the POST
+  const input = page.getByLabel("Message Zcode");
+  await input.fill("reasoning e2e");
+  await input.press("Enter");
+  await page.waitForTimeout(600);
+  assert.ok(chatBody, "chat POST fired");
+  assert.equal((chatBody as Record<string, unknown>).reasoningLevel, "max");
+
+  // the choice is device-persisted per model
+  const stored = await page.evaluate(() => localStorage.getItem("zcode-web-prefs"));
+  assert.match(String(stored), /"zai\/glm-5.3":"max"/);
+
+  // switching to a model WITHOUT levels hides the picker
+  await page.locator(".model-picker").click();
+  await page.getByText("Plain", { exact: true }).click();
+  await expect(picker).toBeHidden();
 });

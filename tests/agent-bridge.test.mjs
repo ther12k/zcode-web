@@ -227,14 +227,15 @@ test("agent engine: resume path uses session/resume and model selection rides on
     const done = await waitFor(() => job.lines.find((l) => l.kind === "done"), 15_000, "first done");
     assert.equal(done.status, "succeeded");
 
-    const { job: job2 } = mgr.start({ text: "second", sessionId: job.sessionId, cwd: ROOT, mode: "build", model: "mockprov/m1" });
+    const { job: job2 } = mgr.start({ text: "second", sessionId: job.sessionId, cwd: ROOT, mode: "build", model: "mockprov/m1", reasoningLevel: "high" });
     await waitFor(() => job2.lines.find((l) => l.kind === "done"), 15_000, "second done");
 
     const frames = readFileSync(logFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
     const methods = frames.map((f) => f.method);
     assert.ok(methods.includes("session/resume"), "follow-up goes through session/resume");
     const send = frames.filter((f) => f.method === "session/send").pop();
-    assert.deepEqual(send.params.modelSelection, { providerId: "mockprov", modelId: "m1" });
+    // an explicit user choice rides on the model selection (agent engine)
+    assert.deepEqual(send.params.modelSelection, { providerId: "mockprov", modelId: "m1", options: { reasoningLevel: "high" } });
   } finally {
     delete process.env.FAKE_LOG;
     await disposeManager(mgr);
