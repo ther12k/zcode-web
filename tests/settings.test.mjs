@@ -108,3 +108,33 @@ test("regenerateAgentProviderConfig writes the v4 translation", () => {
   assert.deepEqual(v4.config.modelConfigRules.providerModelRules[0].config.optionSpecs.reasoningLevel.values, ["a", "b"]);
   assert.deepEqual(v4.config.defaultModelSelection, { providerId: "prov", modelId: "m" });
 });
+
+test("edits preserve unknown provider/model fields the editor does not model", () => {
+  writeCfg({
+    provider: {
+      rich: {
+        name: "Rich", kind: "openai", customFlag: true,
+        options: { apiKey: "k", baseURL: "https://r/v1", maxRetries: 7, extraHeader: "x" },
+        models: {
+          m1: { name: "M1", temperature: 0.2, maxTokens: 8192 },
+        },
+      },
+    },
+  });
+  const r = writeSettings(configPath, {
+    providers: [
+      // editor-shaped edit: only id/kind/baseURL + model id (name cleared)
+      { id: "rich", name: "Renamed", kind: "openai", baseURL: "https://r/v2", models: [{ id: "m1", name: "", reasoningVariants: [] }] },
+    ],
+  });
+  assert.equal(r.error, undefined);
+  const cfg = JSON.parse(readFileSync(configPath, "utf8"));
+  const p = cfg.provider.rich;
+  assert.equal(p.customFlag, true, "unknown provider-level field survives");
+  assert.equal(p.options.maxRetries, 7, "unknown option survives");
+  assert.equal(p.options.extraHeader, "x");
+  assert.equal(p.options.baseURL, "https://r/v2", "edited field DOES change");
+  assert.equal(p.models.m1.temperature, 0.2, "unknown model field survives");
+  assert.equal(p.models.m1.maxTokens, 8192);
+  assert.equal(p.models.m1.name, undefined, "cleared display name stays cleared");
+});

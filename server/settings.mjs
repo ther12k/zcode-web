@@ -124,9 +124,13 @@ export function writeSettings(configPath, payload) {
   }
   const previous = cfg.provider || {};
   // apiKey handling: omitted key on an EXISTING provider keeps the old key
-  // (the browser never sees keys, so an edit session cannot echo them back)
+  // (the browser never sees keys, so an edit session cannot echo them back).
+  // Round-trip preservation: the editor only models known fields — any
+  // PREVIOUS provider/model fields it does not model (extra options, custom
+  // model settings) survive the edit instead of being normalized away.
   for (const [id, next] of Object.entries(clean.providers)) {
-    const prevKey = previous[id]?.options?.apiKey;
+    const prev = previous[id];
+    const prevKey = prev?.options?.apiKey;
     const incoming = payload.providers.find((p) => p.id === id);
     if (incoming?.apiKey === undefined && typeof prevKey === "string" && prevKey) {
       next.options.apiKey = prevKey;
@@ -136,8 +140,31 @@ export function writeSettings(configPath, payload) {
     // a provider with NO resolvable key (new or old) is still allowed — the
     // CLI surfaces its own provider_not_configured error at turn time — but
     // require it explicitly for NEW providers so the common case fails fast
-    if (!previous[id] && !next.options.apiKey) {
+    if (!prev && !next.options.apiKey) {
       return { error: Object.assign(new Error(`provider "${id}": apiKey is required for a new provider`), { status: 400 }) };
+    }
+    if (prev && typeof prev === "object") {
+      // only fields the editor does NOT model survive; modeled-but-cleared
+      // (e.g. an emptied display name) must stay cleared
+      const skipProvider = new Set(["name", "kind", "options", "models"]);
+      for (const [k, v] of Object.entries(prev)) {
+        if (!skipProvider.has(k)) next[k] = v; // unknown provider-level fields survive
+      }
+      if (prev.options && typeof prev.options === "object") {
+        const skipOptions = new Set(["apiKey", "baseURL"]);
+        for (const [k, v] of Object.entries(prev.options)) {
+          if (!skipOptions.has(k)) next.options[k] = v; // extra option keys survive
+        }
+      }
+      if (prev.models && typeof prev.models === "object") {
+        const skipModel = new Set(["name", "reasoning"]);
+        for (const [mid, prevModel] of Object.entries(prev.models)) {
+          if (!next.models[mid] || !prevModel || typeof prevModel !== "object") continue;
+          for (const [k, v] of Object.entries(prevModel)) {
+            if (!skipModel.has(k)) next.models[mid][k] = v; // extra model fields survive
+          }
+        }
+      }
     }
   }
   cfg.provider = clean.providers;
