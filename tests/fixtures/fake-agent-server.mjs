@@ -35,7 +35,7 @@ const evSeq = { n: 0 };
 let sessionCounter = 0;
 const sessions = new Map(); // sessionId -> { turnActive, scenario, mode }
 let turnTimer = null;
-// id -> permission kind, for server-initiated requests awaiting answers
+// id -> toolName, for server-initiated requests awaiting answers
 const permAnswerIds = new Map();
 let pendingPermCounter = 0;
 
@@ -57,13 +57,27 @@ const runTurn = (sessionId, content) => {
   const scenario = readScenario();
   s.turnActive = true;
   // permission round-trip probe: a send whose content asks for "wf-confirm"
-  // makes the fake escalate the two workflow run confirmations (plus one
-  // foreign kind) as server-initiated requests; the host's answers come back
-  // as ordinary response frames and are logged as __permAnswer pseudo-frames
+  // makes the fake escalate the workflow run confirmations (plus one foreign
+  // tool) as server-initiated requests in the REAL wire shape (toolName, not
+  // the internal kind); the host's answers come back as ordinary response
+  // frames and are logged as __permAnswer pseudo-frames
   if (/wf-confirm/.test(String(content))) {
-    for (const kind of ["createWorkflow", "resumeWorkflowRun", "bash"]) {
-      emit({ id: 9000 + pendingPermCounter, method: "interaction/requestPermission", params: { kind } });
-      permAnswerIds.set(9000 + pendingPermCounter, kind);
+    for (const toolName of ["CreateWorkflow", "AmendWorkflow", "ResumeWorkflowRun", "Bash"]) {
+      emit({
+        id: 9000 + pendingPermCounter,
+        method: "interaction/requestPermission",
+        params: {
+          requestId: `perm_${9000 + pendingPermCounter}`,
+          sessionId,
+          toolCallId: `call_${9000 + pendingPermCounter}`,
+          toolName,
+          reason: `probe:${toolName}`,
+          riskLevel: "low",
+          input: {},
+          options: [],
+        },
+      });
+      permAnswerIds.set(9000 + pendingPermCounter, toolName);
       pendingPermCounter += 1;
     }
   }
@@ -264,7 +278,7 @@ process.stdin.on("data", (chunk) => {
     // server-initiated permission requests — log them as pseudo-frames
     if (frame.id === undefined || !frame.method) {
       if (frame.id !== undefined && permAnswerIds.has(frame.id) && frame.result) {
-        log({ method: "__permAnswer", params: { kind: permAnswerIds.get(frame.id), ...frame.result } });
+        log({ method: "__permAnswer", params: { toolName: permAnswerIds.get(frame.id), ...frame.result } });
         permAnswerIds.delete(frame.id);
       }
       continue;

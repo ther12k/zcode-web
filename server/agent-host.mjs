@@ -215,11 +215,13 @@ export class AgentHost {
       // The workflow run confirmations are always-ask on the protocol (any
       // permission mode asks). The desktop answers them with a dialog; this
       // bridge has none, and denying means web sessions could NEVER run a
-      // workflow. Auto-allow exactly the two run-affecting kinds (create/
-      // amend + resume); every other escalation stays denied. ZCODE_AGENT_DWF=0
-      // — the same switch that disables the tool cluster — restores deny.
-      const kind = String(params?.kind || params?.permission || "");
-      if (process.env.ZCODE_AGENT_DWF !== "0" && (kind === "createWorkflow" || kind === "resumeWorkflowRun")) {
+      // workflow. Auto-allow exactly the run-affecting tools of the workflow
+      // family (the wire params identify the call by toolName); every other
+      // escalation stays denied. ZCODE_AGENT_DWF=0 — the same switch that
+      // disables the tool cluster — restores deny.
+      const tool = String(params?.toolName || "");
+      const isWorkflowRunConfirmation = tool === "CreateWorkflow" || tool === "AmendWorkflow" || tool === "ResumeWorkflowRun";
+      if (process.env.ZCODE_AGENT_DWF !== "0" && isWorkflowRunConfirmation) {
         return { decision: "allow" };
       }
       // The web bridge does not mediate permission prompts. Session MODE
