@@ -623,7 +623,8 @@ export function App() {
                   try {
                     const r = await client.compactSession(activeSessionId);
                     if (r.engine === "prompt") notify("Compaction started — it will finish like a regular turn.");
-                    else notify(r.state === "already_running" ? "A compaction is already running." : "Session history compacted.");
+                    else if (r.state === "already_running") notify("A compaction is already running.");
+                    else notify("Compaction started — the summary lands in this session when the turn completes.");
                   } catch (e) {
                     notify(e instanceof Error ? `Compact failed: ${e.message}` : "Compact failed.", "error");
                   } finally {

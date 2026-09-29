@@ -1897,7 +1897,7 @@ test("session menu offers history compaction and reports the result", async ({ p
   const item = page.getByRole("menuitem", { name: "Compact history" });
   await expect(item).toBeVisible();
   await item.click();
-  await expect(page.locator(".toast")).toContainText("compacted", { timeout: 8000 });
+  await expect(page.locator(".toast")).toContainText("Compaction started", { timeout: 8000 });
   assert.ok(compactCall, "compact POST fired");
   assert.equal((compactCall as { id: string }).id, sessionId);
 });

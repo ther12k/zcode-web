@@ -253,7 +253,7 @@ test("agent engine: compact goes through strict resume + session/compact, busy s
     // compact after the turn: strict resume + the protocol call
     const r = await mgr.compactSession({ sessionId, cwd: ROOT, instructions: "keep decisions" });
     assert.equal(r.engine, "agent");
-    assert.equal(r.result.compact.state, "completed");
+    assert.equal(r.result.compact.state, "accepted", "protocol compact is async fire-and-forget");
 
     // unknown session id must NOT silently create a fresh session
     await assert.rejects(

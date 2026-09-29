@@ -128,7 +128,7 @@ const handlers = {
     return {
       response: params.instructions ? `compacted with: ${params.instructions}` : "compacted",
       snapshot: { protocol: { name: "ZCode Protocol", version: 1 } },
-      compact: { state: "completed" },
+      compact: { state: "accepted" },
     };
   },
   "session/close": (params) => {
