@@ -2141,3 +2141,49 @@ describe("session fork route (prompt engine)", () => {
     assert.equal(unknown.status, 404);
   });
 });
+
+// Workflow artifact read faces are agent-engine-only like fork; the route
+// family shares the store resolution / roots guard.
+describe("workflow artifacts routes (prompt engine)", () => {
+  it("answers 501 for known sessions, 404 for unknown ones, 400 for bad ids", async () => {
+    const chat = await fetch(`${BASE}/api/chat`, {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({ text: "wf setup", cwd: ws, mode: "plan" }),
+    });
+    const accepted = await chat.json();
+    const jobId = accepted.jobId;
+    await (async () => {
+      const deadline = Date.now() + 15000;
+      while (Date.now() < deadline) {
+        const j = await (await fetch(`${BASE}/api/jobs/${jobId}`, { headers: auth })).json();
+        if (j.status && j.status !== "running" && j.status !== "queued") return;
+        await new Promise((r) => setTimeout(r, 150));
+      }
+    })();
+    const job = await (await fetch(`${BASE}/api/jobs/${jobId}`, { headers: auth })).json();
+
+    const { DatabaseSync } = await import("node:sqlite");
+    const dbDir = join(home, "cli", "db");
+    mkdirSync(dbDir, { recursive: true });
+    const db = new DatabaseSync(join(dbDir, "db.sqlite"));
+    db.exec(`CREATE TABLE IF NOT EXISTS session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT);`);
+    db.prepare("INSERT OR REPLACE INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)")
+      .run(job.sessionId, "wf test", ws, Date.now(), Date.now());
+    db.close();
+
+    const runs = await fetch(`${BASE}/api/sessions/${job.sessionId}/workflow-runs`, { headers: auth });
+    assert.equal(runs.status, 501);
+    assert.equal((await runs.json()).code, "ENGINE_UNSUPPORTED");
+
+    const artifacts = await fetch(`${BASE}/api/sessions/${job.sessionId}/workflow-runs/run_1/artifacts`, { headers: auth });
+    assert.equal(artifacts.status, 501);
+
+    const unknown = await fetch(`${BASE}/api/sessions/sess_nope_not_a_real/workflow-runs`, { headers: auth });
+    assert.equal(unknown.status, 404);
+
+    // encoded path separators in ids are rejected before any protocol call
+    const badArtifact = await fetch(`${BASE}/api/sessions/${job.sessionId}/workflow-runs/run_1/artifacts/${encodeURIComponent("a/b")}?version=1`, { headers: auth });
+    assert.equal(badArtifact.status, 400);
+  });
+});

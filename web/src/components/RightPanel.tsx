@@ -4,15 +4,16 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   CheckCircle2, ChevronDown, CircleDot, Code2, Eye, FileCode2, FileDiff, FolderClosed, GitBranch,
-  Globe, ListChecks, ListTree, LoaderCircle, Maximize2, Minimize2, Monitor, PanelBottom, Play, RefreshCw, Smartphone, Target,
+  Globe, ListChecks, ListTree, LoaderCircle, Maximize2, Minimize2, Monitor, PanelBottom, Play, RefreshCw, Smartphone, Target, Workflow,
 } from "lucide-react";
 import { IconButton, relativeTime } from "../ui";
 import { IssueInspector, useGithubIssue } from "./IssueInspector";
+import { WorkflowArtifactsTab } from "./WorkflowArtifacts";
 import { issueKey, type IssueIdentity, type ScannedIssueRef } from "../lib/issueRefs";
 import type { ApiClient, TodoItem } from "../api/client";
 import { DiffViewerModal, parseUnifiedDiff, type ParsedDiff } from "./DiffViewer";
 
-type Tab = "overview" | "preview" | "code" | "changes" | "issues";
+type Tab = "overview" | "preview" | "code" | "changes" | "issues" | "workflow";
 
 function authHeaders() {
   return { authorization: `Bearer ${localStorage.getItem("zcode-web-token") || ""}` };
@@ -44,7 +45,7 @@ function gitStatusLabel(code: string, long: boolean): string {
   return raw || "changed";
 }
 
-export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleExpanded, refreshKey = 0, runBusy = false, runStartedAt = null, sessionTitle, branch: branchProp, client, issues = [], selectedIssue = null, onAddToPrompt, todos }: {
+export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleExpanded, refreshKey = 0, runBusy = false, runStartedAt = null, sessionTitle, branch: branchProp, client, issues = [], selectedIssue = null, onAddToPrompt, todos, sessionId = null }: {
   cwd: string;
   onCollapse: () => void;
   goal?: Goal;
@@ -68,6 +69,8 @@ export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleEx
   /** full-width layout (`.preview-expanded` on the workspace grid) */
   expanded?: boolean;
   onToggleExpanded?: () => void;
+  /** open conversation — scopes the workflow artifacts tab (null = fresh chat) */
+  sessionId?: string | null;
 }) {
   const [tab, setTab] = useState<Tab>("overview");
   const [mobile, setMobile] = useState(false);
@@ -105,6 +108,11 @@ export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleEx
               {issues.length > 0 && <span className="panel-tab-badge">{issues.length}</span>}
             </button>
           )}
+          {sessionId && (
+            <button role="tab" aria-selected={tab === "workflow"} className={`panel-tab ${tab === "workflow" ? "active" : ""}`} onClick={() => setTab("workflow")}>
+              <Workflow size={14} /><span>Artifacts</span>
+            </button>
+          )}
         </div>
         <div className="panel-actions">
           {onToggleExpanded && (
@@ -120,6 +128,7 @@ export function RightPanel({ cwd, onCollapse, goal, expanded = false, onToggleEx
           goChanges={() => setTab("changes")} goFiles={() => setTab("code")} />
       )}
       {tab === "preview" && previewCap?.enabled && <PreviewTab cwd={cwd} mobile={mobile} onMobile={setMobile} cap={previewCap} />}
+      {tab === "workflow" && sessionId && <WorkflowArtifactsTab client={client} sessionId={sessionId} refreshKey={refreshKey} />}
       {tab === "code" && <CodeTab cwd={cwd} refreshKey={refreshKey} />}
       {tab === "changes" && <ChangesTab cwd={cwd} refreshKey={refreshKey} />}
       {tab === "issues" && showIssuesTab && (

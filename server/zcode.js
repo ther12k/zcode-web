@@ -652,6 +652,40 @@ export class JobManager {
     }
   }
 
+  /** Read-only dynamic-workflow faces (agent engine only): runs list,
+   *  artifacts of a run, board report items, and content bytes. These are
+   *  journal queries — deliberately NOT busy-guarded; reading while a turn
+   *  streams is the normal case (live boards). */
+  #requireAgent(cwd, sessionId) {
+    if (!this.agentHosts) {
+      throw Object.assign(new Error("workflow artifacts require the agent engine"), { status: 501, code: "ENGINE_UNSUPPORTED" });
+    }
+    return this.agentHosts.acquire(cwd).then((host) => host.ensureReadSession(sessionId).then(() => host));
+  }
+
+  async workflowRuns({ sessionId, cwd }) {
+    const host = await this.#requireAgent(cwd, sessionId);
+    const r = await host.workflowRuns(sessionId);
+    return { engine: "agent", runs: Array.isArray(r?.runs) ? r.runs : [] };
+  }
+
+  async workflowRunArtifacts({ sessionId, cwd, runId }) {
+    const host = await this.#requireAgent(cwd, sessionId);
+    const r = await host.workflowRunArtifacts(sessionId, runId);
+    return { engine: "agent", artifacts: Array.isArray(r?.artifacts) ? r.artifacts : [] };
+  }
+
+  async workflowArtifactData({ sessionId, cwd, runId, artifactId, afterSequence }) {
+    const host = await this.#requireAgent(cwd, sessionId);
+    const r = await host.workflowRunArtifactData(sessionId, runId, artifactId, afterSequence);
+    return { engine: "agent", items: Array.isArray(r?.items) ? r.items : [], hasMore: !!r?.hasMore };
+  }
+
+  async readWorkflowArtifact({ sessionId, cwd, runId, artifactId, version }) {
+    const host = await this.#requireAgent(cwd, sessionId);
+    return host.readWorkflowArtifact(sessionId, runId, artifactId, version);
+  }
+
   // Bounded fallback when a native stop never produces a terminal event:
   // the run verdict is cancelled (the stop WAS requested); any events that
   // arrive later are recorded but cannot resurrect the job.

@@ -1947,3 +1947,92 @@ test("assistant turns offer Fork from here and open the forked session", async (
   assert.equal((forkCall as { id: string }).id, "sess_forkparent000000000000000000000");
   assert.deepEqual((forkCall as { body: unknown }).body, { messageId: "msg_boundary_1" });
 });
+
+// Workflow artifacts tab: the right-panel inspector lists the session's
+// workflow runs and their artifacts (mocked backend; engine/busy paths are
+// covered by the unit suites). Table + markdown renderers are exercised.
+test("workflow artifacts tab lists runs and renders table + markdown artifacts", async ({ page }) => {
+  const SID = "sess_wfart00000000000000000000000000";
+  await page.route(/\/api\/sessions\/sess_.+\?limit=/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        session: { id: SID, title: "wf artifacts e2e" },
+        transcript: [{ id: "msg_u1", role: "user", text: "run the workflow", timeline: [] }],
+        total: 1,
+        hasMore: false,
+      }),
+    });
+  });
+  await page.route(/\/api\/sessions\/.+\/workflow-runs$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        engine: "agent",
+        runs: [{ runId: "dwf_run1", label: "deploy workflow", status: "completed", updatedAt: Date.now() - 60_000, resumable: false }],
+      }),
+    });
+  });
+  await page.route(/\/api\/sessions\/.+\/workflow-runs\/.+\/artifacts$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        engine: "agent",
+        artifacts: [
+          { id: "summary", kind: "markdown", title: "Summary document", version: 1, versions: [{ version: 1, bytes: 28, publishedAt: 1 }], itemCount: 0, primary: true },
+          { id: "latency", kind: "table", title: "Latency by step", version: 1, versions: [{ version: 1, publishedAt: 2 }], spec: { columns: [{ field: "step", label: "Step" }, { field: "ms", label: "Latency", unit: "ms" }], key: "step" }, itemCount: 3 },
+        ],
+      }),
+    });
+  });
+  await page.route(/\/api\/sessions\/.+\/workflow-runs\/.+\/artifacts\/.+/, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.has("afterSequence") || url.searchParams.get("view") === "data") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          engine: "agent",
+          items: [
+            { sequence: 1, siteId: "report#1", ordinal: 0, item: { step: "fetch", ms: 120 } },
+            { sequence: 2, siteId: "report#2", ordinal: 1, item: { step: "parse", ms: 45 } },
+            { sequence: 3, siteId: "report#3", ordinal: 2, item: { step: "fetch", ms: 98 } },
+          ],
+          hasMore: false,
+        }),
+      });
+    } else {
+      await route.fulfill({ status: 200, contentType: "text/markdown", body: "# Summary\n\nThe workflow finished." });
+    }
+  });
+
+  await page.goto(`/w/default/s/${SID}`);
+  await page.waitForLoadState("domcontentloaded");
+  await expect(page.locator(".chat-loader")).toBeHidden({ timeout: 5000 });
+  await page.getByLabel("Show preview panel").last().click();
+
+  await page.getByRole("tab", { name: "Artifacts" }).click();
+  await expect(page.locator(".wf-run-row")).toHaveText(/deploy workflow/);
+  await page.locator(".wf-run-row").click();
+
+  // deliverable first, kind + version + item counts on the cards
+  await expect(page.locator(".wf-artifact-list .wf-artifact-card").first()).toContainText("Deliverable");
+  await expect(page.locator(".wf-artifact-card", { hasText: "Latency by step" })).toContainText("3 items");
+
+  // the table board renders report items with key-dedup (fetch appears once, latest value)
+  await page.locator(".wf-artifact-card", { hasText: "Latency by step" }).click();
+  const table = page.locator(".wf-modal .wf-table");
+  await expect(table).toBeVisible({ timeout: 8000 });
+  await expect(table.locator("tbody tr")).toHaveCount(2);
+  await expect(table.locator("tbody tr").first()).toContainText("fetch");
+  await expect(table.locator("tbody tr").first()).toContainText("98");
+  await page.getByLabel("Close artifact").click();
+
+  // the markdown deliverable opens as rendered markdown
+  await page.locator(".wf-artifact-card", { hasText: "Summary document" }).click();
+  await expect(page.locator(".wf-modal .markdown")).toContainText("The workflow finished.", { timeout: 8000 });
+  await page.getByLabel("Close artifact").click();
+});

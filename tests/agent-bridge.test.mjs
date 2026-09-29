@@ -328,3 +328,61 @@ test("agent engine: fork goes through strict resume + session/fork with message 
     await disposeManager(mgr);
   }
 });
+
+test("agent engine: workflow artifact read faces (runs, artifacts, data, chunked content)", async () => {
+  writeFileSync(scenarioFile, "plain");
+  const mgr = newManager();
+  try {
+    const { job } = mgr.start({ text: "first", sessionId: null, cwd: ROOT, mode: "build", model: null });
+    await waitFor(() => job.lines.find((l) => l.kind === "done"), 15_000, "first done");
+    const sessionId = job.sessionId;
+
+    // runs list from the journal read face
+    const runs = await mgr.workflowRuns({ sessionId, cwd: ROOT });
+    assert.equal(runs.engine, "agent");
+    assert.equal(runs.runs.length, 1);
+    assert.equal(runs.runs[0].status, "completed");
+    const runId = runs.runs[0].runId;
+
+    // artifacts: primary markdown (2 versions) + table with spec
+    const arts = await mgr.workflowRunArtifacts({ sessionId, cwd: ROOT, runId });
+    assert.equal(arts.artifacts.length, 2);
+    const md = arts.artifacts.find((a) => a.id === "summary");
+    const table = arts.artifacts.find((a) => a.id === "latency");
+    assert.equal(md.primary, true);
+    assert.equal(md.versions.length, 2);
+    assert.deepEqual(table.spec.columns.map((c) => c.field), ["step", "ms"]);
+
+    // board report items (key-dedup happens client-side; raw items here)
+    const data = await mgr.workflowArtifactData({ sessionId, cwd: ROOT, runId, artifactId: "latency" });
+    assert.equal(data.items.length, 3);
+    assert.deepEqual(data.items[0].item, { step: "fetch", ms: 120 });
+
+    // content bytes assembled across chunks (force 2 chunks with tiny limits
+    // via direct host call at 16-byte chunks)
+    const host = mgr.agentHosts.hosts.get(ROOT);
+    const full = await host.readWorkflowArtifact(sessionId, runId, "summary", 2);
+    assert.equal(full.data.toString("utf8"), `# Fixture deliverable\n\nversion 2 for ${sessionId}`);
+    assert.equal(full.mediaType, "text/markdown");
+    // and the manager-level wrapper returns the same
+    const viaMgr = await mgr.readWorkflowArtifact({ sessionId, cwd: ROOT, runId, artifactId: "summary", version: 2 });
+    assert.equal(viaMgr.data.length, full.data.length);
+
+    // reads never create phantom sessions
+    await assert.rejects(
+      () => mgr.workflowRuns({ sessionId: "sess_unknown_000000000000000000000000", cwd: ROOT }),
+      /unknown session/,
+    );
+
+    // prompt-engine managers refuse with 501 (no agent hosts)
+    const promptMgr = new JobManager();
+    // JobManager reads the engine at construction; simulate by deleting hosts
+    promptMgr.agentHosts = null;
+    await assert.rejects(
+      () => promptMgr.workflowRuns({ sessionId, cwd: ROOT }),
+      (e) => e.status === 501 && e.code === "ENGINE_UNSUPPORTED",
+    );
+  } finally {
+    await disposeManager(mgr);
+  }
+});

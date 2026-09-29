@@ -4,6 +4,7 @@
 // server/agent-host.mjs):
 //   runtime/capabilities, session/create, session/resume, session/setMode,
 //   session/send, session/stop, session/compact, session/fork, session/close
+//   v4/conversation/workflowRuns|workflowRunArtifacts|workflowRunArtifactData|Read
 // plus the server-initiated requests a host MUST answer
 // (session/requestRuntimePreferences).
 //
@@ -152,6 +153,82 @@ const handlers = {
   "session/close": (params) => {
     sessions.delete(params.sessionId);
     return { closed: true };
+  },
+  // v4 conversation read faces for workflow artifacts (journal-backed).
+  // Deterministic fixture: ONE completed run per session with two artifacts —
+  // a primary markdown file (2 versions) and a latency table fed by reports.
+  "v4/conversation/workflowRuns": (params) => {
+    if (!sessions.has(params.sessionId)) {
+      return { __error: { code: -32001, message: `unknown session ${params.sessionId}` } };
+    }
+    return {
+      runs: [{
+        runId: `dwf_${params.sessionId}`,
+        label: "fixture run",
+        updatedAt: Date.now(),
+        status: "completed",
+        resumable: false,
+      }],
+    };
+  },
+  "v4/conversation/workflowRunArtifacts": (params) => {
+    if (!sessions.has(params.sessionId)) {
+      return { __error: { code: -32001, message: `unknown session ${params.sessionId}` } };
+    }
+    const markdownBytes = Buffer.from(`# Fixture deliverable\n\nversion 2 for ${params.sessionId}`).length;
+    return {
+      artifacts: [
+        {
+          id: "summary",
+          kind: "markdown",
+          title: "Summary document",
+          version: 2,
+          versions: [
+            { version: 1, bytes: 30, publishedAt: 1 },
+            { version: 2, bytes: markdownBytes, publishedAt: 2, primary: true },
+          ],
+          itemCount: 0,
+          primary: true,
+        },
+        {
+          id: "latency",
+          kind: "table",
+          title: "Latency by step",
+          version: 1,
+          versions: [{ version: 1, publishedAt: 3 }],
+          spec: { columns: [{ field: "step", label: "Step" }, { field: "ms", label: "Latency", unit: "ms" }], key: "step" },
+          itemCount: 3,
+        },
+      ],
+    };
+  },
+  "v4/conversation/workflowRunArtifactData": (params) => {
+    const items = [
+      { sequence: 1, siteId: "report#1", ordinal: 0, item: { step: "fetch", ms: 120 } },
+      { sequence: 2, siteId: "report#2", ordinal: 1, item: { step: "parse", ms: 45 } },
+      { sequence: 3, siteId: "report#3", ordinal: 2, item: { step: "fetch", ms: 98 } },
+    ];
+    const after = typeof params.afterSequence === "number" ? params.afterSequence : -1;
+    const page = items.filter((i) => i.sequence > after);
+    return { items: page, hasMore: false };
+  },
+  "v4/conversation/workflowRunArtifactRead": (params) => {
+    if (params.artifactId !== "summary") {
+      return { __error: { code: -32002, message: `unknown artifact ${params.artifactId}` } };
+    }
+    const body = params.version >= 2
+      ? `# Fixture deliverable\n\nversion ${params.version} for ${params.sessionId}`
+      : "version 1 body";
+    const buf = Buffer.from(body, "utf8");
+    const offset = params.offset || 0;
+    const end = Math.min(offset + (params.limit || buf.length), buf.length);
+    const slice = buf.subarray(offset, end);
+    return {
+      dataBase64: slice.toString("base64"),
+      mediaType: "text/markdown",
+      totalBytes: buf.length,
+      nextOffset: end < buf.length ? end : null,
+    };
   },
 };
 

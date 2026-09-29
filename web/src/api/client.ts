@@ -40,6 +40,57 @@ export type AppConfig = {
   maxAttachments: number;
 };
 
+/** Dynamic-workflow run of a session (journal-backed summary). */
+export type WorkflowRunSummary = {
+  runId: string;
+  toolCallId?: string;
+  label?: string;
+  updatedAt?: number;
+  status: "completed" | "errored" | "pending" | "running" | "stopped";
+  stopReason?: string;
+  resumedFrom?: string;
+  supersededBy?: string;
+  failureCode?: string;
+  failureMessage?: string;
+  resumable: boolean;
+};
+
+/** One version of a user-facing workflow artifact. */
+export type WorkflowArtifactVersion = {
+  version: number;
+  title?: string;
+  description?: string;
+  contentType?: string;
+  bytes?: number;
+  sourcePath?: string;
+  publishedAt: number;
+  primary?: true;
+};
+
+/** A user-facing artifact a workflow run published (file/markdown content,
+ *  or a preset board fed by tagged report items). */
+export type WorkflowArtifact = {
+  id: string;
+  kind: "file" | "markdown" | "chart" | "table" | "metrics" | "board";
+  title?: string;
+  description?: string;
+  contentType?: string;
+  sourcePath?: string;
+  spec?: unknown;
+  version: number;
+  versions: WorkflowArtifactVersion[];
+  itemCount: number;
+  primary?: true;
+};
+
+/** One report item feeding a preset board (raw script value). */
+export type WorkflowArtifactItem = {
+  sequence: number;
+  siteId: string;
+  ordinal: number;
+  item: unknown;
+};
+
 export type ModelInfo = {
   ref: string;
   provider: string;
@@ -202,6 +253,12 @@ export class ApiClient {
     return payload as T;
   }
 
+  /** Authenticated fetch that does NOT parse JSON (binary/text bodies). */
+  raw(path: string): Promise<Response> {
+    const token = this.getToken();
+    return fetch(this.baseUrl + path, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+  }
+
   health() {
     return this.request<Health>("/api/health");
   }
@@ -268,6 +325,31 @@ export class ApiClient {
     return this.request<{ engine: "agent" | "prompt"; forkedSessionId: string | null; parentSessionId?: string; response?: string }>(
       `/api/sessions/${encodeURIComponent(sessionId)}/fork`,
       { method: "POST", body: JSON.stringify(messageId ? { messageId } : {}) },
+    );
+  }
+  workflowRuns(sessionId: string) {
+    return this.request<{ engine: string; runs: WorkflowRunSummary[] }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/workflow-runs`,
+    );
+  }
+  workflowRunArtifacts(sessionId: string, runId: string) {
+    return this.request<{ engine: string; artifacts: WorkflowArtifact[] }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/workflow-runs/${encodeURIComponent(runId)}/artifacts`,
+    );
+  }
+  workflowRunArtifactData(sessionId: string, runId: string, artifactId: string, afterSequence?: number) {
+    // ?view=data disambiguates the data endpoint from a versioned content
+    // read on the same path (initial page has no afterSequence to carry)
+    const q = `?view=data${afterSequence != null ? `&afterSequence=${afterSequence}` : ""}`;
+    return this.request<{ engine: string; items: WorkflowArtifactItem[]; hasMore: boolean }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/workflow-runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}${q}`,
+    );
+  }
+  /** Content bytes of a file/markdown artifact version (auth-header fetch;
+   *  callers turn the response into text or an object URL). */
+  workflowArtifactContent(sessionId: string, runId: string, artifactId: string, version: number) {
+    return this.raw(
+      `/api/sessions/${encodeURIComponent(sessionId)}/workflow-runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}?version=${version}`,
     );
   }
   cancel(jobId: string) {

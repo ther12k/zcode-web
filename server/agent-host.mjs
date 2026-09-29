@@ -314,6 +314,56 @@ export class AgentHost {
     }, 60_000);
   }
 
+  /** Read-only journal queries (v4 conversation face) only need the session
+   *  materialized on this host — a session we already hold (e.g. one with a
+   *  turn streaming right now) must NOT be resumed again just to be read. */
+  async ensureReadSession(sessionId) {
+    if (this.sessions.has(sessionId)) return;
+    await this.ensureSession({ resumeId: sessionId, strict: true });
+  }
+
+  /** Dynamic-workflow runs of a session (journal-backed, restart-durable).
+   *  Read-only: safe while a turn is running. */
+  async workflowRuns(sessionId) {
+    return this.client.request("v4/conversation/workflowRuns", { sessionId, limit: 64 }, 15_000);
+  }
+
+  /** User-facing artifacts a run published (full journal records: versions,
+   *  preset specs, report counts). Read-only. */
+  async workflowRunArtifacts(sessionId, runId) {
+    return this.client.request("v4/conversation/workflowRunArtifacts", { sessionId, runId }, 15_000);
+  }
+
+  /** Report items feeding a preset board (chart/table/metrics/board). */
+  async workflowRunArtifactData(sessionId, runId, artifactId, afterSequence) {
+    return this.client.request("v4/conversation/workflowRunArtifactData", {
+      sessionId, runId, artifactId,
+      ...(afterSequence != null ? { afterSequence } : {}),
+      limit: 500,
+    }, 15_000);
+  }
+
+  /** Full bytes of a content artifact version (file/markdown), assembled
+   *  from ≤512 KiB base64 chunks. Hard cap 15 MiB — the engine's own cap. */
+  async readWorkflowArtifact(sessionId, runId, artifactId, version) {
+    const chunks = [];
+    let offset = 0;
+    let mediaType = "application/octet-stream";
+    let totalBytes = 0;
+    for (let i = 0; i < 40; i++) {
+      const r = await this.client.request("v4/conversation/workflowRunArtifactRead", {
+        sessionId, runId, artifactId, version, offset, limit: 512 * 1024,
+      }, 30_000);
+      mediaType = typeof r?.mediaType === "string" && r.mediaType ? r.mediaType : mediaType;
+      totalBytes = Number(r?.totalBytes) || totalBytes;
+      if (typeof r?.dataBase64 === "string" && r.dataBase64) chunks.push(Buffer.from(r.dataBase64, "base64"));
+      if (typeof r?.nextOffset !== "number" || !r.nextOffset || r.nextOffset <= offset) break;
+      offset = r.nextOffset;
+      if (offset > 15 * 1024 * 1024) throw new Error("workflow artifact exceeds 15 MiB read cap");
+    }
+    return { data: Buffer.concat(chunks), mediaType, totalBytes };
+  }
+
   async close(sessionId) {
     this.sessions.delete(sessionId);
     try {

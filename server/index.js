@@ -1003,6 +1003,63 @@ async function handleApi(req, res, url) {
     }
   }
 
+  // Dynamic-workflow artifacts (agent engine only): journal-backed read
+  // faces behind REST. Ids go into protocol params, never paths — the CLI
+  // resolves them against its own journal, so a hostile id can only miss.
+  const wfRunsMatch = route.match(/^\/api\/sessions\/(sess_[A-Za-z0-9_-]+)\/workflow-runs$/);
+  const wfArtifactsMatch = route.match(/^\/api\/sessions\/(sess_[A-Za-z0-9_-]+)\/workflow-runs\/([^/]+)\/artifacts$/);
+  const wfArtifactMatch = route.match(/^\/api\/sessions\/(sess_[A-Za-z0-9_-]+)\/workflow-runs\/([^/]+)\/artifacts\/([^/]+)$/);
+  const wfIdOk = (id) => typeof id === "string" && id.length >= 1 && id.length <= 64 && !/[\/\\\u0000-\u001f]/.test(id);
+  if ((wfRunsMatch || wfArtifactsMatch || wfArtifactMatch) && req.method === "GET") {
+    const sessionId = (wfRunsMatch || wfArtifactsMatch || wfArtifactMatch)[1];
+    const runId = wfArtifactsMatch ? decodeURIComponent(wfArtifactsMatch[2]) : wfArtifactMatch ? decodeURIComponent(wfArtifactMatch[2]) : null;
+    const artifactId = wfArtifactMatch ? decodeURIComponent(wfArtifactMatch[3]) : null;
+    if ((runId && !wfIdOk(runId)) || (artifactId && !wfIdOk(artifactId))) {
+      return sendJson(res, 400, { error: "invalid run or artifact id" });
+    }
+    let sess;
+    try {
+      sess = store.get(sessionId);
+    } catch (e) {
+      if (e.code !== "DB_MISSING") return sendJson(res, 500, { error: e.message });
+    }
+    const cwd = sess?.directory;
+    if (!cwd || !insideAllowedRoots(realpathOf(cwd))) {
+      return sendJson(res, 404, { error: "session not found (or outside allowed roots)" });
+    }
+    try {
+      if (wfRunsMatch) {
+        const result = await jobs.workflowRuns({ sessionId, cwd });
+        return sendJson(res, 200, result);
+      }
+      if (wfArtifactsMatch) {
+        const result = await jobs.workflowRunArtifacts({ sessionId, cwd, runId });
+        return sendJson(res, 200, result);
+      }
+      // one artifact: ?version= content bytes | ?afterSequence= board items
+      const url = new URL(req.url, "http://localhost");
+      if (url.searchParams.has("afterSequence") || url.searchParams.get("view") === "data") {
+        const afterRaw = url.searchParams.get("afterSequence");
+        const afterSequence = afterRaw != null && /^\d+$/.test(afterRaw) ? Number(afterRaw) : undefined;
+        const result = await jobs.workflowArtifactData({ sessionId, cwd, runId, artifactId, afterSequence });
+        return sendJson(res, 200, result);
+      }
+      const versionRaw = url.searchParams.get("version");
+      const version = versionRaw && /^\d+$/.test(versionRaw) ? Number(versionRaw) : null;
+      if (!version) return sendJson(res, 400, { error: "version query param is required for content reads" });
+      const { data, mediaType, totalBytes } = await jobs.readWorkflowArtifact({ sessionId, cwd, runId, artifactId, version });
+      res.writeHead(200, {
+        "content-type": mediaType || "application/octet-stream",
+        "content-length": String(data.length),
+        "x-artifact-total-bytes": String(totalBytes),
+        "cache-control": "no-store",
+      });
+      return res.end(data);
+    } catch (e) {
+      return sendJson(res, e.status || 500, { error: e.message, code: e.code });
+    }
+  }
+
   if (route === "/api/chat" && req.method === "POST") {
     const body = JSON.parse(await readBody(req, 1024 * 1024));
     let text = String(body.text || "").trim();

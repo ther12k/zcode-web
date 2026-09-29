@@ -836,6 +836,7 @@ export function App() {
           <RightPanel
             cwd={cwd}
             refreshKey={panelRefreshKey}
+            sessionId={activeSessionId}
             runBusy={runBusy}
             sessionTitle={activeSession?.title}
             branch={branch}
