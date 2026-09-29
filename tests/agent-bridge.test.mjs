@@ -236,6 +236,12 @@ test("agent engine: resume path uses session/resume and model selection rides on
     const send = frames.filter((f) => f.method === "session/send").pop();
     // an explicit user choice rides on the model selection (agent engine)
     assert.deepEqual(send.params.modelSelection, { providerId: "mockprov", modelId: "m1", options: { reasoningLevel: "high" } });
+    // the workflow tool cluster is fail-closed: the host must opt in on BOTH
+    // create and resume, or the model never sees the workflow tools
+    const create = frames.find((f) => f.method === "session/create");
+    assert.equal(create.params.dynamicWorkflowEnabled, true, "session/create carries dynamicWorkflowEnabled");
+    const resume = frames.filter((f) => f.method === "session/resume").pop();
+    assert.equal(resume.params.dynamicWorkflowEnabled, true, "session/resume carries dynamicWorkflowEnabled");
   } finally {
     delete process.env.FAKE_LOG;
     await disposeManager(mgr);

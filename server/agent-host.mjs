@@ -232,10 +232,15 @@ export class AgentHost {
       const avail = result?.projection?.model?.available;
       if (Array.isArray(avail)) this.absorbModelLevels(sessionId, avail);
     };
+    // the dynamic-workflow tool cluster is FAIL-CLOSED on the protocol: the
+    // CLI registers it only when the host passes dynamicWorkflowEnabled on
+    // create/resume (the desktop is the policy decider — here, WE are).
+    // ZCODE_AGENT_DWF=0 is the kill switch.
+    const dwf = process.env.ZCODE_AGENT_DWF === "0" ? {} : { dynamicWorkflowEnabled: true };
     let sessionId;
     if (resumeId) {
       try {
-        const r = await this.client.request("session/resume", { sessionId: resumeId });
+        const r = await this.client.request("session/resume", { sessionId: resumeId, ...dwf });
         this.sessions.set(resumeId, { mode });
         captureLevels(r, resumeId);
         sessionId = resumeId;
@@ -249,6 +254,7 @@ export class AgentHost {
       const r = await this.client.request("session/create", {
         workspace: { workspacePath: this.cwd, workspaceKey: this.cwd },
         ...(mode ? { mode } : {}),
+        ...dwf,
       });
       sessionId = r?.sessionId ?? r?.session?.sessionId;
       if (!sessionId) throw new Error("agent-server did not return a sessionId");
