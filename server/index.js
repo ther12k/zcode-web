@@ -351,9 +351,11 @@ function builtinReasoningRules() {
 function deriveReasoningLevels(providerId, modelId, legacyModelCfg) {
   let levels = null;
   for (const rule of builtinReasoningRules()) {
+    // the registry matches model ids CASE-INSENSITIVELY (matchesRule with
+    // ignoreCase=true) — "GLM-5.3" must hit the lowercase glm-5.3 rules
     const matches = rule.provider
       ? rule.provider === providerId && rule.model === modelId
-      : (() => { try { return new RegExp(`^(?:${rule.match})$`).test(modelId); } catch { return false; } })();
+      : (() => { try { return new RegExp(`^(?:${rule.match})$`, "i").test(modelId); } catch { return false; } })();
     if (matches && Array.isArray(rule.values) && rule.values.length) levels = rule.values;
   }
   const variants = legacyModelCfg?.reasoning?.variants;

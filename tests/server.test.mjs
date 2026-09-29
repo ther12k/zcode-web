@@ -240,6 +240,13 @@ describe("reasoning levels (derived from builtin rules + legacy variants)", () =
     assert.deepEqual(by["exact-override"].reasoningLevels, ["only"], "exact provider/model rule wins over patterns");
     assert.deepEqual(by["custom-levels"].reasoningLevels, ["alpha", "beta"], "personal variants override builtin");
     assert.equal(by["custom-levels"].defaultReasoningLevel, "alpha");
+    // registry semantics: model ids match case-INSENSITIVELY
+    writeFileSync(join(home, "cli", "config.json"), JSON.stringify({
+      provider: { prov: { name: "Prov", kind: "openai-compatible", options: { apiKey: "k", baseURL: "https://example.invalid/v1" }, models: { "plain-1": {}, "Deep-Think-UP": {} } } },
+    }));
+    const upper = await (await fetch(`${BASE}/api/models`, { headers: auth })).json();
+    const upperModel = upper.models.find((m) => m.model === "Deep-Think-UP");
+    assert.deepEqual(upperModel.reasoningLevels, ["low", "high", "max"], "uppercase model id matches lowercase rules");
   });
 
   it("accepts a valid reasoningLevel on /api/chat and rejects unknown ones with the level list", async () => {
