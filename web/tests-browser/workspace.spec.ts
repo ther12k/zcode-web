@@ -1748,3 +1748,75 @@ test.describe("agent bridge engine (Path 2)", () => {
     await expect(page).toHaveURL(new RegExp(sessionUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), { timeout: 5000 });
   });
 });
+
+// Settings → AI provider tab: the provider manager. Mocked backend (the
+// server module has its own suite); this covers the UI contract — sanitized
+// read (no keys), add/edit/save round-trip payload, error surfacing, and the
+// model-picker refresh signal after a save.
+test("settings dialog manages providers end-to-end (sanitized read, save, refresh signal)", async ({ page }) => {
+  let savedPayload: unknown = null;
+  let modelsCalls = 0;
+  await page.route(/\/api\/settings$/, async (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          providers: [
+            {
+              id: "zai", name: "Z.AI", kind: "anthropic", baseURL: "https://api.z.ai/api/anthropic",
+              apiKeyConfigured: true,
+              models: [{ id: "glm-5.3", name: "GLM 5.3", reasoningVariants: [] }],
+            },
+          ],
+          defaultModel: "zai/glm-5.3",
+        }),
+      });
+    }
+    const body = route.request().postDataJSON();
+    if (body?.providers?.[0]?.id === "zai" && body.providers[1]?.id === "newprov") {
+      savedPayload = body;
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, models: [] }) });
+    }
+    return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: "bad payload" }) });
+  });
+  await page.route(/\/api\/models$/, async (route) => {
+    modelsCalls += 1;
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ models: [{ ref: "newprov/test-1", provider: "newprov", providerName: "New Prov", model: "test-1", isDefault: false }] }),
+    });
+  });
+
+  // open settings via the sidebar profile button (ZWUI-058 pattern)
+  await page.locator(".profile-button").click();
+  await expect(page.locator(".dialog")).toBeVisible();
+  await page.getByRole("button", { name: "AI provider" }).click();
+
+  // sanitized read: the existing provider renders with a "configured" hint
+  await expect(page.locator(".provider-editor legend").first()).toHaveText("zai");
+  await expect(page.locator(".provider-editor-key span")).toContainText("configured");
+
+  // add a provider + model and save
+  await page.getByRole("button", { name: /Add provider/ }).click();
+  const editors = page.locator(".provider-editor");
+  await expect(editors).toHaveCount(2);
+  await editors.nth(1).locator("input").nth(0).fill("newprov");
+  await editors.nth(1).locator("input").nth(1).fill("New Prov");
+  await editors.nth(1).locator(".provider-editor-url input").fill("https://api.newprov.example/v1");
+  await editors.nth(1).locator(".provider-editor-key input").fill("sk-test-123");
+  await editors.nth(1).locator(".provider-model-row input").nth(0).fill("test-1");
+  await editors.nth(1).locator(".provider-model-row input").nth(2).fill("low, high");
+  await page.getByRole("button", { name: /Save providers/ }).click();
+
+  await expect(page.locator(".provider-editor-saved")).toBeVisible({ timeout: 8000 });
+  assert.ok(savedPayload, "PUT /api/settings fired");
+  const sent = savedPayload as { providers: Array<{ id: string; apiKey?: string }>; defaultModel: string | null };
+  assert.equal(sent.providers[1].id, "newprov");
+  assert.equal(sent.providers[1].apiKey, "sk-test-123", "new key rides along on save");
+  assert.equal(sent.providers[0].apiKey, undefined, "existing provider's key is NOT echoed back");
+  // the save signals the composer to refresh the model list
+  await page.waitForTimeout(300);
+  assert.ok(modelsCalls >= 1, "model list re-fetched after save");
+});

@@ -873,7 +873,7 @@ export function App() {
         />
       )}
       {modal === "settings" && (
-        <SettingsDialog caps={caps} onClose={() => setModal(null)} onLogout={logout} />
+        <SettingsDialog caps={caps} client={client} onClose={() => setModal(null)} onLogout={logout} onProvidersSaved={() => window.dispatchEvent(new CustomEvent("zcode-providers-saved"))} />
       )}
       {renaming && activeSessionId && (
         <RenameDialog

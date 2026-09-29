@@ -185,6 +185,12 @@ export function ChatPanel({
   }, [client]);
 
   useEffect(() => { void loadModels(); }, [loadModels]);
+  // provider edits from the settings dialog invalidate the cached list
+  useEffect(() => {
+    const onSaved = () => void loadModels();
+    window.addEventListener("zcode-providers-saved", onSaved);
+    return () => window.removeEventListener("zcode-providers-saved", onSaved);
+  }, [loadModels]);
 
   // load transcript for an existing session
   const [historyLoading, setHistoryLoading] = useState(false);

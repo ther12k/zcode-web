@@ -50,6 +50,17 @@ export type ModelInfo = {
   isDefault: boolean;
 };
 
+/** Provider settings (server redacts API keys — apiKeyConfigured only). */
+export type ProviderSettings = {
+  id: string;
+  name: string;
+  kind: "openai" | "openai-compatible" | "anthropic";
+  baseURL: string;
+  apiKeyConfigured: boolean;
+  models: Array<{ id: string; name: string; reasoningVariants: string[] }>;
+};
+export type SettingsDoc = { providers: ProviderSettings[]; defaultModel: string | null };
+
 export type ProjectRoots = { roots: { path: string; projects: string[] }[] };
 
 export type SkillInfo = { name: string; description: string; scope: string };
@@ -195,6 +206,15 @@ export class ApiClient {
   }
   models() {
     return this.request<{ models: ModelInfo[] }>("/api/models");
+  }
+  settings() {
+    return this.request<SettingsDoc>("/api/settings");
+  }
+  saveSettings(doc: SettingsDoc & { providers: Array<ProviderSettings & { apiKey?: string }> }) {
+    return this.request<{ ok: boolean; models: ModelInfo[] }>("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify(doc),
+    });
   }
   projects() {
     return this.request<ProjectRoots>("/api/projects");

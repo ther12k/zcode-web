@@ -12,6 +12,7 @@ import { basename, dirname, extname, join, normalize, resolve, sep } from "node:
 import { fileURLToPath } from "node:url";
 
 import { JobManager, cliStatus, cliRuntimeStatus, config, uploadsDir } from "./zcode.js";
+import { readSettings, writeSettings, regenerateAgentProviderConfig } from "./settings.mjs";
 import { ContentSearchIndex, renameSession } from "./sessions.js";
 import { SessionStore } from "./sessions.js";
 import { githubCapability, fetchIssue, fetchComments, validOwner, validRepo } from "./github.js";
@@ -706,6 +707,31 @@ async function handleApi(req, res, url) {
 
   if (route === "/api/models" && req.method === "GET") {
     return sendJson(res, 200, { models: listModels() });
+  }
+
+  // Provider settings: manage the CLI's own config.json from the UI (the
+  // upstream web app's settings surface, adapted to our single-file config).
+  // Keys never leave the server; PUT accepts new keys per provider.
+  if (route === "/api/settings" && req.method === "GET") {
+    return sendJson(res, 200, readSettings(cliStatus().configPath));
+  }
+  if (route === "/api/settings" && req.method === "PUT") {
+    let body;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      return sendJson(res, 400, { error: "invalid JSON body" });
+    }
+    const configPath = cliStatus().configPath;
+    const result = writeSettings(configPath, body);
+    if (result.error) return sendJson(res, result.error.status || 400, { error: result.error.message });
+    if (config.bridgeEngine === "agent") {
+      // keep the translated registry config in lockstep — the agent host
+      // itself only regenerates at spawn; a live host's registry polls the
+      // file, so provider edits apply without a restart
+      regenerateAgentProviderConfig(config.zcodeHome);
+    }
+    return sendJson(res, 200, { ok: true, models: listModels() });
   }
 
   // Real ZCode skills, listed by the CLI itself (`skills list --json`).
