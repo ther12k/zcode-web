@@ -117,6 +117,20 @@ const handlers = {
     }
     return {};
   },
+  "session/compact": (params) => {
+    if (!sessions.has(params.sessionId)) {
+      return { __error: { code: -32001, message: `unknown session ${params.sessionId}` } };
+    }
+    const s = sessions.get(params.sessionId);
+    if (s.turnActive) {
+      return { __error: { code: -32030, message: "Cannot compact while a prompt is running" } };
+    }
+    return {
+      response: params.instructions ? `compacted with: ${params.instructions}` : "compacted",
+      snapshot: { protocol: { name: "ZCode Protocol", version: 1 } },
+      compact: { state: "completed" },
+    };
+  },
   "session/close": (params) => {
     sessions.delete(params.sessionId);
     return { closed: true };

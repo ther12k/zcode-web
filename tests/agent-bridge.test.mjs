@@ -241,3 +241,39 @@ test("agent engine: resume path uses session/resume and model selection rides on
     await disposeManager(mgr);
   }
 });
+
+test("agent engine: compact goes through strict resume + session/compact, busy sessions 409", async () => {
+  writeFileSync(scenarioFile, "plain");
+  const mgr = newManager();
+  try {
+    const { job } = mgr.start({ text: "first", sessionId: null, cwd: ROOT, mode: "build", model: null });
+    await waitFor(() => job.lines.find((l) => l.kind === "done"), 15_000, "first done");
+    const sessionId = job.sessionId;
+
+    // compact after the turn: strict resume + the protocol call
+    const r = await mgr.compactSession({ sessionId, cwd: ROOT, instructions: "keep decisions" });
+    assert.equal(r.engine, "agent");
+    assert.equal(r.result.compact.state, "completed");
+
+    // unknown session id must NOT silently create a fresh session
+    await assert.rejects(
+      () => mgr.compactSession({ sessionId: "sess_unknown_000000000000000000000000", cwd: ROOT }),
+      /unknown session/,
+    );
+    assert.equal(mgr.agentHosts.hosts.get(ROOT).sessions.has("sess_unknown_000000000000000000000000"), false,
+      "no phantom session created by a failed compact");
+
+    // busy session is rejected before any protocol call
+    writeFileSync(scenarioFile, "hold");
+    const { job: held } = mgr.start({ text: "hold", sessionId, cwd: ROOT, mode: "build", model: null });
+    await waitFor(() => held.lines.some((l) => l.line?.type === "turn.started"), 15_000, "held turn started");
+    await assert.rejects(
+      () => mgr.compactSession({ sessionId, cwd: ROOT }),
+      (e) => e.status === 409 && e.code === "SESSION_BUSY",
+    );
+    mgr.cancel(held.id);
+    await waitFor(() => held.lines.find((l) => l.kind === "done"), 10_000, "held settled");
+  } finally {
+    await disposeManager(mgr);
+  }
+});

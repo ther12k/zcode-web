@@ -223,8 +223,9 @@ export class AgentHost {
     return {};
   }
 
-  /** Wait for storage/registry startup, then create-or-resume a session. */
-  async ensureSession({ resumeId, mode }) {
+  /** Wait for storage/registry startup, then create-or-resume a session.
+   *  strict: a failed resume throws instead of creating a fresh session. */
+  async ensureSession({ resumeId, mode, strict = false }) {
     // storage migration can take a moment on first boot of a new CLI version
     await this.client.request("runtime/capabilities", {}, 30_000).catch(() => null);
     const captureLevels = (result, sessionId) => {
@@ -239,6 +240,7 @@ export class AgentHost {
         captureLevels(r, resumeId);
         sessionId = resumeId;
       } catch (e) {
+        if (strict) throw e;
         // unknown/expired session id → fall through to a fresh create
         this.log(`agent-host: resume ${resumeId} failed (${e.message}); creating fresh session`);
       }
@@ -286,6 +288,16 @@ export class AgentHost {
     } catch {
       return false;
     }
+  }
+
+  /** Compact the session's history (protocol session/compact). Requires the
+   *  session materialized on THIS host and no active turn. Compaction runs a
+   *  model summarization call, so the budget is minutes, not seconds. */
+  async compact(sessionId, instructions) {
+    return this.client.request("session/compact", {
+      sessionId,
+      ...(instructions ? { instructions } : {}),
+    }, 180_000);
   }
 
   async close(sessionId) {

@@ -2037,3 +2037,58 @@ describe("review follow-ups", () => {
     }
   });
 });
+
+
+// Session compact under the PROMPT engine: the endpoint resolves the session
+// from the store, guards roots, and launches a regular /compact job.
+describe("session compact (prompt engine)", () => {
+  it("starts a /compact job for a known session and rejects unknown/root-escaping ones", async () => {
+    // create a session through a normal chat turn (the fake CLI adopts it)
+    const chat = await fetch(`${BASE}/api/chat`, {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({ text: "compact setup", cwd: ws, mode: "plan" }),
+    });
+    const accepted = await chat.json();
+    const jobId = accepted.jobId;
+    await (async () => {
+      const deadline = Date.now() + 15000;
+      while (Date.now() < deadline) {
+        const j = await (await fetch(`${BASE}/api/jobs/${jobId}`, { headers: auth })).json();
+        if (j.status && j.status !== "running" && j.status !== "queued") return;
+        await new Promise((r) => setTimeout(r, 150));
+      }
+    })();
+    const job = await (await fetch(`${BASE}/api/jobs/${jobId}`, { headers: auth })).json();
+
+    // the fake CLI never writes the CLI store — plant the session row the
+    // compact route resolves (directory inside the allowed workspace root)
+    const { DatabaseSync } = await import("node:sqlite");
+    const dbDir = join(home, "cli", "db");
+    mkdirSync(dbDir, { recursive: true });
+    const db = new DatabaseSync(join(dbDir, "db.sqlite"));
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT);
+      CREATE TABLE IF NOT EXISTS message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, sequence INTEGER);
+      CREATE TABLE IF NOT EXISTS part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT, sequence INTEGER);
+    `);
+    db.prepare("INSERT OR REPLACE INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)")
+      .run(job.sessionId, "compact test", ws, Date.now(), Date.now());
+    db.close();
+
+    const compact = await fetch(`${BASE}/api/sessions/${job.sessionId}/compact`, {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(compact.status, 202);
+    const body = await compact.json();
+    assert.equal(body.engine, "prompt");
+    assert.match(body.jobId, /^[0-9a-f-]{36}$/);
+
+    const unknown = await fetch(`${BASE}/api/sessions/sess_nope_not_a_real/compact`, {
+      method: "POST", headers: { ...auth, "content-type": "application/json" }, body: "{}",
+    });
+    assert.equal(unknown.status, 404);
+  });
+});

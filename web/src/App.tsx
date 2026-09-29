@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, lazy, Suspense } from "react";
 import {
   Archive, ArrowDownWideNarrow, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Clock3, Eye, EyeOff, KeyRound,
-  FolderClosed, History, Keyboard, LoaderCircle, Menu, MoreHorizontal, PanelLeft, PanelRight, Pin, PinOff, Plus,
+  FolderClosed, FoldVertical, History, Keyboard, LoaderCircle, Menu, MoreHorizontal, PanelLeft, PanelRight, Pin, PinOff, Plus,
   Search, Settings2, SquarePen, Unplug, WandSparkles, X, GitBranch,
 } from "lucide-react";
 import { useNavigate, useParams } from "@tanstack/react-router";
@@ -336,6 +336,7 @@ export function App() {
       .then((r) => setSessions(r.sessions))
       .catch(() => setSessions([]));
   }, [cwd, client]);
+  const [compacting, setCompacting] = useState(false);
   const [renaming, setRenaming] = useState<{ title: string; busy: boolean } | null>(null);
 
 
@@ -614,6 +615,22 @@ export function App() {
                 </button>
                 <button role="menuitem" onClick={() => { setRenaming({ title: activeSession?.title || "", busy: false }); setTaskMenu(false); }}>
                   <SquarePen size={14} />Rename session
+                </button>
+                <button role="menuitem" disabled={compacting} onClick={() => void (async () => {
+                  setTaskMenu(false);
+                  setCompacting(true);
+                  notify("Compacting session history…");
+                  try {
+                    const r = await client.compactSession(activeSessionId);
+                    if (r.engine === "prompt") notify("Compaction started — it will finish like a regular turn.");
+                    else notify(r.state === "already_running" ? "A compaction is already running." : "Session history compacted.");
+                  } catch (e) {
+                    notify(e instanceof Error ? `Compact failed: ${e.message}` : "Compact failed.", "error");
+                  } finally {
+                    setCompacting(false);
+                  }
+                })()}>
+                  {compacting ? <LoaderCircle size={14} className="spin" /> : <FoldVertical size={14} />}Compact history
                 </button>
                 <button role="menuitem" onClick={() => { updatePrefs({ hiddenSessions: prefs.hiddenSessions.includes(activeSessionId) ? prefs.hiddenSessions.filter((x) => x !== activeSessionId) : [...prefs.hiddenSessions, activeSessionId] }); notify("Hidden on this device."); setTaskMenu(false); }}>
                   <Archive size={14} />{prefs.hiddenSessions.includes(activeSessionId) ? "Unhide on this device" : "Hide on this device"}

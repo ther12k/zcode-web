@@ -600,6 +600,29 @@ export class JobManager {
     }
   }
 
+  /** Compact a session's history (context maintenance). Engine-aware:
+   *  agent → protocol session/compact on the session's host (session must be
+   *  idle; compaction itself runs a summarization turn inside the CLI);
+   *  prompt → a regular one-shot job whose prompt text IS the /compact
+   *  slash command, followed via the normal job/SSE surface. */
+  async compactSession({ sessionId, cwd, instructions }) {
+    if (!sessionId) throw Object.assign(new Error("sessionId is required"), { status: 400 });
+    const active = this.bySession.get(sessionId);
+    if (active && !TERMINAL.has(active.status)) {
+      throw Object.assign(new Error("Session is busy with an active run"), { status: 409, code: "SESSION_BUSY" });
+    }
+    const text = instructions ? `/compact ${instructions}` : "/compact";
+    if (this.agentHosts) {
+      const host = await this.agentHosts.acquire(cwd);
+      // strict: compacting must target THIS session — never a fresh one
+      await host.ensureSession({ resumeId: sessionId, strict: true });
+      const result = await host.compact(sessionId, instructions);
+      return { engine: "agent", result };
+    }
+    const { job } = this.start({ text, sessionId, cwd, mode: "plan" });
+    return { engine: "prompt", jobId: job.id };
+  }
+
   // Bounded fallback when a native stop never produces a terminal event:
   // the run verdict is cancelled (the stop WAS requested); any events that
   // arrive later are recorded but cannot resurrect the job.

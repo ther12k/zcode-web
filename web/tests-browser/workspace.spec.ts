@@ -1873,3 +1873,31 @@ test("composer exposes a reasoning picker for multi-level models and sends the c
   await page.getByText("Plain", { exact: true }).click();
   await expect(picker).toBeHidden();
 });
+
+// Session compact: the session-options menu exposes "Compact history"; the
+// endpoint result surfaces as a toast (busy path covered by unit suites).
+test("session menu offers history compaction and reports the result", async ({ page }) => {
+  // land on a session view: send a message (fake CLI adopts sess_fake0…)
+  const input = page.getByLabel("Message Zcode");
+  await input.fill("compact e2e setup");
+  await input.press("Enter");
+  await expect(page).toHaveURL(/\/s\/sess_/, { timeout: 15000 });
+  const sessionId = (page.url().match(/sess_[A-Za-z0-9_-]+/) || [])[0];
+
+  let compactCall: { id: string; body: unknown } | null = null;
+  await page.route(/\/api\/sessions\/.+\/compact$/, async (route) => {
+    compactCall = {
+      id: new URL(route.request().url()).pathname.split("/")[3],
+      body: route.request().postDataJSON(),
+    };
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ engine: "agent", state: "completed", response: "" }) });
+  });
+
+  await page.getByLabel("Session options").click();
+  const item = page.getByRole("menuitem", { name: "Compact history" });
+  await expect(item).toBeVisible();
+  await item.click();
+  await expect(page.locator(".toast")).toContainText("compacted", { timeout: 8000 });
+  assert.ok(compactCall, "compact POST fired");
+  assert.equal((compactCall as { id: string }).id, sessionId);
+});

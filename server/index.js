@@ -929,6 +929,44 @@ async function handleApi(req, res, url) {
     }
   }
 
+  // Session compact — context maintenance (history summarized into a
+  // checkpoint). Engine-aware: under the agent bridge it is a protocol call
+  // that blocks until the summarization turn completes; under the prompt
+  // engine it launches a regular /compact job (caller follows via SSE).
+  const compactMatch = route.match(/^\/api\/sessions\/(sess_[A-Za-z0-9_-]+)\/compact$/);
+  if (compactMatch && req.method === "POST") {
+    let instructions = "";
+    try {
+      const body = JSON.parse(await readBody(req, 8192));
+      instructions = typeof body.instructions === "string" ? body.instructions.trim().slice(0, 2000) : "";
+    } catch {
+      instructions = ""; // empty body is fine — default compaction
+    }
+    let sess;
+    try {
+      sess = store.get(compactMatch[1]);
+    } catch (e) {
+      if (e.code !== "DB_MISSING") return sendJson(res, 500, { error: e.message });
+    }
+    const cwd = sess?.directory;
+    if (!cwd || !insideAllowedRoots(realpathOf(cwd))) {
+      return sendJson(res, 404, { error: "session not found (or outside allowed roots)" });
+    }
+    try {
+      const result = await jobs.compactSession({ sessionId: compactMatch[1], cwd, instructions });
+      if (result.engine === "prompt") {
+        return sendJson(res, 202, { engine: "prompt", jobId: result.jobId });
+      }
+      return sendJson(res, 200, {
+        engine: "agent",
+        state: result.result?.compact?.state ?? "completed",
+        response: typeof result.result?.response === "string" ? result.result.response.slice(0, 4000) : "",
+      });
+    } catch (e) {
+      return sendJson(res, e.status || 500, { error: e.message, code: e.code });
+    }
+  }
+
   if (route === "/api/chat" && req.method === "POST") {
     const body = JSON.parse(await readBody(req, 1024 * 1024));
     let text = String(body.text || "").trim();

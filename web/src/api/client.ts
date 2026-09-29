@@ -255,6 +255,12 @@ export class ApiClient {
   job(jobId: string) {
     return this.request<JobStatus>(`/api/jobs/${jobId}`);
   }
+  compactSession(sessionId: string, instructions?: string) {
+    return this.request<{ engine: "agent" | "prompt"; state?: string; response?: string; jobId?: string }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/compact`,
+      { method: "POST", body: JSON.stringify({ instructions: instructions || "" }) },
+    );
+  }
   cancel(jobId: string) {
     return this.request<{ canceled: boolean }>(`/api/jobs/${jobId}/cancel`, { method: "POST" });
   }
