@@ -212,6 +212,16 @@ export class AgentHost {
       return { nativeSearchEnhancementsEnabled: false, memoryEnabled: false };
     }
     if (method === "interaction/requestPermission") {
+      // The workflow run confirmations are always-ask on the protocol (any
+      // permission mode asks). The desktop answers them with a dialog; this
+      // bridge has none, and denying means web sessions could NEVER run a
+      // workflow. Auto-allow exactly the two run-affecting kinds (create/
+      // amend + resume); every other escalation stays denied. ZCODE_AGENT_DWF=0
+      // — the same switch that disables the tool cluster — restores deny.
+      const kind = String(params?.kind || params?.permission || "");
+      if (process.env.ZCODE_AGENT_DWF !== "0" && (kind === "createWorkflow" || kind === "resumeWorkflowRun")) {
+        return { decision: "allow" };
+      }
       // The web bridge does not mediate permission prompts. Session MODE
       // already encodes the policy (plan is read-only, yolo allows all);
       // anything the runtime still escalates to the host is denied.

@@ -398,3 +398,25 @@ test("agent engine: workflow artifact read faces (runs, artifacts, data, chunked
     await disposeManager(mgr);
   }
 });
+
+test("agent engine: workflow run confirmations are auto-allowed, foreign kinds still denied", async () => {
+  writeFileSync(scenarioFile, "plain");
+  const logFile = join(home, "perm-frames.log");
+  process.env.FAKE_LOG = logFile;
+  const mgr = newManager();
+  try {
+    // "wf-confirm" makes the fake escalate createWorkflow + resumeWorkflowRun
+    // + one foreign kind; the host's answers land as __permAnswer frames
+    const { job } = mgr.start({ text: "wf-confirm please", sessionId: null, cwd: ROOT, mode: "build", model: null });
+    await waitFor(() => job.lines.find((l) => l.kind === "done"), 15_000, "done");
+    const answers = readFileSync(logFile, "utf8").split("\n").filter(Boolean)
+      .map((l) => JSON.parse(l)).filter((f) => f.method === "__permAnswer");
+    const byKind = Object.fromEntries(answers.map((a) => [a.params.kind, a.params.decision]));
+    assert.equal(byKind.createWorkflow, "allow", "createWorkflow run confirmation is allowed");
+    assert.equal(byKind.resumeWorkflowRun, "allow", "resumeWorkflowRun run confirmation is allowed");
+    assert.equal(byKind.bash, "deny", "non-workflow kinds remain denied");
+  } finally {
+    delete process.env.FAKE_LOG;
+    await disposeManager(mgr);
+  }
+});

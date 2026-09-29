@@ -36,6 +36,11 @@ RUN mkdir -p /opt/zcode /data/zcode /data/workspace
 COPY cli/ /opt/zcode-staging/
 RUN if [ -f /opt/zcode-staging/zcode.cjs ]; then mv /opt/zcode-staging/zcode.cjs /opt/zcode/zcode.cjs; fi \
  && if [ -f /opt/zcode-staging/provider/zcode-builtin.json ]; then mkdir -p /opt/zcode/provider && mv /opt/zcode-staging/provider/zcode-builtin.json /opt/zcode/provider/zcode-builtin.json; fi \
+# dynamic-workflows skill (Apache-2.0, committed in cli/skills): seeds the
+# user scope for bare `docker run` (an EMPTY first volume inherits it; the
+# compose setup bind-mounts it over instead). CreateWorkflow refuses to run
+# until the skill is loadable.
+ && if [ -d /opt/zcode-staging/skills ]; then mkdir -p /data/zcode/skills && cp -r /opt/zcode-staging/skills/. /data/zcode/skills/; fi \
  && rm -rf /opt/zcode-staging
 
 # The CLI stores its state in ~/.zcode — point it at the data volume.

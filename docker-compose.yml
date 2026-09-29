@@ -21,6 +21,10 @@ services:
       # REQUIRED by CLI >= 0.16.9: builtin provider config, staged next to the
       # bundle (see cli/README.md)
       - ./cli/provider/zcode-builtin.json:/opt/zcode/provider/zcode-builtin.json:ro
+      # dynamic-workflows skill (Apache-2.0, committed): CreateWorkflow refuses
+      # to run until the skill is loadable from the user scope — which is
+      # /data/zcode/skills through the image's /root/.zcode symlink
+      - ./cli/skills/dynamic-workflows:/data/zcode/skills/dynamic-workflows:ro
       # CLI state: config.json, sessions db, credentials — set up once (see README)
       - ./data/zcode:/data/zcode
       # your projects live here

@@ -35,6 +35,9 @@ const evSeq = { n: 0 };
 let sessionCounter = 0;
 const sessions = new Map(); // sessionId -> { turnActive, scenario, mode }
 let turnTimer = null;
+// id -> permission kind, for server-initiated requests awaiting answers
+const permAnswerIds = new Map();
+let pendingPermCounter = 0;
 
 const sessionEvent = (sessionId, type, payload = {}) =>
   emit({
@@ -53,6 +56,17 @@ const runTurn = (sessionId, content) => {
   const s = sessions.get(sessionId);
   const scenario = readScenario();
   s.turnActive = true;
+  // permission round-trip probe: a send whose content asks for "wf-confirm"
+  // makes the fake escalate the two workflow run confirmations (plus one
+  // foreign kind) as server-initiated requests; the host's answers come back
+  // as ordinary response frames and are logged as __permAnswer pseudo-frames
+  if (/wf-confirm/.test(String(content))) {
+    for (const kind of ["createWorkflow", "resumeWorkflowRun", "bash"]) {
+      emit({ id: 9000 + pendingPermCounter, method: "interaction/requestPermission", params: { kind } });
+      permAnswerIds.set(9000 + pendingPermCounter, kind);
+      pendingPermCounter += 1;
+    }
+  }
   // UI-compatible stream (same envelope/payload shapes the prompt engine's
   // stream-json and the protocol session events share)
   sessionEvent(sessionId, "session.titleUpdated", { previousTitle: "", source: "first_input", title: String(content).slice(0, 40) });
@@ -246,7 +260,15 @@ process.stdin.on("data", (chunk) => {
     } catch {
       continue;
     }
-    if (frame.id === undefined || !frame.method) continue;
+    // response frames (no method) carry the host's answers to our
+    // server-initiated permission requests — log them as pseudo-frames
+    if (frame.id === undefined || !frame.method) {
+      if (frame.id !== undefined && permAnswerIds.has(frame.id) && frame.result) {
+        log({ method: "__permAnswer", params: { kind: permAnswerIds.get(frame.id), ...frame.result } });
+        permAnswerIds.delete(frame.id);
+      }
+      continue;
+    }
     log(frame);
     const handler = handlers[frame.method];
     if (!handler) {

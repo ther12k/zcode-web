@@ -50,3 +50,12 @@ is committed.
 - Offline containers log a benign `ZCode Built-in 刷新失败: HTTP 404` /
   `ZCode Built-in missing` line on the CLI's stderr when it cannot refresh the
   builtin config remotely; turns are unaffected.
+
+## skills/dynamic-workflows/ (Apache-2.0, committed)
+
+The dynamic-workflows skill vendored from the open-source repo (byte-identical to
+`apps/zcode-cli/packages/bundled-skills/skills/dynamic-workflows`). The CLI's
+`CreateWorkflow` tool refuses to run until this skill is loadable from the
+user scope; compose bind-mounts it at `/data/zcode/skills/dynamic-workflows`
+(the image's `/root/.zcode` symlink points there). Replacing the CLI bundle?
+Refresh the skill from the matching upstream tag.
