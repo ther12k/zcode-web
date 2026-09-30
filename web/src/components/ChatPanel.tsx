@@ -1118,7 +1118,10 @@ export function ChatPanel({
         if (p?.requestId && Array.isArray(p.options) && !requests.some((r) => r.requestId === p.requestId)) requests.push(p);
       } else if (line?.type === "permission.resolved") {
         const p = line.payload as PermissionResolvedLine;
-        if (p?.requestId) resolutions.set(p.requestId, p);
+        // two sources resolve a card: our synthetic line (carries via +
+        // optionId) and the CLI's own protocol event (fallback only — never
+        // let the leaner payload overwrite the richer one)
+        if (p?.requestId && (p.via || !resolutions.has(p.requestId))) resolutions.set(p.requestId, p);
       }
     }
     return { requests, resolutions };

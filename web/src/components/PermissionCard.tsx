@@ -16,7 +16,9 @@ const RISK_CLASS: Record<string, string> = {
 };
 
 function isAllowKind(kind: string) {
-  return kind === "allow" || kind === "allow_always";
+  // the real wire uses allow_once / allow_always (observed live); bare
+  // "allow" appears in some projections — treat all allow* as approving
+  return kind.startsWith("allow");
 }
 
 export function PermissionCard({
