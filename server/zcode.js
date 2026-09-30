@@ -519,12 +519,22 @@ export class JobManager {
           record({ kind: "line", line: ev });
           job.hasTurnFailed = false;
           job.error = null;
-          const deadline = Date.now() + 1500;
           const tryResend = async () => {
-            while (Date.now() < deadline && !host?.levelFor(job.sessionId, modelRef)) {
-              await new Promise((r) => setTimeout(r, 50));
+            // passive cache polling alone can never recover on the real
+            // wire (levels only arrive via session/read), so re-read the
+            // projection explicitly; a short grace poll covers hosts whose
+            // patch envelope does carry availability
+            let level = host?.levelFor(job.sessionId, modelRef);
+            if (!level && host) {
+              level = await host.refreshLevels(job.sessionId, modelRef).catch(() => null);
             }
-            const level = host?.levelFor(job.sessionId, modelRef);
+            if (!level) {
+              const grace = Date.now() + 1000;
+              while (Date.now() < grace && !host?.levelFor(job.sessionId, modelRef)) {
+                await new Promise((r) => setTimeout(r, 50));
+              }
+              level = host?.levelFor(job.sessionId, modelRef);
+            }
             if (!level || TERMINAL.has(job.status)) {
               job.hasTurnFailed = true;
               job.error = String(ev.payload?.error?.message || "turn failed");
@@ -604,14 +614,19 @@ export class JobManager {
         const slash = modelRef.indexOf("/");
         const base = { providerId: modelRef.slice(0, slash), modelId: modelRef.slice(slash + 1) };
         // an explicit user choice wins; otherwise the registry demands a
-        // level whenever the merged spec declares values — send the
-        // advertised default up front
-        const level = reasoningLevel || host.levelFor(sessionId, modelRef);
+        // level whenever the merged spec declares values. The create-time
+        // read can race provider startup and return empty availability
+        // (observed live: fresh browser chats failed their first message
+        // this way) — one explicit re-read beats sending a doomed request
+        let level = reasoningLevel || host.levelFor(sessionId, modelRef);
+        if (!level) {
+          level = await host.refreshLevels(sessionId, modelRef).catch(() => null);
+        }
         await host.send(sessionId, text, level
           ? { ...base, options: { reasoningLevel: level } }
           : base);
-        // a level-requiring model with no cached level fails its first turn;
-        // the listener self-heals that (see turn.failed above)
+        // if a level-requiring model still has no known level, the turn
+        // fails and the listener self-heals it (see turn.failed above)
       } else {
         await host.send(sessionId, text, null);
       }

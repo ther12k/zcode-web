@@ -74,12 +74,30 @@ const sessionEvent = (sessionId, type, payload = {}) =>
     },
   });
 
-const runTurn = (sessionId, content) => {
+const runTurn = (sessionId, content, sendParams) => {
   const s = sessions.get(sessionId);
   const scenario = readScenario();
   s.turnActive = true;
   s.lastContent = String(content);
   s.awaitPerms = false;
+  // level-race scenarios: the registry rejects a modelSelection whose model
+  // declares reasoning levels but carries none — mirroring the real CLI's
+  // "Reasoning level is required for <model>". Availability is served by
+  // session/read only after N reads (see the session/read handler), so the
+  // bridge must re-read to learn the default level.
+  const isLevelScenario = scenario === "levels-late" || scenario === "levels-slower";
+  if (isLevelScenario && sendParams?.modelSelection && !sendParams.modelSelection?.options?.reasoningLevel) {
+    s.turnActive = false;
+    sessionEvent(sessionId, "turn.failed", {
+      error: {
+        type: "invalid_model_request",
+        code: "invalid_model_request",
+        message: `Reasoning level is required for ${sendParams.modelSelection.providerId}/${sendParams.modelSelection.modelId}`,
+      },
+      turnPhase: "processing_input",
+    });
+    return;
+  }
   // permission round-trip probe: a send whose content asks for "wf-confirm"
   // makes the fake escalate the workflow run confirmations (plus one foreign
   // tool) as server-initiated requests in the REAL wire shape (toolName, not
@@ -134,7 +152,7 @@ const runTurn = (sessionId, content) => {
   if (scenario === "crash") {
     process.exit(1);
   }
-  if (scenario === "plain") {
+  if (scenario === "plain" || isLevelScenario) {
     if (s.awaitPerms) return; // the answer path finishes this turn
     sessionEvent(sessionId, "model.streaming", { assistantMessageId: "m1", delta: `echo:${content}`, done: false, kind: "text_delta" });
     turnTimer = setTimeout(() => {
@@ -168,12 +186,24 @@ const handlers = {
     return {};
   },
   "session/subscribe": (params) => ({ sessionId: params.sessionId, eventSeq: 0, events: [] }),
-  "session/read": (params) => ({ sessionId: params.sessionId, projection: { model: { available: [] } } }),
+  "session/read": (params) => {
+    const s = sessions.get(params.sessionId);
+    const readCount = s ? (s.readCount = (s.readCount || 0) + 1) : 0;
+    const scenario = readScenario();
+    // level-race scenarios: availability appears only from the Nth read on
+    // (levels-late: 2nd, levels-slower: 3rd) — the create-time read races
+    // provider startup and returns empty, exactly like the real wire
+    const gate = scenario === "levels-slower" ? 3 : 2;
+    const available = (scenario === "levels-late" || scenario === "levels-slower") && readCount >= gate
+      ? [{ ref: { providerId: "mockprov", modelId: "m1" }, reasoning: { defaultLevel: "high" } }]
+      : [];
+    return { sessionId: params.sessionId, projection: { model: { available } } };
+  },
   "session/send": (params) => {
     if (!sessions.has(params.sessionId)) {
       return { __error: { code: -32001, message: `unknown session ${params.sessionId}` } };
     }
-    runTurn(params.sessionId, params.content);
+    runTurn(params.sessionId, params.content, params);
     return { accepted: true, sessionId: params.sessionId, stateRevision: 1 };
   },
   "session/stop": (params) => {

@@ -440,6 +440,57 @@ test("agent engine: workflow run confirmations are auto-allowed, foreign kinds s
   }
 });
 
+// Level-race regressions (observed live 2026-09-30): a fresh chat with a
+// selected multi-level model failed its FIRST message — "Reasoning level is
+// required" — because availability only arrives via session/read (streamed
+// events never carry model.available) and the create-time read can race
+// provider startup. The bridge now re-reads proactively before the first
+// send, and the failure self-heal re-reads instead of passively polling a
+// cache nothing else populates.
+test("agent engine: first send re-reads availability and carries the default reasoning level (no failed turn)", async () => {
+  writeFileSync(scenarioFile, "levels-late");
+  const logFile = join(home, "levels-late.log");
+  process.env.FAKE_LOG = logFile;
+  const mgr = newManager();
+  try {
+    const { job } = mgr.start({ text: "hello", sessionId: null, cwd: ROOT, mode: "build", model: "mockprov/m1" });
+    const done = await waitFor(() => job.lines.find((l) => l.kind === "done"), 15_000, "done");
+    assert.equal(done.status, "succeeded");
+    assert.ok(!job.lines.some((l) => l.kind === "line" && l.line?.type === "turn.failed"), "no failed turn at all");
+    const frames = readFileSync(logFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const sends = frames.filter((f) => f.method === "session/send");
+    assert.equal(sends.length, 1, "exactly one send — the level was attached up front");
+    assert.deepEqual(sends[0].params.modelSelection, { providerId: "mockprov", modelId: "m1", options: { reasoningLevel: "high" } });
+    assert.ok(frames.filter((f) => f.method === "session/read").length >= 2, "availability was re-read after the empty create-time read");
+  } finally {
+    delete process.env.FAKE_LOG;
+    await disposeManager(mgr);
+  }
+});
+
+test("agent engine: level-race rejection self-heals by re-reading availability and resending with the level", async () => {
+  writeFileSync(scenarioFile, "levels-slower");
+  const logFile = join(home, "levels-slower.log");
+  process.env.FAKE_LOG = logFile;
+  const mgr = newManager();
+  try {
+    const { job } = mgr.start({ text: "hello", sessionId: null, cwd: ROOT, mode: "build", model: "mockprov/m1" });
+    const done = await waitFor(() => job.lines.find((l) => l.kind === "done"), 15_000, "done");
+    assert.equal(done.status, "succeeded");
+    const failures = job.lines.filter((l) => l.kind === "line" && l.line?.type === "turn.failed");
+    assert.equal(failures.length, 1, "exactly one registry rejection");
+    assert.match(String(failures[0].line?.payload?.error?.message || ""), /reasoning level is required/i);
+    const frames = readFileSync(logFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const sends = frames.filter((f) => f.method === "session/send");
+    assert.equal(sends.length, 2, "rejected send + healed resend");
+    assert.ok(!sends[0].params.modelSelection?.options?.reasoningLevel, "first send carried no level");
+    assert.equal(sends[1].params.modelSelection?.options?.reasoningLevel, "high", "resend carries the re-read default");
+  } finally {
+    delete process.env.FAKE_LOG;
+    await disposeManager(mgr);
+  }
+});
+
 test("agent engine: held permissions round-trip an allow from the UI, malformed resolves are distinguishable", async () => {
   writeFileSync(scenarioFile, "plain");
   const mgr = newManager();

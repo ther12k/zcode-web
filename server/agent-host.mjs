@@ -182,15 +182,37 @@ export class AgentHost {
   handleNotification(n) {
     this.lastUsedAt = Date.now();
     // model/reasoning availability rides on state patches — cache it on the
-    // HOST (not per job) so later turns can resolve selections immediately
+    // HOST (not per job) so later turns can resolve selections immediately.
+    // Two envelopes: a bare state.updated method (fake/older wire) and the
+    // real session/event wrapper where the type and patch live in payload.
     if (n.method === "state.updated" && Array.isArray(n.params?.patch?.model?.available)) {
       this.absorbModelLevels(n.params.sessionId, n.params.patch.model.available);
+    } else if (
+      n.method === "session/event" && n.params?.type === "state.updated"
+      && Array.isArray(n.params?.payload?.patch?.model?.available)
+    ) {
+      this.absorbModelLevels(n.params.sessionId, n.params.payload.patch.model.available);
     }
     for (const listener of this.listeners) {
       try {
         listener(n);
       } catch { /* subscriber errors must not break routing */ }
     }
+  }
+
+  /** Re-read the session projection for model availability. On the REAL
+   *  wire, reasoning levels arrive ONLY via session/read (observed live:
+   *  streamed session.updated events never carry model.available), and the
+   *  read at session-create time can race provider startup — returning an
+   *  empty availability list. An explicit re-read is the authoritative
+   *  recovery, so the bridge never sends a modelSelection the registry will
+   *  reject for a missing reasoning level. */
+  async refreshLevels(sessionId, modelRef) {
+    const read = await this.client.request("session/read", { sessionId }, 10_000).catch(() => null);
+    if (read?.projection?.model?.available) {
+      this.absorbModelLevels(sessionId, read.projection.model.available);
+    }
+    return this.levelFor(sessionId, modelRef) ?? null;
   }
 
   absorbModelLevels(sessionId, available) {
