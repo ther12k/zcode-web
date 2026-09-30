@@ -38,6 +38,28 @@ let turnTimer = null;
 // id -> toolName, for server-initiated requests awaiting answers
 const permAnswerIds = new Map();
 let pendingPermCounter = 0;
+// frameId -> { sessionId, toolName }: emitted permission requests whose
+// answers the current turn is waiting on
+const pendingPermAnswers = new Map();
+const bashPermOpts = {
+  risk: "high",
+  input: { command: "npm test", args: ["--quiet"] },
+  options: [
+    { optionId: "allowOnce", kind: "allow", name: "Allow once", description: "run this one command", response: { decision: "allow", reason: "approved once" } },
+    { optionId: "allowAlways", kind: "allow_always", name: "Always allow", response: { decision: "allow", permissionUpdates: [{ type: "addRules", behavior: "allow", rules: [{ toolName: "Bash" }] }] } },
+    { optionId: "rejectOnce", kind: "deny", name: "Deny", response: { decision: "deny", reason: "denied by user" } },
+  ],
+};
+
+/** Complete an awaitPerms turn once its last permission answer landed; the
+ *  final decision is embedded in the response for end-to-end asserts. */
+const finishPermTurn = (sessionId) => {
+  const s = sessions.get(sessionId);
+  if (!s || !s.turnActive || !s.awaitPerms) return;
+  s.turnActive = false;
+  sessionEvent(sessionId, "model.streaming", { assistantMessageId: "m1", delta: "", done: true, kind: "finish" });
+  sessionEvent(sessionId, "turn.completed", { response: `perm:${s.lastPermDecision}`, usage: { totalTokens: 10 }, toolCallCount: 0, resultType: "success" });
+};
 
 const sessionEvent = (sessionId, type, payload = {}) =>
   emit({
@@ -56,30 +78,46 @@ const runTurn = (sessionId, content) => {
   const s = sessions.get(sessionId);
   const scenario = readScenario();
   s.turnActive = true;
+  s.lastContent = String(content);
+  s.awaitPerms = false;
   // permission round-trip probe: a send whose content asks for "wf-confirm"
   // makes the fake escalate the workflow run confirmations (plus one foreign
   // tool) as server-initiated requests in the REAL wire shape (toolName, not
-  // the internal kind); the host's answers come back as ordinary response
-  // frames and are logged as __permAnswer pseudo-frames
+  // the internal kind); "perm-hold" escalates a single Bash call with the
+  // full option list. Like the real broker, the turn now WAITS for every
+  // emitted request to be answered — the host's answers come back as
+  // ordinary response frames and are logged as __permAnswer pseudo-frames;
+  // the LAST decision is embedded in the turn response so tests can assert
+  // end-to-end propagation.
+  const emitPerm = (toolName, opts = {}) => {
+    const id = 9000 + pendingPermCounter;
+    emit({
+      id,
+      method: "interaction/requestPermission",
+      params: {
+        requestId: `perm_${id}`,
+        sessionId,
+        turnId: `turn_${id}`,
+        toolCallId: `call_${id}`,
+        toolName,
+        reason: `probe:${toolName}`,
+        riskLevel: opts.risk || "low",
+        input: opts.input || {},
+        options: opts.options || [],
+      },
+    });
+    permAnswerIds.set(id, { sessionId, toolName });
+    pendingPermAnswers.set(id, { sessionId, toolName });
+    pendingPermCounter += 1;
+  };
   if (/wf-confirm/.test(String(content))) {
     for (const toolName of ["CreateWorkflow", "AmendWorkflow", "ResumeWorkflowRun", "Bash"]) {
-      emit({
-        id: 9000 + pendingPermCounter,
-        method: "interaction/requestPermission",
-        params: {
-          requestId: `perm_${9000 + pendingPermCounter}`,
-          sessionId,
-          toolCallId: `call_${9000 + pendingPermCounter}`,
-          toolName,
-          reason: `probe:${toolName}`,
-          riskLevel: "low",
-          input: {},
-          options: [],
-        },
-      });
-      permAnswerIds.set(9000 + pendingPermCounter, toolName);
-      pendingPermCounter += 1;
+      emitPerm(toolName, toolName === "Bash" ? bashPermOpts : {});
     }
+    s.awaitPerms = true;
+  } else if (/perm-hold/.test(String(content))) {
+    emitPerm("Bash", bashPermOpts);
+    s.awaitPerms = true;
   }
   // UI-compatible stream (same envelope/payload shapes the prompt engine's
   // stream-json and the protocol session events share)
@@ -97,6 +135,7 @@ const runTurn = (sessionId, content) => {
     process.exit(1);
   }
   if (scenario === "plain") {
+    if (s.awaitPerms) return; // the answer path finishes this turn
     sessionEvent(sessionId, "model.streaming", { assistantMessageId: "m1", delta: `echo:${content}`, done: false, kind: "text_delta" });
     turnTimer = setTimeout(() => {
       s.turnActive = false;
@@ -275,11 +314,24 @@ process.stdin.on("data", (chunk) => {
       continue;
     }
     // response frames (no method) carry the host's answers to our
-    // server-initiated permission requests — log them as pseudo-frames
+    // server-initiated permission requests — log them as pseudo-frames, and
+    // when the awaiting turn's LAST pending request is answered, finish it
     if (frame.id === undefined || !frame.method) {
       if (frame.id !== undefined && permAnswerIds.has(frame.id) && frame.result) {
-        log({ method: "__permAnswer", params: { toolName: permAnswerIds.get(frame.id), ...frame.result } });
+        const target = permAnswerIds.get(frame.id);
         permAnswerIds.delete(frame.id);
+        log({ method: "__permAnswer", params: { toolName: target.toolName, ...frame.result } });
+        const pending = pendingPermAnswers.get(frame.id);
+        pendingPermAnswers.delete(frame.id);
+        if (pending) {
+          const s = sessions.get(pending.sessionId);
+          if (s) {
+            s.lastPermDecision = String(frame.result?.decision || "deny");
+            if ([...pendingPermAnswers.values()].every((p) => p.sessionId !== pending.sessionId)) {
+              finishPermTurn(pending.sessionId);
+            }
+          }
+        }
       }
       continue;
     }

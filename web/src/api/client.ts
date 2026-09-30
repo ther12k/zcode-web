@@ -206,6 +206,40 @@ export type ChatAccepted = {
   replayed?: boolean;
 };
 
+/** One answer choice of a held permission request (wire options carry a
+ *  host-side response payload; the browser only sees the display fields). */
+export type PermissionOption = {
+  optionId: string;
+  kind: string;
+  name: string;
+  description?: string;
+};
+
+export type PermissionRequestLine = {
+  requestId: string;
+  sessionId: string;
+  toolCallId: string;
+  toolName: string;
+  reason: string;
+  riskLevel: string;
+  preview: {
+    title: string;
+    command: string | null;
+    filePaths: string[];
+    scope: "command" | "file" | "generic";
+    fileChanges: Array<{ path: string; type: "add" | "update" }>;
+  };
+  options: PermissionOption[];
+  createdAt: number;
+};
+
+export type PermissionResolvedLine = {
+  requestId: string;
+  decision: string;
+  optionId?: string;
+  via: string;
+};
+
 export type GitHubCapability = { enabled: boolean; tokenPresent: boolean; apiHost: string; allowlist: string[] };
 export type GitHubIssue = {
   number: number;
@@ -325,6 +359,14 @@ export class ApiClient {
     return this.request<{ engine: "agent" | "prompt"; forkedSessionId: string | null; parentSessionId?: string; response?: string }>(
       `/api/sessions/${encodeURIComponent(sessionId)}/fork`,
       { method: "POST", body: JSON.stringify(messageId ? { messageId } : {}) },
+    );
+  }
+  /** Answer a held agent-tool permission request by picking one of its
+   *  options; the server echoes that option's response to the CLI. */
+  resolveSessionPermission(sessionId: string, requestId: string, optionId: string) {
+    return this.request<{ ok: boolean; decision: string }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/permissions/${encodeURIComponent(requestId)}`,
+      { method: "POST", body: JSON.stringify({ optionId }) },
     );
   }
   workflowRuns(sessionId: string) {

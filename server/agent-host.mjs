@@ -18,6 +18,7 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ProtocolClient } from "./protocol-client.mjs";
+import { getPermissionRequestPreview } from "./permission-preview.mjs";
 
 const KIND_TO_API_TYPE = {
   "openai-compatible": "openai-chat-completions",
@@ -112,6 +113,7 @@ export class AgentHost {
     this.sessions = new Map(); // sessionId -> {mode}
     this.modelLevels = new Map(); // sessionId -> Map("provider/model" -> default level)
     this.listeners = new Set(); // (notification) => void  (session/event routing)
+    this.pendingPermissions = new Map(); // requestId -> held interaction/requestPermission
     this.lastUsedAt = Date.now();
     this.log = log || (() => {});
     this.client = new ProtocolClient({
@@ -124,6 +126,9 @@ export class AgentHost {
       onServerRequest: (req) => this.answerServerRequest(req),
     });
     this.client.exitedPromise.then((info) => {
+      // the RPC peer is gone: held permission promises must settle (their
+      // answers have nowhere to go) before listeners see the exit
+      this.sweepAllPermissions("agent-server exited");
       for (const listener of this.listeners) {
         try {
           listener({ method: "__host_exited", params: info });
@@ -212,27 +217,152 @@ export class AgentHost {
       return { nativeSearchEnhancementsEnabled: false, memoryEnabled: false };
     }
     if (method === "interaction/requestPermission") {
-      // The workflow run confirmations are always-ask on the protocol (any
-      // permission mode asks). The desktop answers them with a dialog; this
-      // bridge has none, and denying means web sessions could NEVER run a
-      // workflow. Auto-allow exactly the run-affecting tools of the workflow
-      // family (the wire params identify the call by toolName); every other
-      // escalation stays denied. ZCODE_AGENT_DWF=0 — the same switch that
-      // disables the tool cluster — restores deny.
-      const tool = String(params?.toolName || "");
-      const isWorkflowRunConfirmation = tool === "CreateWorkflow" || tool === "AmendWorkflow" || tool === "ResumeWorkflowRun";
-      if (process.env.ZCODE_AGENT_DWF !== "0" && isWorkflowRunConfirmation) {
-        return { decision: "allow" };
-      }
-      // The web bridge does not mediate permission prompts. Session MODE
-      // already encodes the policy (plan is read-only, yolo allows all);
-      // anything the runtime still escalates to the host is denied.
-      return { decision: "deny", reason: "denied by zcode-web bridge (no interactive permission UI)" };
+      return this.handlePermissionRequest(params);
     }
     if (method === "interaction/requestUserInput") {
       return { action: "cancel", reason: "cancelled by zcode-web bridge (no interactive input UI)" };
     }
     return {};
+  }
+
+  /** Policy for interaction/requestPermission. The wire request carries the
+   *  caller's options (each with its own response payload); answering means
+   *  returning a ZCodePermissionResponse — a legacy desktop echoes the chosen
+   *  option's response verbatim, and so do we (bootstrap interaction-broker:
+   *  exact optionId match → option.response).
+   *
+   *  Three regimes, in order:
+   *   1. workflow run confirmations (CreateWorkflow/Amend/Resume) auto-allow
+   *      under the DWF switch — unchanged behavior, verified live;
+   *   2. ZCODE_AGENT_PERM_UI=0 denies everything else outright (rollback to
+   *      the pre-UI bridge);
+   *   3. otherwise HOLD the RPC: the request surfaces to the web UI over the
+   *      job stream (permission.request line) and resolves when the user
+   *      picks an option, the watchdog times out, or the turn/session ends. */
+  handlePermissionRequest(params) {
+    const tool = String(params?.toolName || "");
+    const isWorkflowRunConfirmation = tool === "CreateWorkflow" || tool === "AmendWorkflow" || tool === "ResumeWorkflowRun";
+    if (process.env.ZCODE_AGENT_DWF !== "0" && isWorkflowRunConfirmation) {
+      return { decision: "allow" };
+    }
+    if (process.env.ZCODE_AGENT_PERM_UI === "0") {
+      return { decision: "deny", reason: "denied by zcode-web bridge (permission UI disabled)" };
+    }
+    return this.holdPermission(params);
+  }
+
+  holdPermission(params) {
+    const requestId = String(params?.requestId || "");
+    if (!requestId) {
+      return { decision: "deny", reason: "malformed permission request (no requestId)" };
+    }
+    const options = (Array.isArray(params?.options) ? params.options : [])
+      .filter((o) => o && typeof o === "object" && o.optionId)
+      .map((o) => ({
+        optionId: String(o.optionId),
+        kind: String(o.kind || ""),
+        name: String(o.name || o.optionId),
+        ...(o.description ? { description: String(o.description).slice(0, 300) } : {}),
+      }));
+    const preview = getPermissionRequestPreview({
+      title: String(params?.toolName || "permission"),
+      raw: params?.input,
+    });
+    // the broker has no timeout of its own (permissionTimeoutMs is
+    // config-only), so the bridge owns the watchdog: a forgotten tab must
+    // not wedge the turn forever
+    const timeoutMs = Math.max(1000, Number(process.env.ZCODE_AGENT_PERM_TIMEOUT_MS || 600_000));
+    return new Promise((resolve) => {
+      const record = {
+        params,
+        options,
+        sessionId: String(params?.sessionId || ""),
+        resolve,
+        timer: null,
+        createdAt: Date.now(),
+      };
+      record.timer = setTimeout(
+        () => this.settlePermission(requestId, { decision: "deny", reason: "permission request timed out waiting for the web UI" }, "timeout"),
+        timeoutMs,
+      );
+      record.timer.unref?.();
+      this.pendingPermissions.set(requestId, record);
+      const event = {
+        requestId,
+        sessionId: record.sessionId,
+        turnId: params?.turnId ?? null,
+        toolCallId: String(params?.toolCallId || ""),
+        toolName: String(params?.toolName || ""),
+        reason: String(params?.reason || "").slice(0, 1000),
+        riskLevel: String(params?.riskLevel || "medium"),
+        preview,
+        options,
+        timeoutMs,
+        createdAt: record.createdAt,
+      };
+      for (const listener of this.listeners) {
+        try {
+          listener({ method: "__permission_request", params: event });
+        } catch { /* subscriber errors must not break routing */ }
+      }
+    });
+  }
+
+  /** User's pick from the web UI: echo the chosen option's response payload. */
+  resolvePermission(requestId, optionId) {
+    const record = this.pendingPermissions.get(String(requestId));
+    if (!record) return null;
+    const original = (Array.isArray(record.params?.options) ? record.params.options : [])
+      .find((o) => o && String(o.optionId) === String(optionId));
+    if (!original) return false;
+    const response = original.response && typeof original.response === "object"
+      ? original.response
+      : { decision: "deny", reason: "malformed option response" };
+    this.settlePermission(String(requestId), { ...response }, "user", String(optionId));
+    return { decision: String(response.decision || "allow"), optionId: String(optionId) };
+  }
+
+  settlePermission(requestId, response, via, optionId) {
+    const record = this.pendingPermissions.get(String(requestId));
+    if (!record) return false;
+    clearTimeout(record.timer);
+    this.pendingPermissions.delete(String(requestId));
+    try {
+      record.resolve(response);
+    } catch { /* settling must never throw into the RPC layer */ }
+    for (const listener of this.listeners) {
+      try {
+        listener({
+          method: "__permission_resolved",
+          params: {
+            requestId: String(requestId),
+            sessionId: record.sessionId,
+            decision: String(response?.decision || ""),
+            ...(optionId ? { optionId: String(optionId) } : {}),
+            via,
+          },
+        });
+      } catch { /* subscriber errors must not break routing */ }
+    }
+    return true;
+  }
+
+  /** Deny-settle everything held for a session (turn ended: stop, finish or
+   *  fail — a late answer has no consumer on the CLI side and is ignored). */
+  sweepPermissions(sessionId, via) {
+    const sid = String(sessionId || "");
+    for (const requestId of [...this.pendingPermissions.keys()]) {
+      const record = this.pendingPermissions.get(requestId);
+      if (record && (!sid || record.sessionId === sid)) {
+        this.settlePermission(requestId, { decision: "deny", reason: `permission request closed (${via})` }, via);
+      }
+    }
+  }
+
+  sweepAllPermissions(via) {
+    for (const requestId of [...this.pendingPermissions.keys()]) {
+      this.settlePermission(requestId, { decision: "deny", reason: `permission request closed (${via})` }, via);
+    }
   }
 
   /** Wait for storage/registry startup, then create-or-resume a session.

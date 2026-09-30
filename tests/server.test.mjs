@@ -2187,3 +2187,46 @@ describe("workflow artifacts routes (prompt engine)", () => {
     assert.equal(badArtifact.status, 400);
   });
 });
+
+// Permission resolution route: agent-engine-only answer path for held
+// interaction/requestPermission calls. Route-level contract under the prompt
+// engine: 501 for a resolvable session, 400 without an optionId, 404 for
+// unknown or root-escaping sessions. (The held/resolve round-trip itself is
+// covered end-to-end in agent-bridge.test.mjs against the fake agent-server.)
+describe("permission resolve route (prompt engine)", () => {
+  it("validates input and guards the session store before engine dispatch", async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const dbDir = join(home, "cli", "db");
+    mkdirSync(dbDir, { recursive: true });
+    const db = new DatabaseSync(join(dbDir, "db.sqlite"));
+    db.exec(`CREATE TABLE IF NOT EXISTS session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT);`);
+    db.prepare("INSERT OR REPLACE INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)")
+      .run("sess_perm_route_probe", "perm route test", ws, Date.now(), Date.now());
+    db.close();
+
+    // known session, prompt engine → explicit 501
+    const engine = await fetch(`${BASE}/api/sessions/sess_perm_route_probe/permissions/req_probe_1`, {
+      method: "POST", headers: auth, body: JSON.stringify({ optionId: "allowOnce" }),
+    });
+    assert.equal(engine.status, 501);
+    assert.equal((await engine.json()).code, "ENGINE_UNSUPPORTED");
+
+    // missing optionId → 400 before any session work
+    const noOption = await fetch(`${BASE}/api/sessions/sess_perm_route_probe/permissions/req_probe_1`, {
+      method: "POST", headers: auth, body: "{}",
+    });
+    assert.equal(noOption.status, 400);
+
+    // unknown session → 404
+    const unknown = await fetch(`${BASE}/api/sessions/sess_nope_not_a_real/permissions/req_probe_1`, {
+      method: "POST", headers: auth, body: JSON.stringify({ optionId: "allowOnce" }),
+    });
+    assert.equal(unknown.status, 404);
+
+    // encoded separators in a requestId never match the route (map lookup only)
+    const badId = await fetch(`${BASE}/api/sessions/sess_perm_route_probe/permissions/${encodeURIComponent("a/b")}`, {
+      method: "POST", headers: auth, body: JSON.stringify({ optionId: "allowOnce" }),
+    });
+    assert.equal(badId.status, 404);
+  });
+});

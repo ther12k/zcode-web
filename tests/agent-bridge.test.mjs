@@ -405,9 +405,23 @@ test("agent engine: workflow run confirmations are auto-allowed, foreign kinds s
   process.env.FAKE_LOG = logFile;
   const mgr = newManager();
   try {
-    // "wf-confirm" makes the fake escalate createWorkflow + resumeWorkflowRun
-    // + one foreign kind; the host's answers land as __permAnswer frames
+    // "wf-confirm" escalates the run-confirmation trio + one foreign tool;
+    // the trio is auto-allowed by host policy, the Bash call is HELD for the
+    // web UI — the turn only proceeds once it is answered through the
+    // resolve path (here: deny)
     const { job } = mgr.start({ text: "wf-confirm please", sessionId: null, cwd: ROOT, mode: "build", model: null });
+    const reqLine = await waitFor(
+      () => job.lines.find((l) => l.kind === "line" && l.line?.type === "permission.request" && l.line?.payload?.toolName === "Bash"),
+      15_000,
+      "held Bash permission line",
+    );
+    assert.equal(reqLine.line.payload.riskLevel, "high");
+    assert.ok(reqLine.line.payload.options.length >= 3, "wire options surface to the UI");
+    assert.equal(reqLine.line.payload.preview.command, "npm test --quiet", "preview extracts the command");
+
+    const resolved = await mgr.resolvePermission({ sessionId: job.sessionId, requestId: reqLine.line.payload.requestId, optionId: "rejectOnce" });
+    assert.equal(resolved.decision, "deny");
+
     await waitFor(() => job.lines.find((l) => l.kind === "done"), 15_000, "done");
     const answers = readFileSync(logFile, "utf8").split("\n").filter(Boolean)
       .map((l) => JSON.parse(l)).filter((f) => f.method === "__permAnswer");
@@ -416,9 +430,112 @@ test("agent engine: workflow run confirmations are auto-allowed, foreign kinds s
     assert.equal(byTool.CreateWorkflow, "allow", "CreateWorkflow run confirmation is allowed");
     assert.equal(byTool.AmendWorkflow, "allow", "AmendWorkflow run confirmation is allowed");
     assert.equal(byTool.ResumeWorkflowRun, "allow", "ResumeWorkflowRun run confirmation is allowed");
-    assert.equal(byTool.Bash, "deny", "non-workflow tools remain denied");
+    assert.equal(byTool.Bash, "deny", "non-workflow tools resolve through the UI");
+    // the deny the UI chose propagates into the turn result
+    const completed = job.lines.find((l) => l.kind === "line" && l.line?.type === "turn.completed");
+    assert.match(String(completed?.line?.payload?.response || ""), /perm:deny/);
   } finally {
     delete process.env.FAKE_LOG;
+    await disposeManager(mgr);
+  }
+});
+
+test("agent engine: held permissions round-trip an allow from the UI, malformed resolves are distinguishable", async () => {
+  writeFileSync(scenarioFile, "plain");
+  const mgr = newManager();
+  try {
+    const { job } = mgr.start({ text: "perm-hold please", sessionId: null, cwd: ROOT, mode: "build", model: null });
+    const reqLine = await waitFor(
+      () => job.lines.find((l) => l.kind === "line" && l.line?.type === "permission.request"),
+      15_000,
+      "held permission line",
+    );
+    const requestId = reqLine.line.payload.requestId;
+
+    // unknown option → 400, unknown request → 404 (route layer maps them apart)
+    await assert.rejects(
+      () => mgr.resolvePermission({ sessionId: job.sessionId, requestId, optionId: "no-such-option" }),
+      (e) => e.status === 400 && e.code === "BAD_PERMISSION_OPTION",
+    );
+    await assert.rejects(
+      () => mgr.resolvePermission({ sessionId: job.sessionId, requestId: "perm_000000", optionId: "allowOnce" }),
+      (e) => e.status === 404 && e.code === "PERMISSION_NOT_FOUND",
+    );
+
+    const resolved = await mgr.resolvePermission({ sessionId: job.sessionId, requestId, optionId: "allowOnce" });
+    assert.equal(resolved.decision, "allow");
+
+    await waitFor(() => job.lines.find((l) => l.kind === "done"), 15_000, "done");
+    const completed = job.lines.find((l) => l.kind === "line" && l.line?.type === "turn.completed");
+    assert.match(String(completed?.line?.payload?.response || ""), /perm:allow/);
+    const resolvedLine = job.lines.find((l) => l.kind === "line" && l.line?.type === "permission.resolved");
+    assert.equal(resolvedLine.line.payload.decision, "allow");
+    assert.equal(resolvedLine.line.payload.via, "user");
+    assert.equal(resolvedLine.line.payload.optionId, "allowOnce");
+    // a settled request cannot be answered twice
+    await assert.rejects(
+      () => mgr.resolvePermission({ sessionId: job.sessionId, requestId, optionId: "allowOnce" }),
+      (e) => e.status === 404 && e.code === "PERMISSION_NOT_FOUND",
+    );
+  } finally {
+    await disposeManager(mgr);
+  }
+});
+
+test("agent engine: ZCODE_AGENT_PERM_UI=0 restores the deny-only bridge", async () => {
+  writeFileSync(scenarioFile, "plain");
+  process.env.ZCODE_AGENT_PERM_UI = "0";
+  const mgr = newManager();
+  try {
+    const { job } = mgr.start({ text: "perm-hold please", sessionId: null, cwd: ROOT, mode: "build", model: null });
+    await waitFor(() => job.lines.find((l) => l.kind === "done"), 15_000, "done");
+    assert.ok(!job.lines.some((l) => l.kind === "line" && l.line?.type === "permission.request"), "no permission line under the kill switch");
+    const completed = job.lines.find((l) => l.kind === "line" && l.line?.type === "turn.completed");
+    assert.match(String(completed?.line?.payload?.response || ""), /perm:deny/);
+  } finally {
+    delete process.env.ZCODE_AGENT_PERM_UI;
+    await disposeManager(mgr);
+  }
+});
+
+test("agent engine: watchdog denies a permission nobody answers, turn recovers", async () => {
+  writeFileSync(scenarioFile, "plain");
+  process.env.ZCODE_AGENT_PERM_TIMEOUT_MS = "500";
+  const mgr = newManager();
+  try {
+    const { job } = mgr.start({ text: "perm-hold please", sessionId: null, cwd: ROOT, mode: "build", model: null });
+    await waitFor(() => job.lines.find((l) => l.kind === "line" && l.line?.type === "permission.resolved"), 15_000, "watchdog resolution");
+    const resolvedLine = job.lines.find((l) => l.kind === "line" && l.line?.type === "permission.resolved");
+    assert.equal(resolvedLine.line.payload.decision, "deny");
+    assert.equal(resolvedLine.line.payload.via, "timeout");
+    await waitFor(() => job.lines.find((l) => l.kind === "done"), 15_000, "done after watchdog");
+    const completed = job.lines.find((l) => l.kind === "line" && l.line?.type === "turn.completed");
+    assert.match(String(completed?.line?.payload?.response || ""), /perm:deny/);
+  } finally {
+    delete process.env.ZCODE_AGENT_PERM_TIMEOUT_MS;
+    await disposeManager(mgr);
+  }
+});
+
+test("agent engine: stopping a turn sweeps its held permissions", async () => {
+  writeFileSync(scenarioFile, "hold"); // turn runs until session/stop
+  const mgr = newManager();
+  try {
+    const { job } = mgr.start({ text: "perm-hold please", sessionId: null, cwd: ROOT, mode: "build", model: null });
+    await waitFor(
+      () => job.lines.find((l) => l.kind === "line" && l.line?.type === "permission.request"),
+      15_000,
+      "held permission line",
+    );
+    await mgr.cancel(job.id);
+    const resolvedLine = await waitFor(
+      () => job.lines.find((l) => l.kind === "line" && l.line?.type === "permission.resolved"),
+      15_000,
+      "swept permission resolution",
+    );
+    assert.equal(resolvedLine.line.payload.via, "turn ended");
+    assert.equal(resolvedLine.line.payload.decision, "deny");
+  } finally {
     await disposeManager(mgr);
   }
 });

@@ -7,7 +7,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { ArrowLeftRight, ArrowUp, ArrowUpRight, BadgeCheck, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Coins, Copy, Eye, EyeOff, FileText, FoldVertical, FolderClosed, GitBranch, LoaderCircle, MessageSquare, MoreHorizontal, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Sparkles, Square, SquarePen, SquareTerminal, Terminal, Unplug, Wrench, X, Zap, BrainCircuit} from "lucide-react";
 import { ZLogo, IconButton, Markdown, CheckMark, useDialogA11y, overlayOpen, relativeTime, formatBytes } from "../ui";
 import { randomUUID } from "../lib/uuid";
-import { ApiError, type ApiClient, type CommandInfo, type FileCard, type ModelInfo, type SessionDetail, type SessionInfo, type TimelineEvent, type TodoItem, type TranscriptTurn } from "../api/client";
+import { ApiError, type ApiClient, type CommandInfo, type FileCard, type ModelInfo, type PermissionRequestLine, type PermissionResolvedLine, type SessionDetail, type SessionInfo, type TimelineEvent, type TodoItem, type TranscriptTurn } from "../api/client";
+import { PermissionCard } from "./PermissionCard";
 import { isTerminal } from "../state/run";
 import * as runs from "../state/runManager";
 import { snapshotSubmission, mayClearDraft, dequeueAfterSuccess, type Submission } from "../lib/submission";
@@ -1102,6 +1103,27 @@ export function ChatPanel({
     return acc;
   }, null);
 
+  // held permission requests (agent engine): the bridge surfaces each
+  // interaction/requestPermission as a permission.request line and its
+  // answer as permission.resolved — the card state is pure derived data, so
+  // a reloaded viewer replaying the stream sees the same card
+  const livePermissions = useMemo(() => {
+    const requests: PermissionRequestLine[] = [];
+    const resolutions = new Map<string, PermissionResolvedLine>();
+    for (const e of run.events) {
+      if (e.kind !== "line") continue;
+      const line = e.line as { type?: string; payload?: unknown };
+      if (line?.type === "permission.request") {
+        const p = line.payload as PermissionRequestLine;
+        if (p?.requestId && Array.isArray(p.options) && !requests.some((r) => r.requestId === p.requestId)) requests.push(p);
+      } else if (line?.type === "permission.resolved") {
+        const p = line.payload as PermissionResolvedLine;
+        if (p?.requestId) resolutions.set(p.requestId, p);
+      }
+    }
+    return { requests, resolutions };
+  }, [run.events]);
+
   // ZWUI-063: once the transcript carries the persisted form of the run's
   // answer, the live block duplicates it below the real turn. Fold ONLY when
   // a matching persisted assistant turn exists — delayed persistence keeps
@@ -1436,7 +1458,7 @@ export function ChatPanel({
             above) drops its duplicated content — the persisted turn owns the
             byline, footer and details now. Failures never fold: the error and
             its retry must stay visible */ }
-        {(run.answer || run.reasoning || localBusy || run.error) && (!liveFolded || run.error) && (
+        {(run.answer || run.reasoning || localBusy || run.error || livePermissions.requests.length > 0) && (!liveFolded || run.error) && (
           <article className="agent-message">
             <div className="agent-byline">
               {/* no sender name — the chip carries only LIVE state:
@@ -1454,6 +1476,22 @@ export function ChatPanel({
                 {detailsHidden ? <Eye size={12} /> : <EyeOff size={12} />}<span>{detailsHidden ? "Details" : "Hide"}</span>
               </button>
             </div>
+            {/* a permission waiting on the user outranks everything else in
+                the turn — always visible, never folded into details */}
+            {livePermissions.requests.length > 0 && (
+              <div className="perm-stack">
+                {livePermissions.requests.map((r) => (
+                  <PermissionCard
+                    key={r.requestId}
+                    client={client}
+                    sessionId={sessionId || run.sessionId}
+                    request={r}
+                    resolution={livePermissions.resolutions.get(r.requestId) || null}
+                    onNotify={onNotify}
+                  />
+                ))}
+              </div>
+            )}
             {/* answer first: while running, the CURRENT activity streams
                 visibly; once terminal, routine details collapse (REF2-03) —
                 failures below always stay visible */}

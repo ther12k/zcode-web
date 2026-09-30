@@ -486,6 +486,22 @@ export class JobManager {
         }
         return;
       }
+      if (n.method === "__permission_request" || n.method === "__permission_resolved") {
+        // held permission lifecycle from the host — surfaced as ordinary
+        // stream lines (type permission.request / permission.resolved) so
+        // replay and live viewers see the same card state
+        const p = n.params || {};
+        if (p.sessionId && job.sessionId && p.sessionId !== job.sessionId) return;
+        record({
+          kind: "line",
+          line: {
+            type: n.method === "__permission_request" ? "permission.request" : "permission.resolved",
+            sessionId: p.sessionId || job.sessionId || null,
+            payload: p,
+          },
+        });
+        return;
+      }
       if (n.method !== "session/event" || !n.params) return;
       const ev = n.params;
       if (ev.sessionId && ev.sessionId !== job.sessionId) return; // other sessions on the shared host
@@ -532,7 +548,9 @@ export class JobManager {
       }
       if (ev.type === "turn.completed" || ev.type === "turn.failed") {
         // per-session send lock means the terminal turn event arriving while
-        // this job is active IS this job's turn
+        // this job is active IS this job's turn; any permission still held
+        // for it is dead on the CLI side (late answers are ignored there)
+        host?.sweepPermissions?.(job.sessionId, "turn ended");
         job.resultType = ev.payload?.resultType ?? null;
         if (job.status === "stopping" || ev.payload?.resultType === "cancelled") {
           // stopping → cancelled; a completed turn after a stop request is
@@ -553,6 +571,9 @@ export class JobManager {
       // native stop, then a bounded wait; a wedged agent must not hold the
       // job addressable forever (the host itself is reaped independently)
       host?.stop(job.sessionId).catch(() => {});
+      // the stop aborts the CLI-side RPC too — held permissions for this
+      // session will never be consumed
+      host?.sweepPermissions?.(job.sessionId, "job timeout");
       setTimeout(() => {
         if (!settled && !TERMINAL.has(job.status)) finishAgent("timeout waiting for turn to settle after session/stop");
       }, 8000).unref();
@@ -650,6 +671,32 @@ export class JobManager {
       }
       throw e;
     }
+  }
+
+  /** Answer a held permission request from the web UI (agent engine).
+   *  Echoing the chosen option's response is exactly how a legacy desktop
+   *  answers on this wire; unknown requests/options are distinguishable
+   *  errors (404 vs 400) for the route layer. */
+  async resolvePermission({ sessionId, requestId, optionId }) {
+    if (!this.agentHosts) {
+      throw Object.assign(new Error("permission UI requires the agent engine"), { status: 501, code: "ENGINE_UNSUPPORTED" });
+    }
+    const id = String(requestId || "");
+    const candidates = [];
+    const active = this.bySession.get(sessionId);
+    if (active?.agent?.host) candidates.push(active.agent.host);
+    for (const host of this.agentHosts.hosts.values()) {
+      if (!candidates.includes(host)) candidates.push(host);
+    }
+    for (const host of candidates) {
+      if (!host.pendingPermissions?.has(id)) continue;
+      const resolved = host.resolvePermission(id, optionId);
+      if (!resolved) {
+        throw Object.assign(new Error(`unknown option "${optionId}" for permission request ${id}`), { status: 400, code: "BAD_PERMISSION_OPTION" });
+      }
+      return resolved;
+    }
+    throw Object.assign(new Error(`no pending permission request ${id}`), { status: 404, code: "PERMISSION_NOT_FOUND" });
   }
 
   /** Read-only dynamic-workflow faces (agent engine only): runs list,

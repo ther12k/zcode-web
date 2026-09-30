@@ -2036,3 +2036,125 @@ test("workflow artifacts tab lists runs and renders table + markdown artifacts",
   await expect(page.locator(".wf-modal .markdown")).toContainText("The workflow finished.", { timeout: 8000 });
   await page.getByLabel("Close artifact").click();
 });
+
+// ZWUI-086: held-permission card. The agent engine surfaces each
+// interaction/requestPermission as a permission.request stream line; the
+// card must render from the stream, answer through the resolve route, and
+// fold to its verdict when the permission.resolved line replays. The SSE
+// family is mocked (static event-stream fulfillments; the reconnect after
+// the click carries the resolution + turn end).
+test("held permission card renders from the stream, answers, and folds to its verdict", async ({ page }) => {
+  const SID = "sess_permui000000000000000000000000";
+  const JOB = "job_permui_e2e_1";
+  const REQ = "perm_e2e_1";
+  let answered = false;
+  const resolveCalls: Array<{ requestId: string; body: unknown }> = [];
+
+  await page.route(/\/api\/sessions\/sess_.+\?limit=/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        session: { id: SID, title: "perm card e2e" },
+        transcript: [],
+        total: 0,
+        hasMore: false,
+      }),
+    });
+  });
+  await page.route(/\/api\/chat$/, async (route) => {
+    const body = route.request().postDataJSON() as { text?: string };
+    if (body?.text !== "perm-ui probe") return route.fallback();
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({ jobId: JOB, sessionId: SID, cwd: body.cwd ?? "/w", mode: "build", model: null }),
+    });
+  });
+  await page.route(/\/api\/sse-ticket$/, async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ticket: "tk-e2e" }) });
+  });
+  await page.route(new RegExp(`/api/jobs/${JOB}$`), async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ jobId: JOB, status: answered ? "succeeded" : "running", sessionId: SID, cwd: "/w", mode: "build", createdAt: Date.now() - 2000, startedAt: Date.now() - 2000, finishedAt: null, exitCode: null, error: null, timedOut: false }),
+    });
+  });
+  await page.route(new RegExp(`/api/sessions/${SID}/permissions/`), async (route) => {
+    const url = new URL(route.request().url());
+    resolveCalls.push({ requestId: url.pathname.split("/").pop() || "", body: route.request().postDataJSON() });
+    answered = true;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, decision: "allow" }) });
+  });
+  await page.route(new RegExp(`/api/events/${JOB}`), async (route) => {
+    const sse = (events: Array<Record<string, unknown>>) =>
+      events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
+    const permissionRequest = {
+      kind: "line", id: 2,
+      line: {
+        type: "permission.request", sessionId: SID,
+        payload: {
+          requestId: REQ, sessionId: SID, turnId: "turn_e2e", toolCallId: "call_e2e", toolName: "Bash",
+          reason: "run the test suite", riskLevel: "high",
+          preview: { title: "Bash", command: "npm test --quiet", filePaths: [], scope: "command", fileChanges: [] },
+          options: [
+            { optionId: "allowOnce", kind: "allow", name: "Allow once" },
+            { optionId: "allowAlways", kind: "allow_always", name: "Always allow" },
+            { optionId: "rejectOnce", kind: "deny", name: "Deny" },
+          ],
+          timeoutMs: 600000, createdAt: Date.now() - 1000,
+        },
+      },
+    };
+    if (!answered) {
+      // phase 1: the turn starts and escalates; connection ends (static
+      // body) and the controller reconnects with backoff until answered
+      await route.fulfill({
+        status: 200, contentType: "text/event-stream",
+        body: sse([
+          { kind: "line", id: 1, line: { type: "turn.started", sessionId: SID, payload: {} } },
+          permissionRequest,
+        ]),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200, contentType: "text/event-stream",
+      body: sse([
+        {
+          kind: "line", id: 3,
+          line: { type: "permission.resolved", sessionId: SID, payload: { requestId: REQ, decision: "allow", optionId: "allowOnce", via: "user" } },
+        },
+        {
+          kind: "line", id: 4,
+          line: { type: "turn.completed", sessionId: SID, payload: { response: "tests passed after the approval", resultType: "success" } },
+        },
+        { kind: "done", id: 5, status: "succeeded" },
+      ]),
+    });
+  });
+
+  const input = page.getByLabel("Message Zcode");
+  await input.fill("perm-ui probe");
+  await input.press("Enter");
+
+  // the card renders from the stream line with preview + options
+  const card = page.locator(".perm-card");
+  await expect(card).toBeVisible({ timeout: 8000 });
+  await expect(card.locator(".perm-title")).toHaveText("Bash");
+  await expect(card.locator(".perm-risk")).toHaveText(/high/i);
+  await expect(card.locator(".perm-command")).toHaveText("npm test --quiet");
+  await expect(card.locator(".perm-option")).toHaveCount(3);
+
+  // answering POSTs the chosen option to the resolve route
+  await card.getByRole("button", { name: "Allow once" }).click();
+  await expect.poll(() => resolveCalls.length, { timeout: 5000 }).toBe(1);
+  assert.equal(resolveCalls[0].requestId, REQ);
+  assert.deepEqual(resolveCalls[0].body, { optionId: "allowOnce" });
+
+  // the resolution line folds the card to its verdict and the turn finishes
+  await expect(card.locator(".perm-verdict-allow")).toHaveText(/Allowed/, { timeout: 8000 });
+  await expect(card.locator(".perm-option")).toHaveCount(0);
+  await expect(page.locator(".agent-message")).toContainText("tests passed after the approval", { timeout: 8000 });
+});

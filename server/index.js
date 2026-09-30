@@ -1003,6 +1003,40 @@ async function handleApi(req, res, url) {
     }
   }
 
+  // Held-permission answer path (agent engine). The request itself reaches
+  // the browser as permission.request stream lines; this resolves it by
+  // echoing the chosen option's response — legacy-desktop semantics. The
+  // requestId goes into a host-side map lookup, never a path.
+  const permResolveMatch = route.match(/^\/api\/sessions\/(sess_[A-Za-z0-9_-]+)\/permissions\/([A-Za-z0-9_.:-]{1,128})$/);
+  if (permResolveMatch && req.method === "POST") {
+    let optionId = "";
+    try {
+      const body = JSON.parse(await readBody(req, 4096));
+      optionId = typeof body.optionId === "string" ? body.optionId.trim().slice(0, 128) : "";
+    } catch {
+      optionId = "";
+    }
+    if (!optionId) {
+      return sendJson(res, 400, { error: "optionId is required", code: "BAD_REQUEST" });
+    }
+    let sess;
+    try {
+      sess = store.get(permResolveMatch[1]);
+    } catch (e) {
+      if (e.code !== "DB_MISSING") return sendJson(res, 500, { error: e.message });
+    }
+    const cwd = sess?.directory;
+    if (!cwd || !insideAllowedRoots(realpathOf(cwd))) {
+      return sendJson(res, 404, { error: "session not found (or outside allowed roots)" });
+    }
+    try {
+      const result = await jobs.resolvePermission({ sessionId: permResolveMatch[1], requestId: permResolveMatch[2], optionId });
+      return sendJson(res, 200, { ok: true, decision: result.decision });
+    } catch (e) {
+      return sendJson(res, e.status || 500, { error: e.message, code: e.code });
+    }
+  }
+
   // Dynamic-workflow artifacts (agent engine only): journal-backed read
   // faces behind REST. Ids go into protocol params, never paths — the CLI
   // resolves them against its own journal, so a hostile id can only miss.
