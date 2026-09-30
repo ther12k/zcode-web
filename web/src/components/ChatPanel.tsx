@@ -743,6 +743,15 @@ export function ChatPanel({
     const stored = reasoningLevelPrefs[model];
     return stored && reasoningMeta.levels.includes(stored) ? stored : "";
   }, [reasoningMeta, reasoningLevelPrefs, model]);
+  // The registry demands a level for multi-level models on the very first
+  // send of a session — availability only reaches the bridge asynchronously,
+  // so "no level chosen" used to mean a rejected first message. Send the
+  // advertised default (derived server-side exactly like the CLI registry);
+  // an explicit pick still wins, and models without levels send none.
+  const effectiveReasoningLevel = useMemo(
+    () => selectedReasoningLevel || reasoningMeta.defaultLevel || "",
+    [selectedReasoningLevel, reasoningMeta],
+  );
   const pickReasoningLevel = useCallback((level: string) => {
     if (!model) return;
     const next = { ...loadPrefs().reasoningLevels };
@@ -759,7 +768,7 @@ export function ChatPanel({
     const sub = snapshotSubmission({
       draftKey, revision: draftRevRef.current,
       projectKey: cwd, cwd, sessionId,
-      text, model: model || "", reasoningLevel: selectedReasoningLevel, mode,
+      text, model: model || "", reasoningLevel: effectiveReasoningLevel, mode,
       attachments: attachments.map((a) => ({ uploadRef: a.path, name: a.name })),
     }, randomUUID());
     setQueuedSubmissions((q) => [...q, sub]);
@@ -768,7 +777,7 @@ export function ChatPanel({
     touchDraft();
     saveDraft(draftKey, "");
     return true;
-  }, [input, attachments, uploading, providerLive, draftKey, cwd, sessionId, model, selectedReasoningLevel, mode, touchDraft]);
+  }, [input, attachments, uploading, providerLive, draftKey, cwd, sessionId, model, effectiveReasoningLevel, mode, touchDraft]);
 
   // ZWUI-050: the manager owns the POST, the stream and the poll; this panel
   // only supplies view concerns. Submissions are immutable snapshots built
@@ -836,13 +845,13 @@ export function ChatPanel({
     const sub = snapshotSubmission({
       draftKey, revision: draftRevRef.current,
       projectKey: cwd, cwd, sessionId,
-      text, model: model || "", reasoningLevel: selectedReasoningLevel, mode,
+      text, model: model || "", reasoningLevel: effectiveReasoningLevel, mode,
       attachments: attachments.map((a) => ({ uploadRef: a.path, name: a.name })),
     }, randomUUID());
     setSteerPending(sub);
     setInput(""); setAttachments([]); touchDraft(); saveDraft(draftKey, "");
     stopRun();
-  }, [input, attachments, uploading, providerLive, busy, run.jobId, draftKey, cwd, sessionId, model, selectedReasoningLevel, mode, touchDraft, stopRun]);
+  }, [input, attachments, uploading, providerLive, busy, run.jobId, draftKey, cwd, sessionId, model, effectiveReasoningLevel, mode, touchDraft, stopRun]);
 
   const steerSettling = useRef(false);
   useEffect(() => {
@@ -871,10 +880,10 @@ export function ChatPanel({
     submitWith(snapshotSubmission({
       draftKey, revision: draftRevRef.current,
       projectKey: cwd, cwd, sessionId,
-      text, model: model || "", reasoningLevel: selectedReasoningLevel, mode,
+      text, model: model || "", reasoningLevel: effectiveReasoningLevel, mode,
       attachments: attachments.map((a) => ({ uploadRef: a.path, name: a.name })),
     }, randomUUID()), { clearDraft: true, submitView: runKey });
-  }, [guard, busy, queueCurrentDraft, input, attachments, draftKey, cwd, sessionId, mode, model, selectedReasoningLevel, runKey, submitWith]);
+  }, [guard, busy, queueCurrentDraft, input, attachments, draftKey, cwd, sessionId, mode, model, effectiveReasoningLevel, runKey, submitWith]);
 
   // ambiguous delivery: the POST threw, so the server may have already
   // accepted the request. Reuse the SAME request id and exact payload — the
@@ -905,9 +914,9 @@ export function ChatPanel({
     submitWith(snapshotSubmission({
       draftKey, revision: draftRevRef.current,
       projectKey: cwd, cwd, sessionId,
-      text, model: model || "", reasoningLevel: selectedReasoningLevel, mode, attachments: [],
+      text, model: model || "", reasoningLevel: effectiveReasoningLevel, mode, attachments: [],
     }, randomUUID()), { clearDraft: false, submitView: runKey });
-  }, [guard, draftKey, cwd, sessionId, mode, model, runKey, submitWith, selectedReasoningLevel]);
+  }, [guard, draftKey, cwd, sessionId, mode, model, runKey, submitWith, effectiveReasoningLevel]);
 
   // "Edit and resend" loads a historical prompt into the composer — an
   // explicit replace of the draft, surfaced to the user when one existed

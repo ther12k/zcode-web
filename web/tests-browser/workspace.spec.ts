@@ -2158,3 +2158,41 @@ test("held permission card renders from the stream, answers, and folds to its ve
   await expect(card.locator(".perm-option")).toHaveCount(0);
   await expect(page.locator(".agent-message")).toContainText("tests passed after the approval", { timeout: 8000 });
 });
+
+// Regression (live 2026-09-30): a fresh chat with a multi-level model failed
+// its FIRST message — "Reasoning level is required" — because the composer
+// sent no level while none was picked. The registry derives its levels from
+// the same builtin rules as /api/models, so the advertised default is always
+// valid: Auto now sends defaultReasoningLevel (an explicit pick still wins,
+// and level-less models send none).
+test("composer sends the model's advertised default reasoning level when none is picked", async ({ page }) => {
+  await page.route(/\/api\/models$/, async (route) => {
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ models: [
+        { ref: "zai/glm-5.3", provider: "zai", providerName: "Z.AI", model: "glm-5.3", displayName: "GLM 5.3", isDefault: true,
+          reasoningLevels: ["low", "high", "max"], defaultReasoningLevel: "low" },
+      ] }),
+    });
+  });
+  let chatBody: Record<string, unknown> | null = null;
+  await page.route(/\/api\/chat$/, async (route) => {
+    chatBody = route.request().postDataJSON();
+    return route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ jobId: "j-deflevel", sessionId: null, cwd: "/x", mode: "plan", model: null }) });
+  });
+
+  await page.reload();
+  await page.waitForLoadState("domcontentloaded");
+  const picker = page.getByRole("button", { name: /^Reasoning level:/ });
+  await expect(picker).toBeVisible({ timeout: 8000 });
+  await expect(picker).toHaveText(/Auto/); // nothing explicitly picked
+
+  const input = page.getByLabel("Message Zcode");
+  await input.fill("default level e2e");
+  await input.press("Enter");
+  await page.waitForTimeout(600);
+  assert.ok(chatBody, "chat POST fired");
+  assert.equal((chatBody as Record<string, unknown>).model, "zai/glm-5.3");
+  assert.equal((chatBody as Record<string, unknown>).reasoningLevel, "low", "Auto resolves to the advertised default");
+});
