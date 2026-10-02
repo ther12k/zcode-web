@@ -2230,3 +2230,35 @@ describe("permission resolve route (prompt engine)", () => {
     assert.equal(badId.status, 404);
   });
 });
+
+// User-input resolution route mirrors the permission route family: engine
+// gate, input validation, and session-store guard (round-trip coverage
+// lives in agent-bridge.test.mjs).
+describe("user input resolve route (prompt engine)", () => {
+  it("validates action and guards the session store before engine dispatch", async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const dbDir = join(home, "cli", "db");
+    mkdirSync(dbDir, { recursive: true });
+    const db = new DatabaseSync(join(dbDir, "db.sqlite"));
+    db.exec(`CREATE TABLE IF NOT EXISTS session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT);`);
+    db.prepare("INSERT OR REPLACE INTO session (id, title, directory, time_created, time_updated) VALUES (?,?,?,?,?)")
+      .run("sess_uinput_route_probe", "uinput route test", ws, Date.now(), Date.now());
+    db.close();
+
+    const engine = await fetch(`${BASE}/api/sessions/sess_uinput_route_probe/user-input/req_probe_1`, {
+      method: "POST", headers: auth, body: JSON.stringify({ action: "accept", answers: { q: "a" } }),
+    });
+    assert.equal(engine.status, 501);
+    assert.equal((await engine.json()).code, "ENGINE_UNSUPPORTED");
+
+    const badAction = await fetch(`${BASE}/api/sessions/sess_uinput_route_probe/user-input/req_probe_1`, {
+      method: "POST", headers: auth, body: JSON.stringify({ action: "explode" }),
+    });
+    assert.equal(badAction.status, 400);
+
+    const unknown = await fetch(`${BASE}/api/sessions/sess_nope_not_a_real/user-input/req_probe_1`, {
+      method: "POST", headers: auth, body: JSON.stringify({ action: "cancel" }),
+    });
+    assert.equal(unknown.status, 404);
+  });
+});

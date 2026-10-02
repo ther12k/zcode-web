@@ -7,8 +7,9 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { ArrowLeftRight, ArrowUp, ArrowUpRight, BadgeCheck, Brain, ChevronUp, Check, CheckCheck, ChevronDown, ChevronRight, Clock3, Coins, Copy, Eye, EyeOff, FileText, FoldVertical, FolderClosed, GitBranch, LoaderCircle, MessageSquare, MoreHorizontal, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Sparkles, Square, SquarePen, SquareTerminal, Terminal, Unplug, Wrench, X, Zap, BrainCircuit} from "lucide-react";
 import { ZLogo, IconButton, Markdown, CheckMark, useDialogA11y, overlayOpen, relativeTime, formatBytes } from "../ui";
 import { randomUUID } from "../lib/uuid";
-import { ApiError, type ApiClient, type CommandInfo, type FileCard, type ModelInfo, type PermissionRequestLine, type PermissionResolvedLine, type SessionDetail, type SessionInfo, type TimelineEvent, type TodoItem, type TranscriptTurn } from "../api/client";
+import { ApiError, type ApiClient, type CommandInfo, type FileCard, type ModelInfo, type PermissionRequestLine, type PermissionResolvedLine, type SessionDetail, type SessionInfo, type TimelineEvent, type TodoItem, type TranscriptTurn, type UserInputRequestLine, type UserInputResolvedLine } from "../api/client";
 import { PermissionCard } from "./PermissionCard";
+import { UserInputCard } from "./UserInputCard";
 import { isTerminal } from "../state/run";
 import * as runs from "../state/runManager";
 import { snapshotSubmission, mayClearDraft, dequeueAfterSuccess, type Submission } from "../lib/submission";
@@ -1112,13 +1113,16 @@ export function ChatPanel({
     return acc;
   }, null);
 
-  // held permission requests (agent engine): the bridge surfaces each
-  // interaction/requestPermission as a permission.request line and its
-  // answer as permission.resolved — the card state is pure derived data, so
-  // a reloaded viewer replaying the stream sees the same card
+  // held interaction requests (agent engine): the bridge surfaces each
+  // interaction/requestPermission and interaction/requestUserInput as
+  // permission.request / userinput.request lines, with their answers as the
+  // resolved counterparts — card state is pure derived data, so a reloaded
+  // viewer replaying the stream sees the same cards
   const livePermissions = useMemo(() => {
     const requests: PermissionRequestLine[] = [];
     const resolutions = new Map<string, PermissionResolvedLine>();
+    const inputRequests: UserInputRequestLine[] = [];
+    const inputResolutions = new Map<string, UserInputResolvedLine>();
     for (const e of run.events) {
       if (e.kind !== "line") continue;
       const line = e.line as { type?: string; payload?: unknown };
@@ -1131,9 +1135,15 @@ export function ChatPanel({
         // optionId) and the CLI's own protocol event (fallback only — never
         // let the leaner payload overwrite the richer one)
         if (p?.requestId && (p.via || !resolutions.has(p.requestId))) resolutions.set(p.requestId, p);
+      } else if (line?.type === "userinput.request") {
+        const p = line.payload as UserInputRequestLine;
+        if (p?.requestId && Array.isArray(p.questions) && !inputRequests.some((r) => r.requestId === p.requestId)) inputRequests.push(p);
+      } else if (line?.type === "userinput.resolved") {
+        const p = line.payload as UserInputResolvedLine;
+        if (p?.requestId && (p.via || !inputResolutions.has(p.requestId))) inputResolutions.set(p.requestId, p);
       }
     }
-    return { requests, resolutions };
+    return { requests, resolutions, inputRequests, inputResolutions };
   }, [run.events]);
 
   // ZWUI-063: once the transcript carries the persisted form of the run's
@@ -1470,7 +1480,7 @@ export function ChatPanel({
             above) drops its duplicated content — the persisted turn owns the
             byline, footer and details now. Failures never fold: the error and
             its retry must stay visible */ }
-        {(run.answer || run.reasoning || localBusy || run.error || livePermissions.requests.length > 0) && (!liveFolded || run.error) && (
+        {(run.answer || run.reasoning || localBusy || run.error || livePermissions.requests.length > 0 || livePermissions.inputRequests.length > 0) && (!liveFolded || run.error) && (
           <article className="agent-message">
             <div className="agent-byline">
               {/* no sender name — the chip carries only LIVE state:
@@ -1488,8 +1498,22 @@ export function ChatPanel({
                 {detailsHidden ? <Eye size={12} /> : <EyeOff size={12} />}<span>{detailsHidden ? "Details" : "Hide"}</span>
               </button>
             </div>
-            {/* a permission waiting on the user outranks everything else in
+            {/* interactions waiting on the user outrank everything else in
                 the turn — always visible, never folded into details */}
+            {livePermissions.inputRequests.length > 0 && (
+              <div className="perm-stack">
+                {livePermissions.inputRequests.map((r) => (
+                  <UserInputCard
+                    key={r.requestId}
+                    client={client}
+                    sessionId={sessionId || run.sessionId}
+                    request={r}
+                    resolution={livePermissions.inputResolutions.get(r.requestId) || null}
+                    onNotify={onNotify}
+                  />
+                ))}
+              </div>
+            )}
             {livePermissions.requests.length > 0 && (
               <div className="perm-stack">
                 {livePermissions.requests.map((r) => (

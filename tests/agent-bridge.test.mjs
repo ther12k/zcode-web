@@ -533,6 +533,112 @@ test("agent engine: held permissions round-trip an allow from the UI, malformed 
   }
 });
 
+// Held AskUserQuestion (interaction/requestUserInput): the bridge holds the
+// RPC, the web UI answers through the resolve route, and accept carries the
+// answers back into the turn (the CLI feeds them to the tool call).
+test("agent engine: held user input round-trips answers, malformed resolves are distinguishable", async () => {
+  writeFileSync(scenarioFile, "plain");
+  const logFile = join(home, "input-frames.log");
+  process.env.FAKE_LOG = logFile;
+  const mgr = newManager();
+  try {
+    const { job } = mgr.start({ text: "input-hold please", sessionId: null, cwd: ROOT, mode: "build", model: null });
+    const reqLine = await waitFor(
+      () => job.lines.find((l) => l.kind === "line" && l.line?.type === "userinput.request"),
+      15_000,
+      "held user input line",
+    );
+    const p = reqLine.line.payload;
+    assert.equal(p.questions.length, 2);
+    assert.equal(p.questions[1].multiSelect, true);
+    assert.equal(p.questions[0].options[0].label, "us-east");
+    const requestId = p.requestId;
+
+    // bad action → 400; unknown request → 404; accept without answers → 400
+    await assert.rejects(
+      () => mgr.resolveUserInput({ sessionId: job.sessionId, requestId, action: "nonsense" }),
+      (e) => e.status === 400 && e.code === "BAD_REQUEST",
+    );
+    await assert.rejects(
+      () => mgr.resolveUserInput({ sessionId: job.sessionId, requestId: "perm_000000", action: "accept" }),
+      (e) => e.status === 404 && e.code === "USER_INPUT_NOT_FOUND",
+    );
+    await assert.rejects(
+      () => mgr.resolveUserInput({ sessionId: job.sessionId, requestId, action: "accept", answers: {} }),
+      (e) => e.status === 400 && e.code === "BAD_USER_INPUT",
+    );
+
+    const resolved = await mgr.resolveUserInput({
+      sessionId: job.sessionId,
+      requestId,
+      action: "accept",
+      answers: {
+        "Which region should the probe target?": "eu-west",
+        "Which reports should run?": "summary, latency",
+      },
+    });
+    assert.equal(resolved.action, "accept");
+
+    await waitFor(() => job.lines.find((l) => l.kind === "done"), 15_000, "done");
+    const completed = job.lines.find((l) => l.kind === "line" && l.line?.type === "turn.completed");
+    assert.match(String(completed?.line?.payload?.response || ""), /input:accept/);
+    assert.match(String(completed?.line?.payload?.response || ""), /eu-west/);
+    // the wire answer the CLI received (logged by the fake) carries the
+    // answers in content — the shape the broker's modify path consumes
+    const answer = readFileSync(logFile, "utf8").split("\n").filter(Boolean)
+      .map((l) => JSON.parse(l)).find((f) => f.method === "__inputAnswer");
+    assert.equal(answer.params.action, "accept");
+    assert.deepEqual(answer.params.content.answers, {
+      "Which region should the probe target?": "eu-west",
+      "Which reports should run?": "summary, latency",
+    });
+    // a settled request cannot be answered twice
+    await assert.rejects(
+      () => mgr.resolveUserInput({ sessionId: job.sessionId, requestId, action: "cancel" }),
+      (e) => e.status === 404 && e.code === "USER_INPUT_NOT_FOUND",
+    );
+  } finally {
+    delete process.env.FAKE_LOG;
+    await disposeManager(mgr);
+  }
+});
+
+test("agent engine: user input declines cleanly, kill switch and watchdog cancel", async () => {
+  writeFileSync(scenarioFile, "plain");
+  process.env.ZCODE_AGENT_PERM_TIMEOUT_MS = "500";
+  const mgr = newManager();
+  try {
+    // decline: the turn ends with the decline action, no answers
+    const { job } = mgr.start({ text: "input-hold please", sessionId: null, cwd: ROOT, mode: "build", model: null });
+    const reqLine = await waitFor(
+      () => job.lines.find((l) => l.kind === "line" && l.line?.type === "userinput.request"),
+      15_000,
+      "held user input line",
+    );
+    const declined = await mgr.resolveUserInput({ sessionId: job.sessionId, requestId: reqLine.line.payload.requestId, action: "decline" });
+    assert.equal(declined.action, "decline");
+    await waitFor(() => job.lines.find((l) => l.kind === "done"), 15_000, "done after decline");
+    const completed = job.lines.find((l) => l.kind === "line" && l.line?.type === "turn.completed");
+    assert.match(String(completed?.line?.payload?.response || ""), /input:decline:\{\}/);
+
+    // watchdog: nobody answers → cancel via timeout, turn still completes
+    const { job: job2 } = mgr.start({ text: "input-hold again", sessionId: null, cwd: ROOT, mode: "build", model: null });
+    const swept = await waitFor(
+      () => job2.lines.find((l) => l.kind === "line" && l.line?.type === "userinput.resolved"),
+      15_000,
+      "watchdog resolution",
+    );
+    assert.equal(swept.line.payload.action, "cancel");
+    assert.equal(swept.line.payload.via, "timeout");
+    await waitFor(() => job2.lines.find((l) => l.kind === "done"), 15_000, "done after watchdog");
+    const completed2 = job2.lines.find((l) => l.kind === "line" && l.line?.type === "turn.completed");
+    assert.match(String(completed2?.line?.payload?.response || ""), /input:cancel/);
+  } finally {
+    delete process.env.ZCODE_AGENT_PERM_TIMEOUT_MS;
+    await disposeManager(mgr);
+  }
+});
+
 test("agent engine: ZCODE_AGENT_PERM_UI=0 restores the deny-only bridge", async () => {
   writeFileSync(scenarioFile, "plain");
   process.env.ZCODE_AGENT_PERM_UI = "0";

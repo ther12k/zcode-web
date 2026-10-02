@@ -1037,6 +1037,45 @@ async function handleApi(req, res, url) {
     }
   }
 
+  // Held AskUserQuestion answer path (agent engine). Same shape as the
+  // permission resolve route; accept carries {answers} keyed by question.
+  const userInputMatch = route.match(/^\/api\/sessions\/(sess_[A-Za-z0-9_-]+)\/user-input\/([A-Za-z0-9_.:-]{1,128})$/);
+  if (userInputMatch && req.method === "POST") {
+    let action = "";
+    let answers = null;
+    try {
+      const body = JSON.parse(await readBody(req, 131_072));
+      action = typeof body.action === "string" ? body.action.trim().slice(0, 16) : "";
+      if (body.answers && typeof body.answers === "object" && !Array.isArray(body.answers)) {
+        answers = {};
+        for (const [k, v] of Object.entries(body.answers).slice(0, 8)) {
+          answers[String(k).slice(0, 500)] = String(v ?? "").slice(0, 2000);
+        }
+      }
+    } catch {
+      action = "";
+    }
+    if (action !== "accept" && action !== "decline" && action !== "cancel") {
+      return sendJson(res, 400, { error: "action must be accept, decline, or cancel", code: "BAD_REQUEST" });
+    }
+    let sess;
+    try {
+      sess = store.get(userInputMatch[1]);
+    } catch (e) {
+      if (e.code !== "DB_MISSING") return sendJson(res, 500, { error: e.message });
+    }
+    const cwd = sess?.directory;
+    if (!cwd || !insideAllowedRoots(realpathOf(cwd))) {
+      return sendJson(res, 404, { error: "session not found (or outside allowed roots)" });
+    }
+    try {
+      const result = await jobs.resolveUserInput({ sessionId: userInputMatch[1], requestId: userInputMatch[2], action, answers });
+      return sendJson(res, 200, { ok: true, action: result.action });
+    } catch (e) {
+      return sendJson(res, e.status || 500, { error: e.message, code: e.code });
+    }
+  }
+
   // Dynamic-workflow artifacts (agent engine only): journal-backed read
   // faces behind REST. Ids go into protocol params, never paths — the CLI
   // resolves them against its own journal, so a hostile id can only miss.

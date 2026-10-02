@@ -2196,3 +2196,131 @@ test("composer sends the model's advertised default reasoning level when none is
   assert.equal((chatBody as Record<string, unknown>).model, "zai/glm-5.3");
   assert.equal((chatBody as Record<string, unknown>).reasoningLevel, "low", "Auto resolves to the advertised default");
 });
+
+// ZWUI-087: held AskUserQuestion card. The agent engine surfaces each
+// interaction/requestUserInput as a userinput.request stream line; the card
+// renders the questions, submits {action:"accept", answers} through the
+// resolve route, and folds to its verdict on userinput.resolved. SSE family
+// mocked like the permission-card spec (static fulfillments; the reconnect
+// after submit carries the resolution + turn end).
+test("held user-input card renders questions, submits answers, and folds to its verdict", async ({ page }) => {
+  const SID = "sess_uinput00000000000000000000000000";
+  const JOB = "job_uinput_e2e_1";
+  const REQ = "uinp_e2e_1";
+  let submitted = false;
+  const resolveCalls: Array<{ requestId: string; body: unknown }> = [];
+
+  await page.route(/\/api\/sessions\/sess_.+\?limit=/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        session: { id: SID, title: "uinput card e2e" },
+        transcript: [],
+        total: 0,
+        hasMore: false,
+      }),
+    });
+  });
+  await page.route(/\/api\/chat$/, async (route) => {
+    const body = route.request().postDataJSON() as { text?: string };
+    if (body?.text !== "uinput probe") return route.fallback();
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({ jobId: JOB, sessionId: SID, cwd: body.cwd ?? "/w", mode: "build", model: null }),
+    });
+  });
+  await page.route(/\/api\/sse-ticket$/, async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ticket: "tk-e2e" }) });
+  });
+  await page.route(new RegExp(`/api/jobs/${JOB}$`), async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ jobId: JOB, status: submitted ? "succeeded" : "running", sessionId: SID, cwd: "/w", mode: "build", createdAt: Date.now() - 2000, startedAt: Date.now() - 2000, finishedAt: null, exitCode: null, error: null, timedOut: false }),
+    });
+  });
+  await page.route(new RegExp(`/api/sessions/${SID}/user-input/`), async (route) => {
+    const url = new URL(route.request().url());
+    resolveCalls.push({ requestId: url.pathname.split("/").pop() || "", body: route.request().postDataJSON() });
+    submitted = true;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, action: "accept" }) });
+  });
+  await page.route(new RegExp(`/api/events/${JOB}`), async (route) => {
+    const sse = (events: Array<Record<string, unknown>>) =>
+      events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
+    const request = {
+      kind: "line", id: 2,
+      line: {
+        type: "userinput.request", sessionId: SID,
+        payload: {
+          requestId: REQ, sessionId: SID, turnId: "turn_e2e", toolCallId: "call_e2e", toolName: "AskUserQuestion",
+          prompt: "Pick the deploy target",
+          questions: [
+            { question: "Which region?", header: "Region", multiSelect: false, options: [{ label: "us-east", description: "primary" }, { label: "eu-west" }] },
+            { question: "Which checks?", header: "Checks", multiSelect: true, options: [{ label: "lint" }, { label: "tests" }] },
+          ],
+          timeoutMs: 600000, createdAt: Date.now() - 1000,
+        },
+      },
+    };
+    if (!submitted) {
+      await route.fulfill({
+        status: 200, contentType: "text/event-stream",
+        body: sse([
+          { kind: "line", id: 1, line: { type: "turn.started", sessionId: SID, payload: {} } },
+          request,
+        ]),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200, contentType: "text/event-stream",
+      body: sse([
+        {
+          kind: "line", id: 3,
+          line: {
+            type: "userinput.resolved", sessionId: SID,
+            payload: { requestId: REQ, action: "accept", via: "user", answers: { "Which region?": "eu-west", "Which checks?": "lint, tests" } },
+          },
+        },
+        {
+          kind: "line", id: 4,
+          line: { type: "turn.completed", sessionId: SID, payload: { response: "deploying to eu-west with lint and tests", resultType: "success" } },
+        },
+        { kind: "done", id: 5, status: "succeeded" },
+      ]),
+    });
+  });
+
+  const input = page.getByLabel("Message Zcode");
+  await input.fill("uinput probe");
+  await input.press("Enter");
+
+  // the card renders both questions with radio / checkbox semantics
+  const card = page.locator(".uq-card");
+  await expect(card).toBeVisible({ timeout: 8000 });
+  await expect(card.locator(".uq-question")).toHaveCount(2);
+  await expect(card.locator(".uq-header").first()).toHaveText("Region");
+  // submitting with nothing picked is refused client-side
+  await card.getByRole("button", { name: "Submit answers" }).click();
+  await expect.poll(() => resolveCalls.length, { timeout: 2000 }).toBe(0);
+
+  // pick: single-select eu-west, multi-select lint + tests
+  await card.getByRole("radio", { name: /eu-west/ }).click();
+  await card.getByRole("checkbox", { name: "lint" }).click();
+  await card.getByRole("checkbox", { name: "tests" }).click();
+  await card.getByRole("button", { name: "Submit answers" }).click();
+
+  await expect.poll(() => resolveCalls.length, { timeout: 5000 }).toBe(1);
+  assert.equal(resolveCalls[0].requestId, REQ);
+  assert.deepEqual(resolveCalls[0].body, {
+    action: "accept",
+    answers: { "Which region?": "eu-west", "Which checks?": "lint, tests" },
+  });
+
+  // the resolution folds the card and the turn finishes with the answer
+  await expect(card.locator(".perm-verdict-allow")).toHaveText(/Answered/, { timeout: 8000 });
+  await expect(page.locator(".agent-message")).toContainText("deploying to eu-west with lint and tests", { timeout: 8000 });
+});

@@ -930,3 +930,22 @@ body.is-col-resizing .workspace-main{pointer-events:none}
 .perm-option-allow{color:#c0dca8;border-color:#515550}
 .perm-option-deny{color:#d9848a}
 .perm-picked{font-size:10.5px;color:var(--muted)}
+
+/* held AskUserQuestion cards (reuse the perm-card frame) */
+.uq-head-icon{color:#c9b35e}
+.uq-card{border-left-color:#7d94b8}
+.uq-card.perm-card-resolved{border-left-color:#6f7a6c}
+.uq-question{border:0;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;min-width:0}
+.uq-question-head{display:flex;flex-direction:column;gap:2px;padding:0}
+.uq-header{font-size:9.5px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted)}
+.uq-text{font-size:11.5px;line-height:1.5;color:var(--text);font-weight:500;overflow-wrap:anywhere}
+.uq-options{display:flex;flex-wrap:wrap;gap:7px}
+.uq-option{display:flex;flex-direction:column;gap:2px;max-width:100%;text-align:left;padding:6px 11px;border:1px solid var(--border-strong);border-radius:5px;background:var(--panel);cursor:pointer}
+.uq-option:hover:not(:disabled){background:var(--surface-hover)}
+.uq-option:disabled{opacity:.55;cursor:default}
+.uq-option-selected{border-color:#7d94b8;background:var(--surface-hover)}
+.uq-option-label{font-size:11.5px;color:var(--text)}
+.uq-option-desc{font-size:10px;color:var(--muted);overflow-wrap:anywhere}
+.uq-other{width:100%;padding:6px 9px;border:1px solid var(--border-strong);border-radius:5px;background:var(--panel);color:var(--text);font-size:11.5px;font-family:inherit}
+.uq-other:focus{outline:1px solid #7d94b8}
+.uq-other::placeholder{color:var(--subtle)}

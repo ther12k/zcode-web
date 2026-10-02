@@ -114,6 +114,7 @@ export class AgentHost {
     this.modelLevels = new Map(); // sessionId -> Map("provider/model" -> default level)
     this.listeners = new Set(); // (notification) => void  (session/event routing)
     this.pendingPermissions = new Map(); // requestId -> held interaction/requestPermission
+    this.pendingUserInputs = new Map(); // requestId -> held interaction/requestUserInput
     this.lastUsedAt = Date.now();
     this.log = log || (() => {});
     this.client = new ProtocolClient({
@@ -126,9 +127,9 @@ export class AgentHost {
       onServerRequest: (req) => this.answerServerRequest(req),
     });
     this.client.exitedPromise.then((info) => {
-      // the RPC peer is gone: held permission promises must settle (their
+      // the RPC peer is gone: held interaction promises must settle (their
       // answers have nowhere to go) before listeners see the exit
-      this.sweepAllPermissions("agent-server exited");
+      this.sweepAllInteractions("agent-server exited");
       for (const listener of this.listeners) {
         try {
           listener({ method: "__host_exited", params: info });
@@ -240,6 +241,9 @@ export class AgentHost {
     }
     if (method === "interaction/requestPermission") {
       return this.handlePermissionRequest(params);
+    }
+    if (method === "interaction/requestUserInput") {
+      return this.handleUserInputRequest(params);
     }
     if (method === "interaction/requestUserInput") {
       return { action: "cancel", reason: "cancelled by zcode-web bridge (no interactive input UI)" };
@@ -385,6 +389,144 @@ export class AgentHost {
     for (const requestId of [...this.pendingPermissions.keys()]) {
       this.settlePermission(requestId, { decision: "deny", reason: `permission request closed (${via})` }, via);
     }
+  }
+
+  /** AskUserQuestion escalations (interaction/requestUserInput). The CLI
+   *  maps its tool input to wire questions (value = label); a host answers
+   *  with {action: accept|decline|cancel, content:{answers}} — accept
+   *  becomes a "modify" that feeds the answers back into the tool call
+   *  (bootstrap userInputResponseToBrokerResult), decline/cancel deny it.
+   *  Held like permissions: card over the stream, resolve route answers,
+   *  watchdog + turn-end sweep cancel, kill switch restores cancel-only. */
+  handleUserInputRequest(params) {
+    if (process.env.ZCODE_AGENT_PERM_UI === "0") {
+      return { action: "cancel", reason: "cancelled by zcode-web bridge (permission UI disabled)" };
+    }
+    const requestId = String(params?.requestId || "");
+    if (!requestId || !Array.isArray(params?.questions) || params.questions.length === 0) {
+      return { action: "cancel", reason: "malformed user input request" };
+    }
+    const questions = params.questions
+      .filter((q) => q && typeof q === "object" && q.question && Array.isArray(q.options))
+      .slice(0, 4)
+      .map((q) => ({
+        question: String(q.question).slice(0, 500),
+        header: String(q.header || "Question").slice(0, 60),
+        multiSelect: Boolean(q.multiSelect),
+        options: q.options
+          .filter((o) => o && typeof o === "object" && (o.label || o.value))
+          .slice(0, 8)
+          .map((o) => ({
+            label: String(o.label ?? o.value).slice(0, 200),
+            ...(o.description ? { description: String(o.description).slice(0, 300) } : {}),
+          })),
+      }));
+    if (questions.length === 0) {
+      return { action: "cancel", reason: "malformed user input request (no usable questions)" };
+    }
+    const timeoutMs = Math.max(1000, Number(process.env.ZCODE_AGENT_PERM_TIMEOUT_MS || 600_000));
+    return new Promise((resolve) => {
+      const record = {
+        sessionId: String(params?.sessionId || ""),
+        resolve,
+        timer: null,
+        createdAt: Date.now(),
+      };
+      record.timer = setTimeout(
+        () => this.settleUserInput(requestId, { action: "cancel", reason: "user input request timed out waiting for the web UI" }, "timeout"),
+        timeoutMs,
+      );
+      record.timer.unref?.();
+      this.pendingUserInputs.set(requestId, record);
+      const event = {
+        requestId,
+        sessionId: record.sessionId,
+        turnId: params?.turnId ?? null,
+        toolCallId: String(params?.toolCallId || ""),
+        toolName: String(params?.toolName || ""),
+        prompt: String(params?.prompt || "").slice(0, 1000),
+        questions,
+        timeoutMs,
+        createdAt: record.createdAt,
+      };
+      for (const listener of this.listeners) {
+        try {
+          listener({ method: "__userinput_request", params: event });
+        } catch { /* subscriber errors must not break routing */ }
+      }
+    });
+  }
+
+  /** The web UI's answer: accept carries answers keyed by question text
+   *  (multi-select joins labels with ", " — free-form "Other" text wins). */
+  resolveUserInput(requestId, action, answers) {
+    const record = this.pendingUserInputs.get(String(requestId));
+    if (!record) return null;
+    const normalized = String(action || "");
+    if (normalized === "accept") {
+      const clean = {};
+      if (answers && typeof answers === "object" && !Array.isArray(answers)) {
+        for (const [k, v] of Object.entries(answers)) {
+          const value = String(v ?? "").trim();
+          if (k && value) clean[String(k).slice(0, 500)] = value.slice(0, 2000);
+        }
+      }
+      if (Object.keys(clean).length === 0) return false; // an accept with no answers is meaningless
+      this.settleUserInput(String(requestId), { action: "accept", content: { answers: clean } }, "user");
+      return { action: "accept", answers: clean };
+    }
+    if (normalized === "decline" || normalized === "cancel") {
+      this.settleUserInput(String(requestId), { action: normalized }, "user");
+      return { action: normalized };
+    }
+    return false; // unknown action
+  }
+
+  settleUserInput(requestId, response, via) {
+    const record = this.pendingUserInputs.get(String(requestId));
+    if (!record) return false;
+    clearTimeout(record.timer);
+    this.pendingUserInputs.delete(String(requestId));
+    try {
+      record.resolve(response);
+    } catch { /* settling must never throw into the RPC layer */ }
+    for (const listener of this.listeners) {
+      try {
+        listener({
+          method: "__userinput_resolved",
+          params: {
+            requestId: String(requestId),
+            sessionId: record.sessionId,
+            action: String(response?.action || ""),
+            ...(response?.content?.answers ? { answers: response.content.answers } : {}),
+            via,
+          },
+        });
+      } catch { /* subscriber errors must not break routing */ }
+    }
+    return true;
+  }
+
+  /** Deny/cancel-settle every held interaction for a session at once —
+   *  turn end makes ALL of them dead (the CLI aborts pending RPCs). */
+  sweepInteractions(sessionId, via) {
+    const sid = String(sessionId || "");
+    for (const requestId of [...this.pendingPermissions.keys()]) {
+      const record = this.pendingPermissions.get(requestId);
+      if (record && (!sid || record.sessionId === sid)) {
+        this.settlePermission(requestId, { decision: "deny", reason: `permission request closed (${via})` }, via);
+      }
+    }
+    for (const requestId of [...this.pendingUserInputs.keys()]) {
+      const record = this.pendingUserInputs.get(requestId);
+      if (record && (!sid || record.sessionId === sid)) {
+        this.settleUserInput(requestId, { action: "cancel", reason: `user input request closed (${via})` }, via);
+      }
+    }
+  }
+
+  sweepAllInteractions(via) {
+    this.sweepInteractions("", via);
   }
 
   /** Wait for storage/registry startup, then create-or-resume a session.

@@ -486,16 +486,19 @@ export class JobManager {
         }
         return;
       }
-      if (n.method === "__permission_request" || n.method === "__permission_resolved") {
-        // held permission lifecycle from the host — surfaced as ordinary
-        // stream lines (type permission.request / permission.resolved) so
-        // replay and live viewers see the same card state
+      if (n.method === "__permission_request" || n.method === "__permission_resolved"
+        || n.method === "__userinput_request" || n.method === "__userinput_resolved") {
+        // held interaction lifecycle from the host — surfaced as ordinary
+        // stream lines so replay and live viewers see the same card state
         const p = n.params || {};
         if (p.sessionId && job.sessionId && p.sessionId !== job.sessionId) return;
+        const isPerm = n.method.startsWith("__permission");
         record({
           kind: "line",
           line: {
-            type: n.method === "__permission_request" ? "permission.request" : "permission.resolved",
+            type: isPerm
+              ? (n.method === "__permission_request" ? "permission.request" : "permission.resolved")
+              : (n.method === "__userinput_request" ? "userinput.request" : "userinput.resolved"),
             sessionId: p.sessionId || job.sessionId || null,
             payload: p,
           },
@@ -558,9 +561,9 @@ export class JobManager {
       }
       if (ev.type === "turn.completed" || ev.type === "turn.failed") {
         // per-session send lock means the terminal turn event arriving while
-        // this job is active IS this job's turn; any permission still held
+        // this job is active IS this job's turn; any interaction still held
         // for it is dead on the CLI side (late answers are ignored there)
-        host?.sweepPermissions?.(job.sessionId, "turn ended");
+        host?.sweepInteractions?.(job.sessionId, "turn ended");
         job.resultType = ev.payload?.resultType ?? null;
         if (job.status === "stopping" || ev.payload?.resultType === "cancelled") {
           // stopping → cancelled; a completed turn after a stop request is
@@ -581,9 +584,9 @@ export class JobManager {
       // native stop, then a bounded wait; a wedged agent must not hold the
       // job addressable forever (the host itself is reaped independently)
       host?.stop(job.sessionId).catch(() => {});
-      // the stop aborts the CLI-side RPC too — held permissions for this
+      // the stop aborts the CLI-side RPCs too — held interactions for this
       // session will never be consumed
-      host?.sweepPermissions?.(job.sessionId, "job timeout");
+      host?.sweepInteractions?.(job.sessionId, "job timeout");
       setTimeout(() => {
         if (!settled && !TERMINAL.has(job.status)) finishAgent("timeout waiting for turn to settle after session/stop");
       }, 8000).unref();
@@ -712,6 +715,35 @@ export class JobManager {
       return resolved;
     }
     throw Object.assign(new Error(`no pending permission request ${id}`), { status: 404, code: "PERMISSION_NOT_FOUND" });
+  }
+
+  /** Answer a held AskUserQuestion escalation from the web UI (agent
+   *  engine). accept carries answers keyed by question text; the host
+   *  forwards them as the wire content the CLI feeds back into the tool. */
+  async resolveUserInput({ sessionId, requestId, action, answers }) {
+    if (!this.agentHosts) {
+      throw Object.assign(new Error("user input UI requires the agent engine"), { status: 501, code: "ENGINE_UNSUPPORTED" });
+    }
+    const id = String(requestId || "");
+    const act = String(action || "");
+    if (act !== "accept" && act !== "decline" && act !== "cancel") {
+      throw Object.assign(new Error("action must be accept, decline, or cancel"), { status: 400, code: "BAD_REQUEST" });
+    }
+    const candidates = [];
+    const active = this.bySession.get(sessionId);
+    if (active?.agent?.host) candidates.push(active.agent.host);
+    for (const host of this.agentHosts.hosts.values()) {
+      if (!candidates.includes(host)) candidates.push(host);
+    }
+    for (const host of candidates) {
+      if (!host.pendingUserInputs?.has(id)) continue;
+      const resolved = host.resolveUserInput(id, act, answers);
+      if (!resolved) {
+        throw Object.assign(new Error("an accepted answer needs at least one non-empty answer"), { status: 400, code: "BAD_USER_INPUT" });
+      }
+      return resolved;
+    }
+    throw Object.assign(new Error(`no pending user input request ${id}`), { status: 404, code: "USER_INPUT_NOT_FOUND" });
   }
 
   /** Read-only dynamic-workflow faces (agent engine only): runs list,

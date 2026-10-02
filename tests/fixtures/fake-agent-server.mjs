@@ -41,6 +41,34 @@ let pendingPermCounter = 0;
 // frameId -> { sessionId, toolName }: emitted permission requests whose
 // answers the current turn is waiting on
 const pendingPermAnswers = new Map();
+// frameId -> { sessionId }: emitted user-input requests awaiting answers
+// (separate from permAnswerIds so the two response-frame branches cannot
+// swallow each other's frames)
+const pendingInputAnswers = new Map();
+// real-shape AskUserQuestion escalation (wire questions: value = label)
+const inputRequestOpts = {
+  prompt: "A couple of questions before I proceed",
+  questions: [
+    {
+      question: "Which region should the probe target?",
+      header: "Region",
+      multiSelect: false,
+      options: [
+        { value: "us-east", label: "us-east", description: "the primary region" },
+        { value: "eu-west", label: "eu-west", description: "the fallback region" },
+      ],
+    },
+    {
+      question: "Which reports should run?",
+      header: "Reports",
+      multiSelect: true,
+      options: [
+        { value: "summary", label: "summary" },
+        { value: "latency", label: "latency" },
+      ],
+    },
+  ],
+};
 const bashPermOpts = {
   risk: "high",
   input: { command: "npm test", args: ["--quiet"] },
@@ -59,6 +87,21 @@ const finishPermTurn = (sessionId) => {
   s.turnActive = false;
   sessionEvent(sessionId, "model.streaming", { assistantMessageId: "m1", delta: "", done: true, kind: "finish" });
   sessionEvent(sessionId, "turn.completed", { response: `perm:${s.lastPermDecision}`, usage: { totalTokens: 10 }, toolCallCount: 0, resultType: "success" });
+};
+
+/** Complete an awaitInput turn once its user-input answer landed; the
+ *  action + answers are embedded in the response for end-to-end asserts. */
+const finishInputTurn = (sessionId) => {
+  const s = sessions.get(sessionId);
+  if (!s || !s.turnActive || !s.awaitInput) return;
+  s.turnActive = false;
+  sessionEvent(sessionId, "model.streaming", { assistantMessageId: "m1", delta: "", done: true, kind: "finish" });
+  sessionEvent(sessionId, "turn.completed", {
+    response: `input:${s.lastInputAction}:${JSON.stringify(s.lastInputAnswers || {})}`,
+    usage: { totalTokens: 10 },
+    toolCallCount: 0,
+    resultType: "success",
+  });
 };
 
 const sessionEvent = (sessionId, type, payload = {}) =>
@@ -136,6 +179,25 @@ const runTurn = (sessionId, content, sendParams) => {
   } else if (/perm-hold/.test(String(content))) {
     emitPerm("Bash", bashPermOpts);
     s.awaitPerms = true;
+  } else if (/input-hold/.test(String(content))) {
+    // real-shape interaction/requestUserInput; the turn waits for the
+    // answer like the real broker does
+    const id = 9000 + pendingPermCounter;
+    emit({
+      id,
+      method: "interaction/requestUserInput",
+      params: {
+        requestId: `perm_${id}`,
+        sessionId,
+        turnId: `turn_${id}`,
+        toolCallId: `call_${id}`,
+        toolName: "AskUserQuestion",
+        ...inputRequestOpts,
+      },
+    });
+    pendingInputAnswers.set(id, { sessionId });
+    pendingPermCounter += 1;
+    s.awaitInput = true;
   }
   // UI-compatible stream (same envelope/payload shapes the prompt engine's
   // stream-json and the protocol session events share)
@@ -153,7 +215,7 @@ const runTurn = (sessionId, content, sendParams) => {
     process.exit(1);
   }
   if (scenario === "plain" || isLevelScenario) {
-    if (s.awaitPerms) return; // the answer path finishes this turn
+    if (s.awaitPerms || s.awaitInput) return; // the answer path finishes this turn
     sessionEvent(sessionId, "model.streaming", { assistantMessageId: "m1", delta: `echo:${content}`, done: false, kind: "text_delta" });
     turnTimer = setTimeout(() => {
       s.turnActive = false;
@@ -361,6 +423,16 @@ process.stdin.on("data", (chunk) => {
               finishPermTurn(pending.sessionId);
             }
           }
+        }
+      } else if (frame.id !== undefined && pendingInputAnswers.has(frame.id)) {
+        const pending = pendingInputAnswers.get(frame.id);
+        pendingInputAnswers.delete(frame.id);
+        log({ method: "__inputAnswer", params: frame.result || {} });
+        const s = sessions.get(pending.sessionId);
+        if (s) {
+          s.lastInputAction = String(frame.result?.action || "cancel");
+          s.lastInputAnswers = frame.result?.content?.answers || {};
+          finishInputTurn(pending.sessionId);
         }
       }
       continue;

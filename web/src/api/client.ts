@@ -240,6 +240,32 @@ export type PermissionResolvedLine = {
   via: string;
 };
 
+/** One question of a held AskUserQuestion escalation (wire options carry
+ *  value = label; the browser only needs the display fields). */
+export type UserInputQuestion = {
+  question: string;
+  header: string;
+  multiSelect: boolean;
+  options: Array<{ label: string; description?: string }>;
+};
+
+export type UserInputRequestLine = {
+  requestId: string;
+  sessionId: string;
+  toolCallId: string;
+  toolName: string;
+  prompt: string;
+  questions: UserInputQuestion[];
+  createdAt: number;
+};
+
+export type UserInputResolvedLine = {
+  requestId: string;
+  action: string;
+  answers?: Record<string, string>;
+  via: string;
+};
+
 export type GitHubCapability = { enabled: boolean; tokenPresent: boolean; apiHost: string; allowlist: string[] };
 export type GitHubIssue = {
   number: number;
@@ -367,6 +393,14 @@ export class ApiClient {
     return this.request<{ ok: boolean; decision: string }>(
       `/api/sessions/${encodeURIComponent(sessionId)}/permissions/${encodeURIComponent(requestId)}`,
       { method: "POST", body: JSON.stringify({ optionId }) },
+    );
+  }
+  /** Answer a held AskUserQuestion escalation: accept carries answers keyed
+   *  by question text; decline/cancel close it without answers. */
+  resolveSessionUserInput(sessionId: string, requestId: string, action: "accept" | "decline" | "cancel", answers?: Record<string, string>) {
+    return this.request<{ ok: boolean; action: string }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/user-input/${encodeURIComponent(requestId)}`,
+      { method: "POST", body: JSON.stringify({ action, ...(answers ? { answers } : {}) }) },
     );
   }
   workflowRuns(sessionId: string) {
